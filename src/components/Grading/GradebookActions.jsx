@@ -33,6 +33,7 @@ export default function GradebookActions({
   onExportXlsx,
   onPrintReport,
   disabled = false,
+  onValidateFinalize,
 }) {
   const userRole = auth.role();
   const canEdit = userRole === 'teacher';
@@ -79,11 +80,14 @@ export default function GradebookActions({
             <button
               type="button"
               className="btn btn-success action-primary-workflow"
-              onClick={() => openActionDialog('finalize')}
+              onClick={() => {
+                if (onValidateFinalize && !onValidateFinalize()) return;
+                openActionDialog('finalize');
+              }}
               disabled={disabled || isSaving}
               title="Finalize grades (computes official quarterly ratings)"
             >
-              <span className="font-bold">Finalize & Compute</span>
+              <span className="font-bold">FINALIZE</span>
             </button>
           )}
 
@@ -97,7 +101,7 @@ export default function GradebookActions({
                 disabled={disabled || isSaving}
                 title={isDirty ? 'Save pending changes to database' : 'All changes saved'}
               >
-                <span>{isSaving ? 'Saving...' : isDirty ? 'Save Draft *' : 'Save Draft'}</span>
+                <span>{isSaving ? 'Saving...' : 'Save Draft'}</span>
               </button>
 
               <button
@@ -154,12 +158,16 @@ export default function GradebookActions({
           <button type="button" className="btn btn-secondary" onClick={onToggleValidation} title="Run pre-flight validation checklist">
             <span>Validation</span>
           </button>
-          <button type="button" className="btn btn-secondary" onClick={onExportXlsx} title="Download Excel spreadsheet (XLSX)">
+          <button 
+            type="button" 
+            className="btn btn-secondary" 
+            onClick={onExportXlsx} 
+            disabled={!isFinalized && !isLocked}
+            title={(!isFinalized && !isLocked) ? "Gradebook must be Finalized before exporting" : "Download Excel spreadsheet (XLSX)"}
+          >
             <span>Export XLSX</span>
           </button>
-          <button type="button" className="btn btn-secondary" onClick={onPrintReport} title="Open printable summary report">
-            <span>Print Summary</span>
-          </button>
+
           <button type="button" className="btn btn-secondary" onClick={onOpenAudit} title="View full audit log of all changes">
             <span>Audit Log</span>
           </button>

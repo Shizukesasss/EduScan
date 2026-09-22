@@ -9,7 +9,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
       items: c.items ? [...c.items] : [],
     }))
   );
-  const [changeReason, setChangeReason] = useState('');
+  const [confirmChanges, setConfirmChanges] = useState(false);
   const [expanded, setExpanded] = useState(() =>
     components.reduce((acc, c, idx) => ({ ...acc, [idx]: true }), {})
   );
@@ -37,7 +37,10 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
         name: `Component ${prev.length + 1}`,
         component_type: 'Written Work',
         weight: 0,
-        items: [{ label: 'Activity 1', max_score: 20 }],
+        items: Array.from({ length: 5 }, (_, i) => ({
+          label: `Activity ${i + 1}`,
+          max_score: 20,
+        })),
       },
     ]);
     setExpanded((prev) => ({ ...prev, [compList.length]: true }));
@@ -110,11 +113,11 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
         }
       }
     }
-    if (!changeReason.trim() || changeReason.trim().length < 8) {
-      showError('Please provide a specific change reason (at least 8 characters) for audit trail.');
+    if (!confirmChanges) {
+      showError('Please confirm the component changes for the audit trail.');
       return;
     }
-    onSave(compList, changeReason.trim());
+    onSave(compList, 'Component structures and weights updated by teacher');
   };
 
   return (
@@ -315,16 +318,17 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
           )}
 
           {!disabled && (
-            <div className="change-reason-box">
-              <label>
-                <span className="field-label">Reason for Component Changes (required for audit)</span>
+            <div className="change-reason-box" style={{ padding: '12px', background: '#f8fafc', borderRadius: '6px', border: '1px solid #e2e8f0', marginTop: '16px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', margin: 0 }}>
                 <input
-                  type="text"
-                  className="input-field"
-                  value={changeReason}
-                  onChange={(e) => setChangeReason(e.target.value)}
-                  placeholder="e.g. Added Quiz 3 and updated Performance Task weights per DepEd memo"
+                  type="checkbox"
+                  checked={confirmChanges}
+                  onChange={(e) => setConfirmChanges(e.target.checked)}
+                  style={{ width: '16px', height: '16px', cursor: 'pointer' }}
                 />
+                <span className="field-label" style={{ margin: 0, fontWeight: 600, color: '#334155' }}>
+                  I confirm these component changes are correct and authorize the audit trail log.
+                </span>
               </label>
             </div>
           )}
@@ -338,7 +342,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
             <button
               type="button"
               className="btn btn-primary"
-              disabled={!isWeightValid || !changeReason.trim()}
+              disabled={!isWeightValid || !confirmChanges}
               onClick={handleSave}
             >
               <CheckCircle size={16} /> Save Changes

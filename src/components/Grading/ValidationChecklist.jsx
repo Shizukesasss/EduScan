@@ -26,7 +26,6 @@ export default function ValidationChecklist({
         ? 'Weights sum to exactly 100% across all components.'
         : `Current total is ${totalWeight.toFixed(1)}%. Weights must equal 100.0%.`,
       status: isWeightValid ? 'pass' : 'error',
-      action: onOpenConfig ? { label: 'Adjust Weights', onClick: onOpenConfig } : null,
     },
     {
       id: 'items',
@@ -37,7 +36,6 @@ export default function ValidationChecklist({
         ? `Component(s) without items: ${emptyComponents.map((c) => c.name).join(', ')}.`
         : 'No components defined for this gradebook.',
       status: hasItemsInAllComponents ? 'pass' : 'error',
-      action: onOpenConfig ? { label: 'Add Items', onClick: onOpenConfig } : null,
     },
     {
       id: 'scores',

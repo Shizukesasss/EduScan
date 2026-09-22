@@ -1221,7 +1221,7 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
     sections = db.scalars(select(SchoolSection).order_by(
         SchoolSection.grade_level_id, SchoolSection.name)).all()
     subjects = db.scalars(select(Subject).order_by(Subject.name)).all()
-    if user.role == "teacher" and context != "grading":
+    if user.role == "teacher":
         allowed_sections = adviser_sections(db, user)
         allowed_section_ids = {item.id for item in allowed_sections}
         allowed_grade_ids = {item.grade_level_id for item in allowed_sections}
@@ -1735,7 +1735,7 @@ def read_gradebook(class_key: str, grade: str = "", section: str = "", db: Sessi
 
 @app.put("/api/gradebook/{class_key}")
 def save_gradebook(class_key: str, payload: GradebookPayload, db: Session = Depends(get_db),
-                   user: User = Depends(require_roles("admin", "teacher"))) -> dict:
+                   user: User = Depends(require_roles("teacher"))) -> dict:
     if payload.class_key != class_key:
         raise HTTPException(
             status_code=422, detail="Class key does not match URL")
@@ -2180,7 +2180,7 @@ def update_components_endpoint(
     gradebook_id: int,
     payload: GradebookComponentsUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("admin", "teacher")),
+    user: User = Depends(require_roles("teacher")),
 ):
     book = db.get(Gradebook, gradebook_id)
     if not book:
@@ -2199,7 +2199,7 @@ def save_scores_endpoint(
     gradebook_id: int,
     payload: GradebookScoresUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("admin", "teacher")),
+    user: User = Depends(require_roles("teacher")),
 ):
     book = db.get(Gradebook, gradebook_id)
     if not book:
@@ -2271,7 +2271,7 @@ def submit_gradebook_endpoint(
     gradebook_id: int,
     payload: GradebookWorkflowPayload,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("admin", "teacher")),
+    user: User = Depends(require_roles("teacher")),
 ):
     book = db.get(Gradebook, gradebook_id)
     if not book:
@@ -2488,13 +2488,16 @@ def delete_adjustment_endpoint(
 @app.get("/api/gradebooks/{gradebook_id}/report.xlsx")
 def gradebook_report_xlsx_new(
     gradebook_id: int,
+    region: str = "",
+    division: str = "",
+    school_id: str = "",
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("admin", "teacher", "records_officer")),
 ):
     book = db.get(Gradebook, gradebook_id)
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
-    path = generate_gradebook_report_xlsx(db, book.id)
+    path = generate_gradebook_report_xlsx(db, book.id, region=region, division=division, school_id=school_id)
     report = register_report(db, path, "Grading Summary", {
         "gradebook_id": book.id, "grade": book.grade_name, "section": book.section_name,
         "school_year": book.school_year_name, "quarter": book.quarter, "subject": book.subject_name,

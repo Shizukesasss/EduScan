@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { api, auth } from '../../api/client';
-import GradebookContext from '../../components/Grading/GradebookContext';
+
 import GradebookSummary from '../../components/Grading/GradebookSummary';
 import GradebookActions from '../../components/Grading/GradebookActions';
 import GradingSheet from '../../components/Grading/GradingSheet';
@@ -41,6 +41,11 @@ export default function Grading() {
   const [statusEdits, setStatusEdits] = useState({});
   const [isDirty, setIsDirty] = useState(false);
 
+  // Form states for export templates
+  const [region, setRegion] = useState('V');
+  const [division, setDivision] = useState('V');
+  const [schoolId, setSchoolId] = useState('301874');
+
   // Modal / drawer states
   const [showConfig, setShowConfig] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
@@ -75,7 +80,8 @@ export default function Grading() {
 
   // Load specific gradebook adjustments count for teachers
   const loadTeacherAdjustmentCount = useCallback(() => {
-    if (auth.role() === 'teacher' && gradebookId) {
+    const currentRole = String(auth.role()).toLowerCase();
+    if (currentRole === 'teacher' && gradebookId) {
       api.get(`/gradebooks/${gradebookId}/adjustments`)
         .then(data => {
           setTeacherAdjustmentCount(data.length);
@@ -148,12 +154,15 @@ export default function Grading() {
     const period = (structure.grading_periods || []).find(
       (p) => p.school_year_id === Number(schoolYearId) && p.quarter === Number(quarter)
     );
-    return period ? period.id : (structure.grading_periods?.[0]?.id || 1);
+    return period ? period.id : null;
   }, [structure.grading_periods, schoolYearId, quarter]);
 
   // 2. Fetch or Create Gradebook
   const loadGradebook = useCallback(async () => {
-    if (!schoolYearId || !gradeId || !sectionId || !subjectId) return;
+    if (!schoolYearId || !gradeId || !sectionId || !subjectId || !gradingPeriodId) {
+      setFullGradebook(null);
+      return;
+    }
 
     setLoading(true);
     setScoreEdits({});
@@ -342,6 +351,96 @@ export default function Grading() {
     }
   };
 
+  const validateHeaderFields = () => {
+    const missingFields = [];
+    if (!region.trim()) missingFields.push('REGION');
+    if (!division.trim()) missingFields.push('DIVISION');
+    if (!schoolId.trim()) missingFields.push('SCHOOL ID');
+
+    if (missingFields.length > 0) {
+      showError(`Please complete the following fields: ${missingFields.join(', ')}`);
+      return false;
+    }
+
+    const romanRegex = /^[IVXLCDM\s\-]+$/i;
+
+    if (!romanRegex.test(region.trim())) {
+      showError('REGION must use ONLY Roman Numerals (e.g., I, II, IV, IV-A).');
+      return false;
+    }
+
+    if (!romanRegex.test(division.trim())) {
+      showError('DIVISION must use ONLY Roman Numerals (e.g., I, II, IV).');
+      return false;
+    }
+
+    if (!/^\d+$/.test(schoolId.trim())) {
+      showError('SCHOOL ID must contain only numbers.');
+      return false;
+    }
+
+    return true;
+  };
+
+  const handleValidateFinalize = () => {
+    // 1. Validate required header fields
+    if (!validateHeaderFields()) {
+      return false;
+    }
+
+    // Determine active items
+    const activeItemIds = new Set();
+    for (const student of fullGradebook.students) {
+      const sId = String(student.person_id);
+      for (const comp of fullGradebook.components) {
+        for (const item of (comp.items || [])) {
+          const currentVal = scoreEdits[sId]?.[item.id] !== undefined 
+            ? scoreEdits[sId][item.id] 
+            : student.scores?.[item.id];
+          const currentStatus = statusEdits[sId]?.[item.id] !== undefined
+            ? statusEdits[sId][item.id]
+            : student.score_statuses?.[item.id];
+          
+          if (currentVal !== '' && currentVal !== null && currentVal !== undefined) {
+            activeItemIds.add(item.id);
+          } else if (currentStatus && currentStatus !== 'Missing') {
+            activeItemIds.add(item.id);
+          }
+        }
+      }
+    }
+
+    let hasMissing = false;
+    for (const student of fullGradebook.students) {
+      for (const comp of fullGradebook.components) {
+        for (const item of (comp.items || [])) {
+          if (!activeItemIds.has(item.id)) continue;
+          
+          const sId = String(student.person_id);
+          const currentVal = scoreEdits[sId]?.[item.id] !== undefined 
+            ? scoreEdits[sId][item.id] 
+            : student.scores?.[item.id];
+          const currentStatus = statusEdits[sId]?.[item.id] !== undefined
+            ? statusEdits[sId][item.id]
+            : student.score_statuses?.[item.id];
+          
+          if ((currentVal === undefined || currentVal === null || currentVal === '') && currentStatus !== 'Excused') {
+            hasMissing = true;
+            break;
+          }
+        }
+        if (hasMissing) break;
+      }
+      if (hasMissing) break;
+    }
+    
+    if (hasMissing) {
+      showError('Cannot finalize gradebook. There are missing activity grades. Please complete all scores for active activities.');
+      return false;
+    }
+    return true;
+  };
+
   const handleFinalizeGradebook = async (reason) => {
     if (!gradebookId) return;
     if (isDirty) {
@@ -431,10 +530,21 @@ export default function Grading() {
   // 9. Export & Print Handlers
   const handleExportXlsx = async () => {
     if (!gradebookId || !fullGradebook) return;
+    
+    // Validate required fields
+    if (!validateHeaderFields()) {
+      return;
+    }
+
     const gb = fullGradebook.gradebook;
     const filename = `Gradebook-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-Q${gb.quarter}.xlsx`;
     try {
-      await api.download(`/gradebooks/${gradebookId}/report.xlsx`, filename);
+      const q = new URLSearchParams({
+        region,
+        division,
+        school_id: schoolId
+      });
+      await api.download(`/gradebooks/${gradebookId}/report.xlsx?${q.toString()}`, filename);
     } catch (err) {
       showError(err.message);
     }
@@ -449,8 +559,9 @@ export default function Grading() {
     }
   };
 
-  const gb = fullGradebook?.gradebook;  // Teachers edit in Draft mode. Admins are read-only.
-  const isEditable = gb && gb.status === 'Draft' && auth.role() === 'teacher';
+  const gb = fullGradebook?.gradebook;  // Teachers and admins can both edit Draft gradebooks.
+  const currentRole = String(auth.role()).toLowerCase();
+  const isEditable = gb && gb.status === 'Draft' && currentRole === 'teacher';
 
   return (
     <div className="page-stack">
@@ -492,85 +603,6 @@ export default function Grading() {
 
       {(activeTab === 'gradebook' || activeTab === 'metrics') && (
         <>
-          {/* Academic Selector Bar */}
-          <section className="card-static compact-settings-card mt-2">
-            <div className="compact-settings-grid">
-              <label className="compact-setting-item">
-                <span className="compact-label">School Year</span>
-                <select
-                  className="compact-select"
-                  value={schoolYearId}
-                  onChange={(e) => setSchoolYearId(Number(e.target.value))}
-                >
-                  {sortedSchoolYears.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="compact-setting-item">
-                <span className="compact-label">Quarter</span>
-                <select
-                  className="compact-select"
-                  value={quarter}
-                  onChange={(e) => setQuarter(Number(e.target.value))}
-                >
-                  {[1, 2, 3, 4].map((q) => (
-                    <option key={q} value={q}>
-                      Quarter {q}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="compact-setting-item">
-                <span className="compact-label">Grade Level</span>
-                <select
-                  className="compact-select"
-                  value={gradeId}
-                  onChange={(e) => setGradeId(Number(e.target.value))}
-                >
-                  {sortedGradeLevels.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      Grade {item.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="compact-setting-item">
-                <span className="compact-label">Section</span>
-                <select
-                  className="compact-select"
-                  value={sectionId}
-                  onChange={(e) => setSectionId(Number(e.target.value))}
-                >
-                  {availableSections.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="compact-setting-item">
-                <span className="compact-label">Subject</span>
-                <select
-                  className="compact-select"
-                  value={subjectId}
-                  onChange={(e) => setSubjectId(Number(e.target.value))}
-                >
-                  {sortedSubjects.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          </section>
 
           {/* Loading indicator */}
           {loading && (
@@ -583,11 +615,6 @@ export default function Grading() {
           {/* Main Gradebook Workspace */}
           {!loading && fullGradebook && (
             <>
-              {/* Header Context Card */}
-              <GradebookContext
-                gradebook={fullGradebook.gradebook}
-                policyName={fullGradebook.gradebook?.policy_name}
-              />
 
               {activeTab === 'metrics' && (
                 <GradebookSummary
@@ -612,6 +639,8 @@ export default function Grading() {
 
                   {/* Interactive Spreadsheet Sheet */}
                   <GradingSheet
+                    gradebook={fullGradebook.gradebook}
+                    isSeniorHigh={['11', '12'].includes(String(fullGradebook.gradebook?.grade_name))}
                     students={fullGradebook.students}
                     components={fullGradebook.components}
                     scores={scoreEdits}
@@ -622,6 +651,39 @@ export default function Grading() {
                     onScoreChange={handleScoreChange}
                     onStatusChange={handleStatusChange}
                     onStudentBreakdown={handleStudentBreakdown}
+                    region={region}
+                    setRegion={setRegion}
+                    division={division}
+                    setDivision={setDivision}
+                    schoolId={schoolId}
+                    setSchoolId={setSchoolId}
+                    selectors={{
+                      schoolYear: (
+                        <select className="deped-header-select" value={schoolYearId} onChange={(e) => setSchoolYearId(Number(e.target.value))}>
+                          {sortedSchoolYears.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                        </select>
+                      ),
+                      quarter: (
+                        <select className="deped-header-select" value={quarter} onChange={(e) => setQuarter(Number(e.target.value))}>
+                          {[1, 2, 3, 4].map((q) => <option key={q} value={q}>QUARTER {q}</option>)}
+                        </select>
+                      ),
+                      grade: (
+                        <select className="deped-header-select" value={gradeId} onChange={(e) => setGradeId(Number(e.target.value))}>
+                          {sortedGradeLevels.map((item) => <option key={item.id} value={item.id}>Grade {item.name}</option>)}
+                        </select>
+                      ),
+                      section: (
+                        <select className="deped-header-select" value={sectionId} onChange={(e) => setSectionId(Number(e.target.value))}>
+                          {availableSections.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                        </select>
+                      ),
+                      subject: (
+                        <select className="deped-header-select" value={subjectId} onChange={(e) => setSubjectId(Number(e.target.value))}>
+                          {sortedSubjects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                        </select>
+                      ),
+                    }}
                   />
 
                   {/* Action Toolbar */}
@@ -642,6 +704,7 @@ export default function Grading() {
                     onExportXlsx={handleExportXlsx}
                     onPrintReport={handlePrintReport}
                     disabled={loading || saving}
+                    onValidateFinalize={handleValidateFinalize}
                   />
                 </>
               )}

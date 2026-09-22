@@ -668,6 +668,7 @@ button:disabled {
 
 .table-scroll {
   overflow-x: auto;
+  min-height: 230px;
 }
 
 .empty-cell {
@@ -767,6 +768,14 @@ button:disabled {
 
 .table-action-menu .action-menu-panel {
   min-width: 190px;
+}
+
+/* Fix dropdown clipping in tables: open upwards for the last two rows */
+.interactive-table tbody tr:nth-last-child(1) .action-menu-panel,
+.interactive-table tbody tr:nth-last-child(2) .action-menu-panel {
+  top: auto;
+  bottom: calc(100% + 7px);
+  box-shadow: 0 -18px 45px rgba(15, 23, 42, .18); /* Reverse shadow */
 }
 
 .duplicate-warning {

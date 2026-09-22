@@ -105,6 +105,9 @@ def calculate_component_percentage(
     """Calculate the percentage score for a single assessment component.
 
     Uses the total-score / total-possible method (DepEd standard).
+    Partial grading is supported: computation is done using only the
+    items that have been graded so far.  'complete' reflects whether
+    every item has been scored (used for status labelling only).
 
     Args:
         scores: list of {"item_id": int, "score": float|None, "status": str}
@@ -113,7 +116,7 @@ def calculate_component_percentage(
     Returns:
         {
             "total_earned": float,
-            "total_possible": float,
+            "total_possible": float,  # only the scored items' max
             "percentage": float|None,
             "complete": bool,
             "scored_count": int,
@@ -122,7 +125,7 @@ def calculate_component_percentage(
     """
     score_map = {s["item_id"]: s for s in scores}
     total_earned = 0.0
-    total_possible = 0.0
+    total_possible = 0.0  # sum of max_score for scored items only
     scored_count = 0
     complete = True
 
@@ -149,6 +152,7 @@ def calculate_component_percentage(
             "item_count": len(items),
         }
 
+    # Percentage is computed from the graded items only
     percentage = (total_earned / total_possible) * 100.0
 
     return {
@@ -171,6 +175,14 @@ def calculate_weighted_grade(
     rounding_method: str = "half_up",
 ) -> dict:
     """Calculate the initial grade from component percentages and weights.
+
+    Partial grading is supported: components that have at least one scored
+    item (percentage is not None) contribute to the initial grade.  The
+    weights of active components are re-normalised to always sum to 100%
+    so that a gradebook with 2 out of 3 components partially filled still
+    yields a meaningful grade.  When ALL items in ALL components are scored
+    the normalisation factor is 1 and the result is identical to the original
+    full-completion formula.
 
     Args:
         component_results: list of {
@@ -196,24 +208,56 @@ def calculate_weighted_grade(
     """
     all_complete = True
     component_grades = []
+
+    # Separate components with a computed percentage from empty ones
+    active_results = [r for r in component_results if r.get("percentage") is not None]
+    inactive_results = [r for r in component_results if r.get("percentage") is None]
+
+    # Check overall completeness
+    for result in component_results:
+        if result.get("percentage") is None or not result.get("complete", False):
+            all_complete = False
+
+    if not active_results:
+        # Nothing scored at all
+        for result in component_results:
+            component_grades.append({
+                "name": result.get("name", ""),
+                "percentage": None,
+                "weight": float(result.get("weight", 0)),
+                "weighted_score": None,
+            })
+        return {
+            "initial_grade": None,
+            "complete": False,
+            "component_grades": component_grades,
+        }
+
+    # Re-normalise weights: active components' weights sum → their proportion of 100%
+    total_active_weight = sum(float(r.get("weight", 0)) for r in active_results)
+    total_all_weight = sum(float(r.get("weight", 0)) for r in component_results)
+    # Only re-normalise when some components are inactive
+    need_normalise = len(inactive_results) > 0 and total_active_weight > 0
+    normalisation_factor = (total_all_weight / total_active_weight) if need_normalise else 1.0
+
     initial_grade = 0.0
+    active_set = {id(r) for r in active_results}
 
     for result in component_results:
         pct = result.get("percentage")
         weight = float(result.get("weight", 0))
-        is_complete = result.get("complete", False)
+        effective_weight = weight * normalisation_factor if id(result) in active_set else weight
 
-        if pct is None or not is_complete:
-            all_complete = False
+        if pct is None:
             component_grades.append({
                 "name": result.get("name", ""),
-                "percentage": pct,
+                "percentage": None,
                 "weight": weight,
                 "weighted_score": None,
             })
             continue
 
-        weighted = pct * (weight / 100.0)
+        weighted = pct * (effective_weight / 100.0)
         initial_grade += weighted
         component_grades.append({
             "name": result.get("name", ""),
@@ -223,7 +267,7 @@ def calculate_weighted_grade(
         })
 
     return {
-        "initial_grade": round_value(initial_grade, rounding_decimal_places, rounding_method) if all_complete else None,
+        "initial_grade": round_value(initial_grade, rounding_decimal_places, rounding_method),
         "complete": all_complete,
         "component_grades": component_grades,
     }

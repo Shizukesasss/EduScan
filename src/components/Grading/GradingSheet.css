@@ -1,0 +1,620 @@
+/* ============================================================
+   DepEd Class Record — Scoped Styles
+   Matches: DO #8 s.2015 official Class Record format
+   ============================================================ */
+
+/* ── Container ───────────────────────────────────────────── */
+.deped-class-record {
+  background: #fff;
+  border: 1px solid #c0cce0;
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 16px;
+  box-shadow: 0 2px 12px rgba(26, 58, 108, 0.10);
+  font-family: 'Arial', 'Calibri', ui-sans-serif, sans-serif;
+}
+
+/* ── Header Block ────────────────────────────────────────── */
+.deped-header-block {
+  background: #ffffff;
+  border-bottom: 3px solid #1a3a6c;
+  padding: 14px 18px 10px;
+}
+
+.deped-header-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.deped-seal {
+  flex-shrink: 0;
+  width: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.deped-seal-ring {
+  width: 54px;
+  height: 54px;
+  border: 3px solid #1a3a6c;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  background: radial-gradient(circle at 40% 35%, #e8eff9, #c8d8f0);
+  box-shadow: 0 2px 6px rgba(26,58,108,0.18);
+}
+
+.deped-header-center {
+  flex: 1;
+  text-align: center;
+}
+
+.deped-header-title {
+  font-size: 1.75rem;
+  font-weight: 900;
+  color: #1a3a6c;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1.1;
+}
+
+.deped-header-subtitle {
+  font-size: 0.68rem;
+  color: #666;
+  font-style: italic;
+  margin-top: 2px;
+}
+
+.deped-header-right {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  width: 90px;
+}
+
+.deped-deped-brand {
+  font-size: 1rem;
+  font-weight: 900;
+  color: #c0392b;
+  letter-spacing: 0.12em;
+}
+
+/* Status Badge */
+.deped-status-badge {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+.deped-status-draft    { background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; }
+.deped-status-submitted{ background: #eff6ff; color: #1d4ed8; border: 1px solid #93c5fd; }
+.deped-status-finalized{ background: #ecfdf5; color: #047857; border: 1px solid #6ee7b7; }
+.deped-status-locked   { background: #faf5ff; color: #7e22ce; border: 1px solid #d8b4fe; }
+
+/* Info Table (Region / School Name rows) */
+.deped-info-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  margin-bottom: 6px;
+  border: 1px solid #b8c8e0;
+}
+
+.deped-info-table th,
+.deped-info-table td {
+  padding: 4px 8px;
+  border: 1px solid #b8c8e0;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.deped-info-table th {
+  background: #dce8f5;
+  color: #1a3a6c;
+  font-weight: 700;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.deped-info-table td {
+  color: #222;
+  min-width: 80px;
+}
+
+/* Meta Table (Quarter / Grade / Teacher / Subject) */
+.deped-meta-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  border: 1px solid #b8c8e0;
+}
+
+/* Header Inputs */
+.deped-header-input {
+  border: 1px solid transparent;
+  background: transparent;
+  color: #222;
+  font-family: inherit;
+  font-size: 0.75rem;
+  padding: 2px 4px;
+  border-radius: 3px;
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.deped-header-input:focus,
+.deped-header-input:hover {
+  border-color: #8daacf;
+  background: #fff;
+}
+.deped-header-input::placeholder {
+  color: #99a;
+  font-style: italic;
+}
+
+/* Inline Selects */
+.deped-header-select {
+  border: 1px solid #b8c8e0;
+  background: transparent;
+  color: #222;
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 0 4px;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+  min-width: 100px;
+}
+.deped-header-select:focus {
+  border-color: #1a3a6c;
+  background: #fff;
+}
+.deped-meta-quarter .deped-header-select {
+  font-size: 0.8rem;
+  font-weight: 700;
+  background: transparent;
+  border: none;
+  color: #fff;
+  text-transform: uppercase;
+  min-width: 0;
+  cursor: pointer;
+}
+.deped-meta-quarter .deped-header-select option {
+  color: #222;
+  background: #fff;
+}
+.deped-meta-quarter .deped-header-select:hover {
+  background: rgba(255,255,255,0.4);
+}
+
+.deped-meta-table th,
+.deped-meta-table td {
+  padding: 5px 8px;
+  border: 1px solid #b8c8e0;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.deped-meta-table th {
+  background: #1a3a6c;
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.deped-meta-table td {
+  color: #111;
+  font-weight: 500;
+  background: #f5f8ff;
+  min-width: 80px;
+}
+
+.deped-meta-quarter {
+  background: #0f2850 !important;
+  font-size: 0.75rem !important;
+  letter-spacing: 0.06em !important;
+}
+
+/* ── Controls Bar ────────────────────────────────────────── */
+.deped-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  background: #eef3fb;
+  border-bottom: 1px solid #c0cce0;
+  flex-wrap: wrap;
+}
+
+.deped-search-box {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: #fff;
+  border: 1px solid #b8c8e0;
+  border-radius: 4px;
+  padding: 3px 8px;
+}
+
+.deped-search-icon { color: #7a90b0; flex-shrink: 0; }
+
+.deped-search-input {
+  border: none;
+  outline: none;
+  font-size: 0.78rem;
+  color: #222;
+  background: transparent;
+  width: 170px;
+}
+
+.deped-filter-group { display: flex; gap: 3px; align-items: center; }
+
+.deped-filter-pill {
+  padding: 2px 9px;
+  border: 1px solid #b8c8e0;
+  border-radius: 3px;
+  background: #fff;
+  font-size: 0.72rem;
+  cursor: pointer;
+  font-weight: 600;
+  color: #444;
+  transition: all 0.13s;
+}
+
+.deped-filter-pill:hover { background: #dce8f5; border-color: #1a3a6c; color: #1a3a6c; }
+
+.deped-filter-active { background: #1a3a6c !important; color: #fff !important; border-color: #1a3a6c !important; }
+
+.deped-sort-btn {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 9px;
+  border: 1px solid #b8c8e0;
+  border-radius: 3px;
+  background: #fff;
+  font-size: 0.72rem;
+  cursor: pointer;
+  color: #444;
+  margin-left: 4px;
+  font-weight: 600;
+  transition: all 0.13s;
+}
+
+.deped-sort-btn:hover { background: #dce8f5; }
+
+.deped-learner-count {
+  font-size: 0.72rem;
+  color: #5a6e88;
+  margin-left: auto;
+  font-weight: 500;
+}
+
+/* ── Table Scroll Container ──────────────────────────────── */
+.deped-table-scroll {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 65vh;
+  position: relative;
+}
+
+/* ── Main Spreadsheet Table ──────────────────────────────── */
+.deped-sheet-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  width: max-content;
+  min-width: 100%;
+  background: #fff;
+}
+
+.deped-sheet-table td,
+.deped-sheet-table th {
+  border: 1px solid #8daacf;
+  box-sizing: border-box;
+}
+
+/* ── Header Cells ────────────────────────────────────────── */
+.deped-th {
+  background: #1a3a6c;
+  color: #fff;
+  font-weight: 700;
+  text-align: center;
+  padding: 4px 5px;
+  font-size: 12px;
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.deped-tier-2 .deped-th { top: 30px; }
+
+.deped-th-comp-group {
+  background: #1a3a6c;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  padding: 5px 6px;
+}
+
+.deped-th-item {
+  background: #2e5594;
+  font-size: 12px;
+  font-weight: 700;
+  min-width: 36px;
+  padding: 3px 2px;
+}
+
+.deped-th-computed-label {
+  background: #3a6bc4;
+  font-size: 11px;
+  font-weight: 700;
+  min-width: 44px;
+}
+
+.deped-th-ws-label {
+  background: #2a5498;
+  font-size: 11px;
+  font-weight: 800;
+  min-width: 44px;
+}
+
+.deped-th-no {
+  min-width: 38px;
+  width: 38px;
+  font-size: 12px;
+  position: sticky !important;
+  top: 0;
+  left: 0;
+  z-index: 10 !important;
+}
+
+.deped-th-name {
+  min-width: 240px;
+  text-align: left;
+  padding-left: 8px;
+  position: sticky !important;
+  left: 38px;
+  z-index: 10 !important;
+}
+
+.deped-th-grade-col {
+  min-width: 58px;
+  background: #0f2850;
+  line-height: 1.25;
+}
+
+.deped-th-quarterly-col {
+  min-width: 66px;
+  background: #0f2850;
+  line-height: 1.25;
+}
+
+.deped-th-action-col {
+  min-width: 28px;
+  background: #0f2850;
+  font-size: 12px;
+}
+
+/* ── Sticky Column ───────────────────────────────────────── */
+.deped-sticky-col { position: sticky; z-index: 4; }
+th.deped-sticky-col { left: 38px; z-index: 10; background: #1a3a6c; }
+td.deped-sticky-col { left: 38px; }
+td.deped-cell-no    { position: sticky; left: 0; z-index: 3; }
+
+/* ── HPS Row ─────────────────────────────────────────────── */
+.deped-hps-row { background: #dce8f5; }
+
+.deped-hps-cell {
+  background: #dce8f5;
+  color: #1a3a6c;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  padding: 3px 4px;
+  border: 1px solid #8daacf;
+  position: sticky;
+  top: 59px;
+  z-index: 4;
+}
+
+.deped-hps-no {
+  position: sticky !important;
+  left: 0;
+  z-index: 6 !important;
+  text-align: center;
+  top: 59px;
+}
+
+.deped-hps-label {
+  text-align: left !important;
+  font-style: italic;
+  font-size: 11px;
+  position: sticky !important;
+  left: 38px;
+  z-index: 6 !important;
+  white-space: nowrap;
+  top: 59px;
+  background: #dce8f5 !important;
+}
+
+.deped-hps-ws { background: #c8daee; font-weight: 900; }
+
+/* ── Student Rows ────────────────────────────────────────── */
+.deped-row-even { background: #ffffff; }
+.deped-row-odd  { background: #f3f7fd; }
+.deped-student-row:hover { background: #e6f0fb !important; }
+
+.deped-row-even td.deped-cell-no,
+.deped-row-even td.deped-sticky-col { background: #ffffff; }
+
+.deped-row-odd td.deped-cell-no,
+.deped-row-odd td.deped-sticky-col { background: #f3f7fd; }
+
+.deped-student-row:hover td.deped-cell-no,
+.deped-student-row:hover td.deped-sticky-col { background: #e6f0fb !important; }
+
+/* ── Cell Styles ─────────────────────────────────────────── */
+.deped-cell {
+  padding: 2px 3px;
+  border: 1px solid #8daacf;
+  vertical-align: middle;
+  font-size: 13px;
+}
+
+.deped-cell-no {
+  text-align: center;
+  font-size: 12px;
+  color: #556;
+  min-width: 38px;
+  width: 38px;
+}
+
+.deped-cell-name {
+  min-width: 240px;
+  max-width: 280px;
+  font-weight: 600;
+  color: #111;
+  padding: 3px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.deped-cell-score { text-align: center; padding: 1px; min-width: 36px; }
+.deped-cell-error { background: #fff0f0 !important; border-color: #e74c3c !important; }
+
+.deped-cell-computed {
+  text-align: right;
+  padding: 2px 4px;
+  font-variant-numeric: tabular-nums;
+  color: #334;
+  min-width: 44px;
+  background: #eef3fb;
+  font-size: 13px;
+}
+
+.deped-cell-ws {
+  background: #dce8f5 !important;
+  font-weight: 700;
+  color: #1a3a6c;
+  border-left: 2px solid #8daacf !important;
+}
+
+.deped-cell-initial {
+  text-align: right;
+  padding: 2px 5px;
+  font-weight: 600;
+  min-width: 58px;
+  font-variant-numeric: tabular-nums;
+  background: #f0f4fb;
+  color: #223;
+  font-size: 13px;
+}
+
+.deped-cell-quarterly {
+  text-align: center;
+  font-size: 15px;
+  font-weight: 700;
+  min-width: 66px;
+  font-variant-numeric: tabular-nums;
+  background: #f5f8ff;
+}
+
+.deped-passing { background: #e8fdf0 !important; color: #14532d; }
+.deped-failing  { background: #fef0f0 !important; color: #991b1b; }
+.deped-cell-action { text-align: center; min-width: 28px; background: #f8faff; }
+
+/* ── Score Input ─────────────────────────────────────────── */
+.deped-score-input {
+  width: 100%;
+  min-width: 30px;
+  border: none;
+  outline: none;
+  text-align: center;
+  font-size: 13px;
+  font-family: 'Courier New', monospace;
+  background: transparent;
+  color: #111;
+  padding: 1px 0;
+  -moz-appearance: textfield;
+}
+
+.deped-score-input::-webkit-outer-spin-button,
+.deped-score-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+.deped-score-input:disabled { cursor: default; color: #333; }
+
+.deped-score-input:focus {
+  background: #fffde7;
+  outline: 2px solid #1a3a6c;
+  outline-offset: -1px;
+  border-radius: 1px;
+}
+
+.deped-input-error { background: #fee2e2 !important; color: #dc2626 !important; }
+
+.deped-excused-tag {
+  font-size: 10px;
+  color: #7c3aed;
+  text-align: center;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  line-height: 1;
+}
+
+/* ── Sex Divider Row ─────────────────────────────────────── */
+.deped-sex-row { background: #1e3a5f !important; }
+
+.deped-sex-label {
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 900;
+  color: #fff;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  border: 1px solid #1a3a6c !important;
+}
+
+/* ── Empty state ─────────────────────────────────────────── */
+.deped-empty-cell {
+  text-align: center;
+  padding: 24px;
+  color: #888;
+  font-style: italic;
+  font-size: 0.85rem;
+}
+
+/* ── Calculation Button ──────────────────────────────────── */
+.deped-calc-btn {
+  background: none;
+  border: 1px solid #8daacf;
+  border-radius: 3px;
+  padding: 2px 4px;
+  cursor: pointer;
+  color: #2e5594;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.13s;
+}
+
+.deped-calc-btn:hover { background: #1a3a6c; color: #fff; border-color: #1a3a6c; }

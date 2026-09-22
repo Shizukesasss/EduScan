@@ -180,15 +180,33 @@ def get_gradebook_full(db: Session, gradebook_id: int) -> dict | None:
     rounding_final_dp = policy.rounding_final_decimal_places if policy else 0
     rounding_method = policy.rounding_method if policy else "half_up"
 
+    # Determine active items: an item is active if at least one student has a non-empty score or explicit status.
+    active_item_ids = set()
+    for s_id, s_scores in scores_by_person.items():
+        for s in s_scores:
+            if s["score"] is not None or s["status"] != "Missing":
+                active_item_ids.add(s["item_id"])
+
     # Calculate grades for each student
     student_rows = []
     completed_grades = []
     for student in students:
         student_score_list = scores_by_person.get(student.id, [])
+        
+        filtered_items = {}
+        for comp_id, items in items_by_component.items():
+            filtered_items[comp_id] = [it for it in items if it["id"] in active_item_ids]
+            
+        filtered_components = []
+        for c in components_data:
+            c_copy = c.copy()
+            c_copy["items"] = [it for it in c_copy.get("items", []) if it["id"] in active_item_ids]
+            filtered_components.append(c_copy)
+
         calc = calculate_student_grade(
             student_scores=student_score_list,
-            components=components_data,
-            items_by_component=items_by_component,
+            components=filtered_components,
+            items_by_component=filtered_items,
             transmutation_table=trans_table,
             passing_grade=book.passing_grade,
             rounding_decimal_places=rounding_dp,
@@ -359,18 +377,6 @@ def create_or_get_gradebook(
     user: User,
     grading_policy_id: int | None = None,
 ) -> Gradebook:
-    book = db.scalar(
-        select(Gradebook).where(
-            Gradebook.school_year_id == school_year_id,
-            Gradebook.grading_period_id == grading_period_id,
-            Gradebook.grade_level_id == grade_level_id,
-            Gradebook.section_id == section_id,
-            Gradebook.subject_id == subject_id,
-        )
-    )
-    if book:
-        return book
-
     sy = db.get(SchoolYear, school_year_id)
     gp = db.get(GradingPeriod, grading_period_id)
     gl = db.get(GradeLevel, grade_level_id)
@@ -379,6 +385,48 @@ def create_or_get_gradebook(
 
     if not all([sy, gp, gl, sec, subj]):
         raise ValueError("Invalid academic structure references")
+
+    class_key = f"{sy.name}-q{gp.quarter}-{gl.name}-{sec.name}-{subj.name}".lower().replace(" ", "-")
+
+    book = db.scalars(
+        select(Gradebook).where(
+            (
+                (Gradebook.school_year_id == school_year_id) &
+                (Gradebook.grading_period_id == grading_period_id) &
+                (Gradebook.grade_level_id == grade_level_id) &
+                (Gradebook.section_id == section_id) &
+                (Gradebook.subject_id == subject_id)
+            ) | (Gradebook.class_key == class_key)
+        )
+    ).first()
+
+    if book:
+        # Update references if they changed (e.g. subject recreated)
+        book.school_year_id = school_year_id
+        book.grading_period_id = grading_period_id
+        book.grade_level_id = grade_level_id
+        book.section_id = section_id
+        book.subject_id = subject_id
+
+        # Sync teacher_name / teacher_user_id from the section's assigned adviser.
+        # This prevents a stale "System Administrator" name from appearing when an
+        # admin first opened the page and created the record, but the class is actually
+        # managed by the teacher linked as section adviser.
+        sec_for_sync = db.get(SchoolSection, section_id)
+        if sec_for_sync:
+            if sec_for_sync.adviser_user_id:
+                # Section has an explicit adviser account linked — always use that.
+                adviser = db.get(User, sec_for_sync.adviser_user_id)
+                if adviser:
+                    book.teacher_user_id = adviser.id
+                    book.teacher_name = adviser.full_name
+            elif user.role == "teacher":
+                # No explicit adviser link; use the currently logged-in teacher.
+                book.teacher_user_id = user.id
+                book.teacher_name = user.full_name
+            # If admin opened it and no adviser is assigned, leave as-is to avoid noise.
+        db.commit()
+        return book
 
     policy = None
     if grading_policy_id:
@@ -422,13 +470,15 @@ def create_or_get_gradebook(
             )
             db.add(comp)
             db.flush()
-            item = AssessmentItem(
-                component_id=comp.id,
-                label=f"{comp.name} 1",
-                max_score=20.0 if "Written" in comp.name else 50.0,
-                sequence=0,
-            )
-            db.add(item)
+            item_count = 1 if "Quarterly Assessment" in comp.name else 5
+            for i in range(item_count):
+                item = AssessmentItem(
+                    component_id=comp.id,
+                    label=f"{comp.name} {i + 1}" if item_count > 1 else comp.name,
+                    max_score=20.0 if "Written" in comp.name else 50.0,
+                    sequence=i,
+                )
+                db.add(item)
     else:
         default_defs = [
             ("Written Work", "Written Work", 30.0, 20.0),
@@ -445,13 +495,15 @@ def create_or_get_gradebook(
             )
             db.add(comp)
             db.flush()
-            item = AssessmentItem(
-                component_id=comp.id,
-                label=f"{cname} 1",
-                max_score=cmax,
-                sequence=0,
-            )
-            db.add(item)
+            item_count = 1 if cname == "Quarterly Assessment" else 5
+            for i in range(item_count):
+                item = AssessmentItem(
+                    component_id=comp.id,
+                    label=f"{cname} {i + 1}" if item_count > 1 else cname,
+                    max_score=cmax,
+                    sequence=i,
+                )
+                db.add(item)
 
     add_gradebook_audit(
         db, book.id, "Create", user,
