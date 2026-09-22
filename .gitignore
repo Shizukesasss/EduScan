@@ -33,3 +33,11 @@ backend/data/templates/*
 *.njsproj
 *.sln
 *.sw?
+
+# Ignore local database and excel files
+*.db
+*.xls
+*.xlsx
+
+# Ignore agent scratch directory
+scratch/
