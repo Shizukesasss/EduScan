@@ -18,7 +18,8 @@ export default function MySchedules() {
       setStructure(references); setRows(schedules);
       const grade = references.grade_levels.find((item) => item.active);
       const section = references.sections.find((item) => item.active && item.grade_level_id === grade?.id);
-      const subject = references.subjects.find((item) => item.active);
+      const isSHS = grade ? ['11', '12'].includes(String(grade.name)) : false;
+      const subject = references.subjects.find((item) => item.active && (item.category || 'JHS') === (isSHS ? 'SHS' : 'JHS'));
       setForm((current) => ({ ...current, grade: current.grade || grade?.name || '', section: current.section || section?.name || '', subject: current.subject || subject?.name || '' }));
     } catch (err) { showError(err.message); }
   }, [showError]);
@@ -55,7 +56,7 @@ export default function MySchedules() {
     <section className="card-static"><h2>{form.id ? 'Edit schedule' : 'Add schedule'}</h2>{structure.sections.length === 0 && <div className="notice notice-warning">No section is assigned to this teacher account. Ask an administrator to assign the adviser account under Administration → Academic structure.</div>}<form onSubmit={save}><div className="form-grid three-columns">
       <label><span className="field-label">Grade level</span><select className="input-field" value={form.grade} onChange={(event) => changeGrade(event.target.value)}>{structure.grade_levels.filter((item) => item.active).map((item) => <option key={item.id}>{item.name}</option>)}</select></label>
       <label><span className="field-label">Section</span><select className="input-field" value={form.section} onChange={(event) => patch('section', event.target.value)}>{sections.map((item) => <option key={item.id}>{item.name}</option>)}</select></label>
-      <label><span className="field-label">Subject</span><select className="input-field" value={form.subject} onChange={(event) => patch('subject', event.target.value)}>{structure.subjects.filter((item) => item.active).map((item) => <option key={item.id}>{item.name}</option>)}</select></label>
+      <label><span className="field-label">{['11', '12'].includes(String(form.grade)) ? 'Track' : 'Subject'}</span><select className="input-field" value={form.subject} onChange={(event) => patch('subject', event.target.value)}>{structure.subjects.filter((item) => item.active && (item.category || 'JHS') === (['11', '12'].includes(String(form.grade)) ? 'SHS' : 'JHS')).map((item) => <option key={item.id}>{item.name}</option>)}</select></label>
       <label><span className="field-label">Class start</span><input className="input-field" type="time" value={form.start_time} onChange={(event) => patch('start_time', event.target.value)} required /></label>
       <label><span className="field-label">Class end</span><input className="input-field" type="time" value={form.end_time} onChange={(event) => patch('end_time', event.target.value)} required /></label>
       <label><span className="field-label">Late grace (minutes)</span><input className="input-field" type="number" min="0" max="180" value={form.late_grace_minutes} onChange={(event) => patch('late_grace_minutes', Number(event.target.value))} required /></label>

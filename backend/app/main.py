@@ -131,8 +131,9 @@ def person_json(person: Person, db: Session, include_private: bool = True) -> di
         BiometricSample.person_id == person.id)) or 0
     return {
         "id": person.id, "external_id": person.external_id, "lrn": person.lrn, "full_name": person.full_name,
+        "surname": person.surname, "first_name": person.first_name, "middle_name": person.middle_name, "name_extension": person.name_extension,
         "sex": person.sex, "role": person.role, "grade": person.grade, "section": person.section,
-        "assignment": person.assignment, "guardian_phone": person.guardian_phone if include_private else None,
+        "guardian_phone": person.guardian_phone if include_private else None,
         "enrollment_status": person.enrollment_status, "enrollment_start_date": person.enrollment_start_date,
         "enrollment_end_date": person.enrollment_end_date, "transfer_school": person.transfer_school,
         "biometric_consent": person.biometric_consent, "active": person.active,
@@ -183,7 +184,7 @@ def biometric_enrollment_json(person: Person, db: Session, include_samples: bool
     result = {
         "person_id": person.id, "external_id": person.external_id, "full_name": person.full_name,
         "role": person.role, "grade": person.grade, "section": person.section,
-        "assignment": person.assignment, "biometric_consent": person.biometric_consent,
+        "biometric_consent": person.biometric_consent,
         **snapshot,
     }
     if include_samples:
@@ -389,7 +390,17 @@ def create_person(payload: PersonCreate, db: Session = Depends(get_db), actor: U
     if payload.role == "Student" and (not payload.grade or not payload.section):
         raise HTTPException(
             status_code=422, detail="Student grade and section are required")
-    person = Person(**payload.model_dump())
+    dump = payload.model_dump()
+    parts = []
+    if dump.get('surname'):
+        parts.append(dump['surname'] + ",")
+    parts.append(dump['first_name'])
+    if dump.get('middle_name'):
+        parts.append(f"{dump['middle_name'].strip()[0].upper()}.")
+    if dump.get('name_extension'):
+        parts.append(dump['name_extension'])
+    dump["full_name"] = " ".join(parts).strip()
+    person = Person(**dump)
     db.add(person)
     db.flush()
     add_audit(db, actor, "Create", "Person", person.id,
@@ -416,7 +427,17 @@ def update_person(person_id: int, payload: PersonCreate, db: Session = Depends(g
         raise HTTPException(
             status_code=409, detail="LRN is already registered")
     before = model_snapshot(person)
-    for key, value in payload.model_dump().items():
+    dump = payload.model_dump()
+    parts = []
+    if dump.get('surname'):
+        parts.append(dump['surname'] + ",")
+    parts.append(dump['first_name'])
+    if dump.get('middle_name'):
+        parts.append(f"{dump['middle_name'].strip()[0].upper()}.")
+    if dump.get('name_extension'):
+        parts.append(dump['name_extension'])
+    dump["full_name"] = " ".join(parts).strip()
+    for key, value in dump.items():
         setattr(person, key, value)
     add_audit(db, actor, "Update", "Person", person.id,
               f"School record updated for {person.full_name}", before, model_snapshot(person))
@@ -1236,7 +1257,7 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
         "sections": [{"id": item.id, "grade_level_id": item.grade_level_id, "grade": item.grade_level.name,
                       "name": item.name, "adviser_user_id": item.adviser_user_id,
                       "adviser_name": item.adviser_name, "active": item.active} for item in sections],
-        "subjects": [{"id": item.id, "code": item.code, "name": item.name, "active": item.active} for item in subjects],
+        "subjects": [{"id": item.id, "code": item.code, "name": item.name, "category": item.category, "active": item.active} for item in subjects],
     }
 
 

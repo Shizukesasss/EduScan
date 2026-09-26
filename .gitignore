@@ -1,43 +1,80 @@
 # Logs
+
 logs
+
 *.log
+
 npm-debug.log*
+
 yarn-debug.log*
+
 yarn-error.log*
+
 pnpm-debug.log*
+
 lerna-debug.log*
 
+
+
 node_modules
+
 dist
+
 dist-ssr
+
 *.local
+
 .npm-cache/
 
+
+
 # EduScan backend runtime data and secrets
+
 backend/.venv/
+
 backend/.env*
+
 backend/data/*
+
 !backend/data/templates/
+
 backend/data/templates/*
+
 !backend/data/templates/School Form 2 (SF2) Daily Attendance Report of Learners.xlsx
+
 **/__pycache__/
+
 *.py[cod]
 
+
+
 # Editor directories and files
+
 .vscode/*
+
 !.vscode/extensions.json
+
 .idea
+
 .DS_Store
+
 *.suo
+
 *.ntvs*
+
 *.njsproj
+
 *.sln
+
 *.sw?
+
 
 # Ignore local database and excel files
 *.db
 *.xls
 *.xlsx
 
+
 # Ignore agent scratch directory
 scratch/
+!backend/.env.example

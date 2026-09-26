@@ -158,8 +158,12 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
     TEMPLATES_DIR = Path(__file__).parent.parent.parent / "templates"
     subject_upper = subject_name.upper().strip()
     template_file = None
+    is_shs = str(gb.get("grade_name")) in ("11", "12")
 
-    if is_mapeh:
+    if is_shs:
+        template_file = TEMPLATES_DIR / "SHS E-Class Record.xlsx"
+
+    elif is_mapeh:
         q_strs = ["1ST", "2ND", "3RD", "4TH"]
         q_str = q_strs[max(0, min(3, quarter - 1))]
         template_file = TEMPLATES_DIR / f"GRADE 7-10_MAPEH {q_str} QUARTER.xlsx"
@@ -208,16 +212,27 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
 
     # 3. Fill INPUT DATA sheet (use the first/current gradebook for header data)
     inp = wb["INPUT DATA"]
-    write(inp, "G4", region)
-    write(inp, "O4", division)
-    write(inp, "G5", gb.get("school_name", "San Jose National High School"))
-    write(inp, "X5", school_id)
-    write(inp, "AG5", gb.get("school_year_name", ""))
-    write(inp, "K7", f"Grade {gb['grade_name']} - {gb['section_name']}")
-    write(inp, "S7", gb.get("teacher_name", ""))
-    
-    display_subject = "MAPEH" if is_mapeh else ("TLE" if template_file and "TLE.xlsx" in template_file.name else subject_name)
-    write(inp, "AG7", display_subject)
+    if is_shs:
+        write(inp, "G4", region)
+        write(inp, "O4", division)
+        write(inp, "G5", gb.get("school_name", "San Jose National High School"))
+        write(inp, "X5", school_id)
+        write(inp, "AG5", gb.get("school_year_name", ""))
+        write(inp, "K7", f"Grade {gb['grade_name']} - {gb['section_name']}")
+        write(inp, "S7", gb.get("teacher_name", ""))
+        write(inp, "AE7", subject_name)
+        write(inp, "U8", "1ST" if quarter in (1, 2) else "2ND")
+        write(inp, "AE8", "Core Subject (All Tracks)")
+    else:
+        write(inp, "G4", region)
+        write(inp, "O4", division)
+        write(inp, "G5", gb.get("school_name", "San Jose National High School"))
+        write(inp, "X5", school_id)
+        write(inp, "AG5", gb.get("school_year_name", ""))
+        write(inp, "K7", f"Grade {gb['grade_name']} - {gb['section_name']}")
+        write(inp, "S7", gb.get("teacher_name", ""))
+        display_subject = "MAPEH" if is_mapeh else ("TLE" if template_file and "TLE.xlsx" in template_file.name else subject_name)
+        write(inp, "AG7", display_subject)
 
     students = full["students"]
     males = [s for s in students if (s.get("sex") or "").upper() in ("M", "MALE")]
@@ -225,8 +240,12 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
     if not males and not females:
         males = students
 
-    MALE_NAME_ROW = 12
-    FEMALE_NAME_ROW = 63
+    if is_shs:
+        MALE_NAME_ROW = 13
+        FEMALE_NAME_ROW = 64
+    else:
+        MALE_NAME_ROW = 12
+        FEMALE_NAME_ROW = 63
 
     for i, student in enumerate(males):
         inp.cell(row=MALE_NAME_ROW + i, column=2, value=student["full_name"])
@@ -239,9 +258,14 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
     PT_START_COL = 19
     PT_MAX_ITEMS = 10
     QA_COL = 32
-    HPS_ROW = 10
-    MALE_DATA_ROW = 12
-    FEMALE_DATA_ROW = 63
+    if is_shs:
+        HPS_ROW = 11
+        MALE_DATA_ROW = 13
+        FEMALE_DATA_ROW = 64
+    else:
+        HPS_ROW = 10
+        MALE_DATA_ROW = 12
+        FEMALE_DATA_ROW = 63
 
     def _match_comp(comps, keyword: str) -> dict | None:
         for c in comps:
@@ -277,13 +301,25 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
             q_sheet = wb.worksheets[quarter_idx]
 
         # Write header to sheet
-        write(q_sheet, "G4", region)
-        write(q_sheet, "O4", division)
-        write(q_sheet, "G5", pgb.get("school_name", "San Jose National High School"))
-        write(q_sheet, "X5", school_id)
-        write(q_sheet, "AG5", pgb.get("school_year_name", ""))
-        write(q_sheet, "K7", f"Grade {pgb['grade_name']} - {pgb['section_name']}")
-        write(q_sheet, "S7", pgb.get("teacher_name", ""))
+        if is_shs:
+            write(q_sheet, "G4", region)
+            write(q_sheet, "O4", division)
+            write(q_sheet, "G5", pgb.get("school_name", "San Jose National High School"))
+            write(q_sheet, "X5", school_id)
+            write(q_sheet, "AG5", pgb.get("school_year_name", ""))
+            write(q_sheet, "K7", f"Grade {pgb['grade_name']} - {pgb['section_name']}")
+            write(q_sheet, "S7", pgb.get("teacher_name", ""))
+            write(q_sheet, "AE7", pgb.get("subject_name", ""))
+            write(q_sheet, "U8", "1ST" if quarter in (1, 2) else "2ND")
+            write(q_sheet, "AE8", "Core Subject (All Tracks)")
+        else:
+            write(q_sheet, "G4", region)
+            write(q_sheet, "O4", division)
+            write(q_sheet, "G5", pgb.get("school_name", "San Jose National High School"))
+            write(q_sheet, "X5", school_id)
+            write(q_sheet, "AG5", pgb.get("school_year_name", ""))
+            write(q_sheet, "K7", f"Grade {pgb['grade_name']} - {pgb['section_name']}")
+            write(q_sheet, "S7", pgb.get("teacher_name", ""))
 
         ww_comp = _match_comp(pcomps, "WRITTEN")
         pt_comp = _match_comp(pcomps, "PERFORMANCE")
@@ -333,7 +369,7 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
                     if score is not None:
                         q_sheet.cell(row=data_row, column=WW_START_COL + i, value=float(score))
                 # Inject smart formula for WW PS to only sum HPS of taken activities
-                q_sheet.cell(row=data_row, column=17).value = f'=IF(ISERROR(IF($P{data_row}="","",ROUND(($P{data_row}/SUMIF($F{data_row}:$O{data_row},"<>",$F$10:$O$10))*100,2))),"",IF($P{data_row}="","",ROUND(($P{data_row}/SUMIF($F{data_row}:$O{data_row},"<>",$F$10:$O$10))*100,2)))'
+                q_sheet.cell(row=data_row, column=17).value = f'=IF(ISERROR(IF($P{data_row}="","",ROUND(($P{data_row}/SUMIF($F{data_row}:$O{data_row},"<>",$F${HPS_ROW}:$O${HPS_ROW}))*100,2))),"",IF($P{data_row}="","",ROUND(($P{data_row}/SUMIF($F{data_row}:$O{data_row},"<>",$F${HPS_ROW}:$O${HPS_ROW}))*100,2)))'
                         
             if pt_comp:
                 for i, item in enumerate(pt_comp.get("items") or []):
@@ -342,7 +378,7 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
                     if score is not None:
                         q_sheet.cell(row=data_row, column=PT_START_COL + i, value=float(score))
                 # Inject smart formula for PT PS to only sum HPS of taken activities
-                q_sheet.cell(row=data_row, column=30).value = f'=IF(ISERROR(IF($AC{data_row}="","",ROUND(($AC{data_row}/SUMIF($S{data_row}:$AB{data_row},"<>",$S$10:$AB$10))*100,2))),"",IF($AC{data_row}="","",ROUND(($AC{data_row}/SUMIF($S{data_row}:$AB{data_row},"<>",$S$10:$AB$10))*100,2)))'
+                q_sheet.cell(row=data_row, column=30).value = f'=IF(ISERROR(IF($AC{data_row}="","",ROUND(($AC{data_row}/SUMIF($S{data_row}:$AB{data_row},"<>",$S${HPS_ROW}:$AB${HPS_ROW}))*100,2))),"",IF($AC{data_row}="","",ROUND(($AC{data_row}/SUMIF($S{data_row}:$AB{data_row},"<>",$S${HPS_ROW}:$AB${HPS_ROW}))*100,2)))'
                         
             if qa_comp:
                 qa_items = qa_comp.get("items") or []
@@ -361,7 +397,63 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
             fill_student_row(student, FEMALE_DATA_ROW + i)
 
     # 5. Fill the Summary sheet
-    if "SUMMARY OF QUARTERLY GRADES" in wb.sheetnames:
+    if is_shs and "Final Semestral Grade" in wb.sheetnames:
+        sum_sheet = wb["Final Semestral Grade"]
+        SUMMARY_MALE_ROW = 13
+        SUMMARY_FEMALE_ROW = 64
+        
+        # Write headers
+        write(sum_sheet, "G5", region)
+        write(sum_sheet, "O5", division)
+        write(sum_sheet, "W5", school_id)
+        write(sum_sheet, "G6", gb.get("school_name", "San Jose National High School"))
+        write(sum_sheet, "W6", gb.get("school_year_name", ""))
+        write(sum_sheet, "K8", f"Grade {gb['grade_name']} - {gb['section_name']}")
+        write(sum_sheet, "V8", "1ST" if quarter in (1, 2) else "2ND")
+        write(sum_sheet, "V9", subject_name)
+        write(sum_sheet, "I10", gb.get("teacher_name", ""))
+        write(sum_sheet, "V10", "Core Subject (All Tracks)")
+
+        all_q_gbs = db.query(Gradebook).filter(
+            Gradebook.school_year_id == gb_orm.school_year_id,
+            Gradebook.section_id == gb_orm.section_id,
+            Gradebook.subject_name == gb_orm.subject_name
+        ).all()
+        
+        q_student_grades = defaultdict(dict)
+        for q_gb in all_q_gbs:
+            q_full = get_gradebook_full(db, q_gb.id)
+            if not q_full: continue
+            q_num = q_full["gradebook"]["quarter"]
+            for s in q_full["students"]:
+                r = s.get("reported_grade")
+                if r is not None:
+                    q_student_grades[s["person_id"]][q_num] = float(r)
+                    
+        def fill_shs_sum_grades(student: dict, data_row: int) -> None:
+            sum_sheet.cell(row=data_row, column=2, value=student["full_name"])
+            pid = student["person_id"]
+            grades = q_student_grades[pid]
+            
+            is_first_sem = quarter in (1, 2)
+            q1_target, q2_target = (1, 2) if is_first_sem else (3, 4)
+
+            if q1_target in grades:
+                sum_sheet.cell(row=data_row, column=6, value=grades[q1_target])
+            if q2_target in grades:
+                sum_sheet.cell(row=data_row, column=14, value=grades[q2_target])
+            
+            if q1_target in grades and q2_target in grades:
+                final_avg = round((grades[q1_target] + grades[q2_target]) / 2.0)
+                sum_sheet.cell(row=data_row, column=22, value=final_avg)
+                sum_sheet.cell(row=data_row, column=26, value="PASSED" if final_avg >= 75 else "FAILED")
+
+        for i, student in enumerate(males):
+            fill_shs_sum_grades(student, SUMMARY_MALE_ROW + i)
+        for i, student in enumerate(females):
+            fill_shs_sum_grades(student, SUMMARY_FEMALE_ROW + i)
+
+    elif "SUMMARY OF QUARTERLY GRADES" in wb.sheetnames:
         sum_sheet = wb["SUMMARY OF QUARTERLY GRADES"]
         SUMMARY_MALE_ROW = 13
         SUMMARY_FEMALE_ROW = 64

@@ -7,10 +7,10 @@ import './GradingSheet.css';
 const QUARTER_LABELS = ['FIRST', 'SECOND', 'THIRD', 'FOURTH'];
 
 const STATUS_CONFIG = {
-  Draft:     { label: 'DRAFT',     cls: 'deped-status-draft' },
+  Draft: { label: 'DRAFT', cls: 'deped-status-draft' },
   Submitted: { label: 'SUBMITTED', cls: 'deped-status-submitted' },
   Finalized: { label: 'FINALIZED', cls: 'deped-status-finalized' },
-  Locked:    { label: 'LOCKED',    cls: 'deped-status-locked' },
+  Locked: { label: 'LOCKED', cls: 'deped-status-locked' },
 };
 
 export default function GradingSheet({
@@ -53,13 +53,13 @@ export default function GradingSheet({
       const sId = String(student.person_id);
       const liveScores = scores[sId] || {};
       const liveStatuses = scoreStatuses[sId] || {};
-      
+
       for (const item of flatItems) {
         const val = liveScores[item.id] !== undefined
           ? liveScores[item.id]
           : (student.scores?.[item.id] ?? '');
         const explicitStat = liveStatuses[item.id] || student.score_statuses?.[item.id];
-        
+
         if (val !== '' || (explicitStat && explicitStat !== 'Missing')) {
           activeIds.add(item.id);
         }
@@ -83,8 +83,8 @@ export default function GradingSheet({
   const computedStudents = useMemo(() => {
     return students.map(student => {
       const sId = String(student.person_id);
-      const liveScores   = scores[sId]        || {};
-      const liveStatuses = scoreStatuses[sId]  || {};
+      const liveScores = scores[sId] || {};
+      const liveStatuses = scoreStatuses[sId] || {};
 
       const formattedScores = flatItems.map(item => {
         const val = liveScores[item.id] !== undefined
@@ -98,8 +98,8 @@ export default function GradingSheet({
       // Per-component computed values: total raw score, PS (%), WS (weighted)
       const componentCalcs = components.map(comp => {
         const items = (comp.items || []).filter(item => activeItemIds.has(item.id));
-        const hps   = hpsPerComponent[comp.id] || 0;
-        let total    = 0;
+        const hps = hpsPerComponent[comp.id] || 0;
+        let total = 0;
         let complete = items.length > 0;
 
         for (const item of items) {
@@ -136,13 +136,13 @@ export default function GradingSheet({
   // Filter + sort
   const displayedStudents = useMemo(() => {
     let list = computedStudents.filter(s => {
-      if (filterStatus === 'PASSED'     && s.calc.status !== 'PASSED')     return false;
-      if (filterStatus === 'FAILED'     && s.calc.status !== 'FAILED')     return false;
+      if (filterStatus === 'PASSED' && s.calc.status !== 'PASSED') return false;
+      if (filterStatus === 'FAILED' && s.calc.status !== 'FAILED') return false;
       if (filterStatus === 'INCOMPLETE' && s.calc.status !== 'INCOMPLETE') return false;
       if (!search.trim()) return true;
       const term = search.toLowerCase();
       return s.full_name.toLowerCase().includes(term)
-        || (s.lrn         && s.lrn.toLowerCase().includes(term))
+        || (s.lrn && s.lrn.toLowerCase().includes(term))
         || (s.external_id && s.external_id.toLowerCase().includes(term));
     });
 
@@ -157,15 +157,15 @@ export default function GradingSheet({
 
   // Group by sex: Male first, Female second, then other
   const groupedStudents = useMemo(() => {
-    const isMale   = s => (s.sex || '').toUpperCase().startsWith('M');
+    const isMale = s => (s.sex || '').toUpperCase().startsWith('M');
     const isFemale = s => (s.sex || '').toUpperCase().startsWith('F');
 
-    const males   = displayedStudents.filter(isMale);
+    const males = displayedStudents.filter(isMale);
     const females = displayedStudents.filter(isFemale);
-    const others  = displayedStudents.filter(s => !isMale(s) && !isFemale(s));
+    const others = displayedStudents.filter(s => !isMale(s) && !isFemale(s));
 
     const groups = [
-      { label: 'MALE',   students: males },
+      { label: 'MALE', students: males },
       { label: 'FEMALE', students: females },
       ...(others.length > 0 ? [{ label: 'OTHER', students: others }] : []),
     ];
@@ -249,22 +249,22 @@ export default function GradingSheet({
             <tr>
               <th>REGION</th>
               <td>
-                <input 
-                  type="text" 
-                  className="deped-header-input" 
-                  placeholder="e.g. I, II, III, IV..." 
-                  value={region} 
-                  readOnly 
+                <input
+                  type="text"
+                  className="deped-header-input"
+                  placeholder="e.g. I, II, III, IV..."
+                  value={region}
+                  readOnly
                 />
               </td>
               <th>DIVISION</th>
               <td>
-                <input 
-                  type="text" 
-                  className="deped-header-input" 
-                  placeholder="e.g. I, II, III, IV..." 
-                  value={division} 
-                  readOnly 
+                <input
+                  type="text"
+                  className="deped-header-input"
+                  placeholder="e.g. I, II, III, IV..."
+                  value={division}
+                  readOnly
                 />
               </td>
             </tr>
@@ -273,12 +273,12 @@ export default function GradingSheet({
               <td>San Jose National High School</td>
               <th>SCHOOL ID</th>
               <td>
-                <input 
-                  type="text" 
-                  className="deped-header-input" 
-                  placeholder="e.g. 123456" 
-                  value={schoolId} 
-                  readOnly 
+                <input
+                  type="text"
+                  className="deped-header-input"
+                  placeholder="e.g. 123456"
+                  value={schoolId}
+                  readOnly
                 />
               </td>
               <th>SCHOOL YEAR</th>
@@ -302,24 +302,13 @@ export default function GradingSheet({
               </td>
               <th>TEACHER:</th>
               <td>{gradebook?.teacher_name || '-'}</td>
-              <th>SUBJECT:</th>
+              <th>{isSeniorHigh ? 'TRACK:' : 'SUBJECT:'}</th>
               <td>{selectors.subject || gradebook?.subject_name || '-'}</td>
             </tr>
           </tbody>
         </table>
       </div>
 
-      {isSeniorHigh ? (
-        <div style={{ padding: '60px 20px', textAlign: 'center', backgroundColor: '#f8fafc', borderBottomLeftRadius: '10px', borderBottomRightRadius: '10px' }}>
-          <h3 style={{ fontSize: '1.5rem', fontWeight: 800, color: '#334155', marginBottom: '12px' }}>Senior High School Template Needed</h3>
-          <p style={{ color: '#64748b', maxWidth: '500px', margin: '0 auto', lineHeight: '1.5' }}>
-            The current class record template is specifically for Junior High School (Grades 7-10). 
-            <br/><br/>
-            A different template for Senior High School (Grades 11-12) will be implemented here soon. 
-            Once provided, it will automatically appear when you select Grade 11 or 12.
-          </p>
-        </div>
-      ) : (
         <>
           {/* â• â•  Controls Bar â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â•  */}
           <div className="deped-controls">
@@ -394,8 +383,8 @@ export default function GradingSheet({
                       <th key={`${comp.id}-item-${i}`} className="deped-th deped-th-item">{i + 1}</th>
                     )),
                     <th key={`${comp.id}-total`} className="deped-th deped-th-computed-label">Total</th>,
-                    <th key={`${comp.id}-ps`}    className="deped-th deped-th-computed-label">PS</th>,
-                    <th key={`${comp.id}-ws`}    className="deped-th deped-th-ws-label">WS</th>,
+                    <th key={`${comp.id}-ps`} className="deped-th deped-th-computed-label">PS</th>,
+                    <th key={`${comp.id}-ws`} className="deped-th deped-th-ws-label">WS</th>,
                   ])}
                 </tr>
 
@@ -412,8 +401,8 @@ export default function GradingSheet({
                         <th key={`hps-${item.id}`} className="deped-hps-cell">{item.max_score}</th>
                       )),
                       <th key={`hps-${comp.id}-total`} className="deped-hps-cell">{hps}</th>,
-                      <th key={`hps-${comp.id}-ps`}    className="deped-hps-cell">100.00</th>,
-                      <th key={`hps-${comp.id}-ws`}    className="deped-hps-cell deped-hps-ws">{comp.weight}%</th>,
+                      <th key={`hps-${comp.id}-ps`} className="deped-hps-cell">100.00</th>,
+                      <th key={`hps-${comp.id}-ws`} className="deped-hps-cell deped-hps-ws">{comp.weight}%</th>,
                     ];
                   })}
                   <th className="deped-hps-cell"></th>
@@ -463,7 +452,7 @@ export default function GradingSheet({
                             {/* Score cells + computed columns per component */}
                             {components.flatMap((comp, compIdx) => {
                               const items = comp.items || [];
-                              const cc    = student.componentCalcs[compIdx];
+                              const cc = student.componentCalcs[compIdx];
 
                               if (items.length === 0) {
                                 return [
@@ -477,13 +466,13 @@ export default function GradingSheet({
                                   ? student.liveScores[item.id]
                                   : (student.scores?.[item.id] ?? '');
                                 const explicitStatus = student.liveStatuses[item.id] || student.score_statuses?.[item.id];
-                                const currentStatus  = currentVal === ''
+                                const currentStatus = currentVal === ''
                                   ? (explicitStatus === 'Excused' ? 'Excused' : 'Missing')
                                   : 'Scored';
-                                const isScored  = currentStatus === 'Scored';
+                                const isScored = currentStatus === 'Scored';
                                 const isOverMax = isScored && Number(currentVal) > item.max_score;
-                                const isNeg     = isScored && Number(currentVal) < 0;
-                                const hasError  = isOverMax || isNeg;
+                                const isNeg = isScored && Number(currentVal) < 0;
+                                const hasError = isOverMax || isNeg;
 
                                 return (
                                   <td
@@ -493,7 +482,7 @@ export default function GradingSheet({
                                     <input
                                       ref={el => {
                                         if (el) inputRefs.current.set(`${student.navIdx}-${itemColIdx}`, el);
-                                        else    inputRefs.current.delete(`${student.navIdx}-${itemColIdx}`);
+                                        else inputRefs.current.delete(`${student.navIdx}-${itemColIdx}`);
                                       }}
                                       type="number"
                                       step="0.5"
@@ -569,7 +558,6 @@ export default function GradingSheet({
             </table>
           </div>
         </>
-      )}
     </section>
   );
 }

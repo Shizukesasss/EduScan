@@ -71,9 +71,8 @@ def applicable_schedule(db: Session, person: Person, day: date) -> ClassSchedule
         PersonnelSchedule.role == person.role, PersonnelSchedule.active.is_(True),
     ).order_by(PersonnelSchedule.start_time)).all()
     eligible = [item for item in schedules if str(day.weekday()) in item.weekdays.split(",")]
-    exact = [item for item in eligible if item.assignment and item.assignment == person.assignment]
-    general = [item for item in eligible if not item.assignment]
-    return (exact or general or [None])[0]
+    general = eligible
+    return (general or [None])[0]
 
 
 def latest_day_reset(db: Session, day: date) -> AttendanceResetAudit | None:
@@ -130,7 +129,6 @@ def raw_row(db: Session, person: Person, day: date) -> dict:
         "role": person.role,
         "grade": person.grade,
         "section": person.section,
-        "assignment": person.assignment,
         "enrollment_status": person.enrollment_status,
         "enrollment_start_date": person.enrollment_start_date,
         "enrollment_end_date": person.enrollment_end_date,
@@ -226,8 +224,8 @@ def record_gate_match(db: Session, person: Person, distance: float, now: datetim
     values = {
         "time": now.strftime("%I:%M %p"),
         "date": now.strftime("%Y-%m-%d"),
-        "class_name": f"{schedule.subject} — Grade {schedule.grade} {schedule.section}" if isinstance(schedule, ClassSchedule) else (person.assignment or person.role),
-        "className": f"{schedule.subject} — Grade {schedule.grade} {schedule.section}" if isinstance(schedule, ClassSchedule) else (person.assignment or person.role),
+        "class_name": f"{schedule.subject} — Grade {schedule.grade} {schedule.section}" if isinstance(schedule, ClassSchedule) else person.role,
+        "className": f"{schedule.subject} — Grade {schedule.grade} {schedule.section}" if isinstance(schedule, ClassSchedule) else person.role,
         "class_start": schedule_start.strftime("%I:%M %p") if schedule_start else "not configured",
         "classStart": schedule_start.strftime("%I:%M %p") if schedule_start else "not configured",
         "absence_cutoff": config["absence_cutoff"], "absenceCutoff": config["absence_cutoff"],

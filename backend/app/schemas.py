@@ -95,18 +95,28 @@ class PasswordChangePayload(BaseModel):
 class PersonCreate(BaseModel):
     external_id: str = Field(min_length=2, max_length=80)
     lrn: str | None = Field(default=None, max_length=20)
-    full_name: str = Field(min_length=3, max_length=180)
+    surname: str = Field(default="", max_length=80)
+    first_name: str = Field(min_length=1, max_length=80)
+    middle_name: str | None = Field(default=None, max_length=80)
+    name_extension: str | None = Field(default=None, max_length=20)
     sex: str
     role: str
     grade: str | None = None
     section: str | None = None
-    assignment: str | None = None
     guardian_phone: str | None = None
     enrollment_status: str = "Regular"
     enrollment_start_date: date | None = None
     enrollment_end_date: date | None = None
     transfer_school: str | None = Field(default=None, max_length=180)
     biometric_consent: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def clean_na_values(cls, values: dict) -> dict:
+        for k, v in values.items():
+            if isinstance(v, str) and v.strip().upper() in {"N/A", "NA", "NONE", "-"}:
+                values[k] = "" if k in {"surname", "first_name"} else None
+        return values
 
     @field_validator("sex")
     @classmethod
@@ -482,6 +492,7 @@ class SubjectPayload(BaseModel):
     id: int | None = None
     code: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=2, max_length=120)
+    category: str = Field(default="JHS", max_length=20)
     active: bool = True
 
 

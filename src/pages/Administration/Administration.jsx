@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   AlertTriangle, ArchiveRestore, CheckCircle2, ChevronDown, ChevronUp,
   Database, Download, FileUp, KeyRound, Pencil, Plus, Save,
@@ -15,8 +15,8 @@ const tabs = [
   ['recovery', 'Backup & recovery'],
 ];
 const emptyPerson = {
-  external_id: '', lrn: '', full_name: '', sex: 'Female', role: 'Student',
-  grade: '', section: '', assignment: '', guardian_phone: '',
+  external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Female', role: 'Student',
+  grade: '', section: '', guardian_phone: '',
   enrollment_status: 'Regular', enrollment_start_date: '', enrollment_end_date: '',
   transfer_school: '', biometric_consent: false,
 };
@@ -118,7 +118,7 @@ export default function Administration() {
           <button key={id} className={active === id ? 'active' : ''} onClick={() => setActive(id)}>{label}</button>
         ))}
       </div>
-      {active === 'people'   && <PeopleManager people={people} disposals={disposals} reload={load} success={success} fail={fail} />}
+      {active === 'people'   && <PeopleManager people={people} disposals={disposals} reload={load} success={success} fail={fail} structure={structure} />}
       {active === 'accounts' && <AccountManager users={users} reload={load} success={success} fail={fail} />}
       {active === 'academic' && <AcademicManager structure={structure} teachers={users.filter((u) => u.role === 'teacher' && u.active)} reload={load} success={success} fail={fail} />}
       {active === 'roster'   && <RosterManager imports={imports} reload={load} success={success} fail={fail} />}
@@ -128,7 +128,7 @@ export default function Administration() {
 }
 
 // ─── People Manager ─────────────────────────────────────────────────────────
-function PeopleManager({ people, disposals, reload, success, fail }) {
+function PeopleManager({ people, disposals, reload, success, fail, structure }) {
   const [form, setForm] = useState(emptyPerson);
   const [editing, setEditing] = useState(null);
   const [disposal, setDisposal] = useState(null);
@@ -137,7 +137,7 @@ function PeopleManager({ people, disposals, reload, success, fail }) {
   const save  = async (event) => {
     event.preventDefault();
     try {
-      const payload = { ...form, lrn: form.lrn || null, grade: form.grade || null, section: form.section || null, assignment: form.assignment || null, guardian_phone: form.guardian_phone || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null };
+      const payload = { ...form, lrn: form.lrn || null, middle_name: form.middle_name || null, name_extension: form.name_extension || null, grade: form.grade || null, section: form.section || null, guardian_phone: form.guardian_phone || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null };
       if (editing) await api.patch(`/persons/${editing}`, payload); else await api.post('/persons', payload);
       success(editing ? 'School record updated.' : 'School record created.'); setEditing(null); setForm(emptyPerson); await reload();
     } catch (err) { fail(err); }
@@ -151,13 +151,19 @@ function PeopleManager({ people, disposals, reload, success, fail }) {
           <div className="form-grid three-columns">
             <Field label="School / employee ID" value={form.external_id} onChange={(v) => patch('external_id', v)} required />
             <Field label="LRN (students)" value={form.lrn} onChange={(v) => patch('lrn', v)} />
-            <Field label="Full name" value={form.full_name} onChange={(v) => patch('full_name', v)} required />
+            <Field label="Surname" value={form.surname} onChange={(v) => patch('surname', v)} required />
+            <Field label="First name" value={form.first_name} onChange={(v) => patch('first_name', v)} required />
+            <Field label="Middle name" value={form.middle_name} onChange={(v) => patch('middle_name', v)} />
+            <Field label="Extension (e.g. Jr.)" value={form.name_extension} onChange={(v) => patch('name_extension', v)} />
             <SelectField label="Sex for SF2" value={form.sex} onChange={(v) => patch('sex', v)} options={['Female', 'Male']} />
             <SelectField label="Role" value={form.role} onChange={(v) => patch('role', v)} options={['Student', 'Faculty', 'Non-teaching Personnel']} />
             <Field label="Guardian phone" value={form.guardian_phone} onChange={(v) => patch('guardian_phone', v)} />
-            <Field label="Grade level" value={form.grade} onChange={(v) => patch('grade', v)} required={form.role === 'Student'} />
-            <Field label="Section" value={form.section} onChange={(v) => patch('section', v)} required={form.role === 'Student'} />
-            <Field label="Office / assignment" value={form.assignment} onChange={(v) => patch('assignment', v)} />
+            {form.role === 'Student' && (
+              <>
+                <SelectField label="Grade level" value={form.grade} onChange={(v) => { patch('grade', v); patch('section', ''); }} options={['', ...structure.grade_levels.map(g => g.name)]} />
+                <SelectField label="Section" value={form.section} onChange={(v) => patch('section', v)} options={['', ...structure.sections.filter(s => s.grade_level_id === structure.grade_levels.find(g => g.name === form.grade)?.id).map(s => s.name)]} />
+              </>
+            )}
             {form.role === 'Student' && <SelectField label="Enrollment / movement" value={form.enrollment_status} onChange={(v) => patch('enrollment_status', v)} options={['Regular', 'Transferred In', 'Transferred Out']} />}
             {form.role === 'Student' && <Field label="Enrollment / transfer-in date" type="date" value={form.enrollment_start_date} onChange={(v) => patch('enrollment_start_date', v)} />}
             {form.role === 'Student' && <Field label="Transfer-out date" type="date" value={form.enrollment_end_date} onChange={(v) => patch('enrollment_end_date', v)} />}
@@ -170,7 +176,7 @@ function PeopleManager({ people, disposals, reload, success, fail }) {
       <section className="card-static">
         <h2>School records</h2>
         <p className="section-copy">Student ID and LRN are unique. Deactivation preserves history, while full disposal removes linked records under a documented authority.</p>
-        <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>ID / LRN</th><th>Role / placement</th><th>Movement</th><th>Face samples</th><th>Status</th><th /></tr></thead><tbody>{people.map((item) => <tr key={item.id}><td><strong>{item.full_name}</strong>{item.possible_duplicate && <span className="table-subline duplicate-warning">Possible duplicate name—verify IDs</span>}</td><td>{item.external_id}<span className="table-subline">{item.lrn || 'No LRN'}</span></td><td>{item.role}<span className="table-subline">{item.grade ? `Grade ${item.grade} — ${item.section}` : item.assignment || '—'}</span></td><td>{item.role === 'Student' ? item.enrollment_status : '—'}{item.transfer_school && <span className="table-subline">{item.transfer_school}</span>}</td><td>{item.sample_count}</td><td><span className={`tag ${item.active ? 'tag-success' : 'tag-gray'}`}>{item.active ? 'Active' : 'Inactive'}</span></td><td><details className="action-menu table-action-menu"><summary><ChevronDown size={15} /> Manage</summary><div className="action-menu-panel"><button onClick={() => edit(item)}><Pencil size={14} /> Edit record</button><button onClick={() => setActive(item)}>{item.active ? 'Deactivate record' : 'Reactivate record'}</button><button className="danger-link" onClick={() => setDisposal(item)}><Trash2 size={14} /> Full disposal</button></div></details></td></tr>)}</tbody></table></div>
+        <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>ID / LRN</th><th>Role / placement</th><th>Movement</th><th>Face samples</th><th>Status</th><th /></tr></thead><tbody>{people.map((item) => <tr key={item.id}><td><strong>{item.full_name}</strong>{item.possible_duplicate && <span className="table-subline duplicate-warning">Possible duplicate name—verify IDs</span>}</td><td>{item.external_id}<span className="table-subline">{item.lrn || 'No LRN'}</span></td><td>{item.role}<span className="table-subline">{item.grade ? `Grade ${item.grade} — ${item.section}` : '—'}</span></td><td>{item.role === 'Student' ? item.enrollment_status : '—'}{item.transfer_school && <span className="table-subline">{item.transfer_school}</span>}</td><td>{item.sample_count}</td><td><span className={`tag ${item.active ? 'tag-success' : 'tag-gray'}`}>{item.active ? 'Active' : 'Inactive'}</span></td><td><details className="action-menu table-action-menu"><summary><ChevronDown size={15} /> Manage</summary><div className="action-menu-panel"><button onClick={() => edit(item)}><Pencil size={14} /> Edit record</button><button onClick={() => setActive(item)}>{item.active ? 'Deactivate record' : 'Reactivate record'}</button><button className="danger-link" onClick={() => setDisposal(item)}><Trash2 size={14} /> Full disposal</button></div></details></td></tr>)}</tbody></table></div>
       </section>
       <section className="card-static"><h2>Record-disposal audit</h2><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Completed</th><th>Anonymous reference</th><th>Authority</th><th>Reason</th><th>Removed</th><th>Actor</th></tr></thead><tbody>{disposals.length === 0 && <tr><td colSpan="6" className="empty-cell">No full record disposal has been performed.</td></tr>}{disposals.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.disposal_reference}</td><td>{item.authorization_reference}</td><td>{item.reason}</td><td>{Object.entries(item.removed_counts).map(([k, v]) => `${k}: ${v}`).join(', ')}</td><td>{item.actor_name}</td></tr>)}</tbody></table></div></section>
       {disposal && <DisposalModal person={disposal} onClose={() => setDisposal(null)} onDone={async () => { setDisposal(null); success('The selected person and all linked school records were securely disposed.'); await reload(); }} fail={fail} />}
@@ -302,7 +308,7 @@ function AcademicManager({ structure, teachers, reload, success, fail }) {
   const [period,  setPeriod]  = useState({ id: null, school_year_id: '', name: 'Quarter 1', quarter: 1, starts_on: '', ends_on: '', active: true });
   const [grade,   setGrade]   = useState({ id: null, name: '', sequence: 0, active: true });
   const [section, setSection] = useState({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', active: true });
-  const [subject, setSubject] = useState({ id: null, code: '', name: '', active: true });
+  const [subject, setSubject] = useState({ id: null, code: '', name: '', category: 'JHS', active: true });
 
   const [adviserModal, setAdviserModal] = useState(null);
   const [newAdviserId, setNewAdviserId] = useState('');
@@ -421,13 +427,13 @@ function AcademicManager({ structure, teachers, reload, success, fail }) {
 
       <AcademicCard
         title="Subjects" eyebrow="Learning areas"
-        columns={[{ key: 'code', label: 'Code' }, { key: 'name', label: 'Subject Name' }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
+        columns={[{ key: 'code', label: 'Code' }, { key: 'name', label: 'Subject Name' }, { key: 'category', label: 'Category' }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
         rows={structure.subjects}
         onEdit={(item) => setSubject({ ...item })}
         onDelete={(item) => confirmDelete('subjects', item, 'Subject')}
-        form={<div className="form-grid two-columns"><Field label="Subject code (e.g. ENG)" value={subject.code} onChange={(v) => setSubject({ ...subject, code: v })} /><Field label="Subject name" value={subject.name} onChange={(v) => setSubject({ ...subject, name: v })} /></div>}
-        onSave={() => confirmSave('subjects', subject, () => setSubject({ id: null, code: '', name: '', active: true }), 'Subject')}
-        onCancel={() => setSubject({ id: null, code: '', name: '', active: true })}
+        form={<div className="form-grid three-columns"><Field label="Subject code (e.g. ENG)" value={subject.code} onChange={(v) => setSubject({ ...subject, code: v })} /><Field label="Subject name" value={subject.name} onChange={(v) => setSubject({ ...subject, name: v })} /><label><span className="field-label">Category</span><select className="input-field" value={subject.category || 'JHS'} onChange={(e) => setSubject({ ...subject, category: e.target.value })}><option value="JHS">JHS (Grades 7-10)</option><option value="SHS">SHS Track (Grades 11-12)</option></select></label></div>}
+        onSave={() => confirmSave('subjects', subject, () => setSubject({ id: null, code: '', name: '', category: 'JHS', active: true }), 'Subject')}
+        onCancel={() => setSubject({ id: null, code: '', name: '', category: 'JHS', active: true })}
         isEditing={Boolean(subject.id)}
       />
 

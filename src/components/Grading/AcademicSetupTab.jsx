@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Pencil, Trash2, Save, Users, BookOpen, Layers, UserPlus, CheckCircle2 } from 'lucide-react';
+import { Pencil, Trash2, Save, Users, BookOpen, Layers, UserPlus, CheckCircle2, ShieldAlert, AlertTriangle } from 'lucide-react';
 import { api } from '../../api/client';
 
 function ReferenceCard({ title, rows, columns, onEdit, onDelete, children }) {
@@ -64,10 +64,44 @@ function Field({ label, type = 'text', value, onChange, required = false }) {
   );
 }
 
+function ConfirmModal({ title, message, onConfirm, onCancel, danger = false }) {
+  const [checked, setChecked] = useState(false);
+  return (
+    <div className="modal-backdrop">
+      <div className="modal-card" style={{ maxWidth: 460 }}>
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">{danger ? 'This action requires confirmation' : 'Confirm action'}</p>
+            <h2>{title}</h2>
+          </div>
+          {danger ? <ShieldAlert color="#dc2626" /> : <AlertTriangle color="#d97706" />}
+        </div>
+        <p className="section-copy" style={{ marginTop: '0.75rem' }}>{message}</p>
+        <label className="checkbox-field" style={{ marginTop: '1rem' }}>
+          <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} />
+          <span>I understand and confirm this action</span>
+        </label>
+        <div className="modal-actions" style={{ marginTop: '1rem' }}>
+          <button type="button" className="btn-secondary" onClick={onCancel}>Cancel</button>
+          <button
+            type="button"
+            className={danger ? 'btn-danger' : 'btn-primary'}
+            disabled={!checked}
+            onClick={onConfirm}
+          >
+            {danger ? <Trash2 size={16} /> : <CheckCircle2 size={16} />}
+            {danger ? 'Yes, proceed' : 'Confirm'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AcademicSetupTab({ structure, reloadStructure, onSuccess, onError }) {
   // State for Academic Structure CRUD
   const [grade, setGrade] = useState({ id: null, name: '', sequence: 0, active: true });
-  const [subject, setSubject] = useState({ id: null, code: '', name: '', active: true });
+  const [subject, setSubject] = useState({ id: null, code: '', name: '', category: 'JHS', active: true });
   const [section, setSection] = useState({
     id: null,
     grade_level_id: structure?.grade_levels?.[0]?.id || '',
@@ -92,6 +126,8 @@ export default function AcademicSetupTab({ structure, reloadStructure, onSuccess
   const [studentsList, setStudentsList] = useState([]);
   const [teachers, setTeachers] = useState([]);
   const [loadingStudents, setLoadingStudents] = useState(false);
+
+  const [confirm, setConfirm] = useState(null);
 
   useEffect(() => {
     fetchStudents();
@@ -131,14 +167,22 @@ export default function AcademicSetupTab({ structure, reloadStructure, onSuccess
     }
   };
 
-  const removeStructure = async (path, id) => {
-    try {
-      await api.delete(`/admin/${path}/${id}`);
-      onSuccess('Record deleted.');
-      await reloadStructure();
-    } catch (err) {
-      onError(err.message || 'Failed to delete record.');
-    }
+  const removeStructure = (path, id, label) => {
+    setConfirm({
+      title: `Delete ${label}`,
+      message: `Are you sure you want to permanently delete this ${label}? This cannot be undone.`,
+      danger: true,
+      onConfirm: async () => {
+        setConfirm(null);
+        try {
+          await api.delete(`/admin/reference/${path}/${id}`);
+          onSuccess('Record deleted.');
+          await reloadStructure();
+        } catch (err) {
+          onError(err.message || 'Failed to delete record.');
+        }
+      },
+    });
   };
 
   const saveStudent = async () => {
@@ -174,7 +218,7 @@ export default function AcademicSetupTab({ structure, reloadStructure, onSuccess
           rows={structure?.grade_levels || []}
           columns={['name', 'sequence']}
           onEdit={setGrade}
-          onDelete={(id) => removeStructure('grade-levels', id)}
+          onDelete={(id) => removeStructure('grade-levels', id, 'Grade Level')}
         >
           <div className="form-grid two-columns mb-3">
             <Field label="Grade level (e.g. 7)" value={grade.name} onChange={(value) => setGrade({ ...grade, name: value })} />
@@ -189,15 +233,22 @@ export default function AcademicSetupTab({ structure, reloadStructure, onSuccess
         <ReferenceCard
           title="Subjects"
           rows={structure?.subjects || []}
-          columns={['code', 'name']}
+          columns={['code', 'name', 'category']}
           onEdit={setSubject}
-          onDelete={(id) => removeStructure('subjects', id)}
+          onDelete={(id) => removeStructure('subjects', id, 'Subject')}
         >
-          <div className="form-grid two-columns mb-3">
+          <div className="form-grid three-columns mb-3">
             <Field label="Subject code" value={subject.code} onChange={(value) => setSubject({ ...subject, code: value })} />
             <Field label="Subject name" value={subject.name} onChange={(value) => setSubject({ ...subject, name: value })} />
+            <label>
+              <span className="field-label">Category</span>
+              <select className="input-field" value={subject.category || 'JHS'} onChange={(e) => setSubject({ ...subject, category: e.target.value })}>
+                <option value="JHS">JHS (Grades 7-10)</option>
+                <option value="SHS">SHS Track (Grades 11-12)</option>
+              </select>
+            </label>
           </div>
-          <button type="button" className="btn btn-primary" onClick={() => saveStructure('subjects', subject, () => setSubject({ id: null, code: '', name: '', active: true }), 'Subject')}>
+          <button type="button" className="btn btn-primary" onClick={() => saveStructure('subjects', subject, () => setSubject({ id: null, code: '', name: '', category: 'JHS', active: true }), 'Subject')}>
             <Save size={16} /> Save Subject
           </button>
         </ReferenceCard>
@@ -208,7 +259,7 @@ export default function AcademicSetupTab({ structure, reloadStructure, onSuccess
           rows={structure?.sections || []}
           columns={['grade', 'name', 'adviser_name']}
           onEdit={(item) => setSection({ ...item, adviser_user_id: item.adviser_user_id || '' })}
-          onDelete={(id) => removeStructure('sections', id)}
+          onDelete={(id) => removeStructure('sections', id, 'Section')}
         >
           <div className="form-grid three-columns mb-3">
             <label>
@@ -320,6 +371,15 @@ export default function AcademicSetupTab({ structure, reloadStructure, onSuccess
         </section>
 
       </div>
+      {confirm && (
+        <ConfirmModal
+          title={confirm.title}
+          message={confirm.message}
+          danger={confirm.danger}
+          onConfirm={confirm.onConfirm}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
     </div>
   );
 }

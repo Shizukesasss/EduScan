@@ -138,9 +138,18 @@ export default function Grading() {
     });
   }, [structure.grade_levels]);
 
+  const isSeniorHigh = useMemo(() => {
+    const selectedGrade = (structure.grade_levels || []).find((g) => g.id === Number(gradeId));
+    return selectedGrade ? ['11', '12'].includes(String(selectedGrade.name)) : false;
+  }, [structure.grade_levels, gradeId]);
+
   const sortedSubjects = useMemo(() => {
-    return [...(structure.subjects || [])].sort((a, b) => a.name.localeCompare(b.name));
-  }, [structure.subjects]);
+    const filtered = (structure.subjects || []).filter((s) => {
+      const cat = s.category || 'JHS';
+      return isSeniorHigh ? cat === 'SHS' : cat === 'JHS';
+    });
+    return [...filtered].sort((a, b) => a.name.localeCompare(b.name));
+  }, [structure.subjects, isSeniorHigh]);
 
   // When gradeId changes, ensure valid sectionId
   useEffect(() => {
@@ -148,6 +157,12 @@ export default function Grading() {
       setSectionId(availableSections[0].id);
     }
   }, [gradeId, availableSections, sectionId]);
+
+  useEffect(() => {
+    if (sortedSubjects.length > 0 && (!subjectId || !sortedSubjects.some((s) => s.id === Number(subjectId)))) {
+      setSubjectId(sortedSubjects[0].id);
+    }
+  }, [isSeniorHigh, sortedSubjects, subjectId]);
 
   // Match grading_period_id for selected quarter & school year
   const gradingPeriodId = useMemo(() => {
@@ -665,7 +680,7 @@ export default function Grading() {
                       ),
                       quarter: (
                         <select className="deped-header-select" value={quarter} onChange={(e) => setQuarter(Number(e.target.value))}>
-                          {[1, 2, 3, 4].map((q) => <option key={q} value={q}>QUARTER {q}</option>)}
+                          {(isSeniorHigh ? [1, 2] : [1, 2, 3, 4]).map((q) => <option key={q} value={q}>{isSeniorHigh ? 'TERM' : 'QUARTER'} {q}</option>)}
                         </select>
                       ),
                       grade: (

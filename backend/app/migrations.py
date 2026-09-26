@@ -20,6 +20,8 @@ MIGRATIONS = (
     ("0007_personnel_attendance_schedules", "Add faculty and non-teaching duty schedules"),
     ("0008_completion_workflows", "Add reporting, grade finalization, audit, retention, SMS reconciliation, liveness review, and backup scheduling"),
     ("0009_grading_policy_engine", "Add policy-configurable gradebook engine and audit tables"),
+    ("0010_subject_categories", "Add subject category column (JHS vs SHS Track)"),
+    ("0011_person_name_parts", "Split person full name into surname, first_name, middle_name, and name_extension"),
 )
 
 
@@ -203,6 +205,16 @@ def run_migrations(engine: Engine) -> list[str]:
                             ":rounding_final_decimal_places, :rounding_method, :passing_grade, :status, "
                             ":created_by_name, :created_at, :updated_at)"
                         ), p)
+            elif version == "0010_subject_categories":
+                _add_column_if_missing(connection, "subjects", "category", "VARCHAR(20) NOT NULL DEFAULT 'JHS'")
+            elif version == "0011_person_name_parts":
+                _add_column_if_missing(connection, "persons", "surname", "VARCHAR(80) NOT NULL DEFAULT ''")
+                _add_column_if_missing(connection, "persons", "first_name", "VARCHAR(80) NOT NULL DEFAULT ''")
+                _add_column_if_missing(connection, "persons", "middle_name", "VARCHAR(80) NULL")
+                _add_column_if_missing(connection, "persons", "name_extension", "VARCHAR(20) NULL")
+                
+                # Backfill
+                connection.execute(text("UPDATE persons SET first_name = full_name, surname = '' WHERE first_name = ''"))
             connection.execute(
                 text("INSERT INTO schema_migrations (version, description, applied_at) VALUES (:version, :description, :applied_at)"),
                 {"version": version, "description": description, "applied_at": datetime.utcnow()},
