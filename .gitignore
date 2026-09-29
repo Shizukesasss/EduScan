@@ -25,6 +25,10 @@ backend/.env
 !backend/.env.example
 
 # ─── EduScan runtime-generated data (NOT committed) ──────────────────────────
+# The database lives here — each developer/server has their own local copy.
+# To get started: run `backend/seed_demo.py` (SQLite) or point to your
+# centralized PostgreSQL server via DATABASE_URL in backend/.env
+backend/data/eduscan.db
 backend/data/biometrics/
 backend/data/models/
 backend/data/exports/
@@ -33,11 +37,6 @@ backend/data/pre_restore_*/
 backend/data/pending_restore/
 backend/data/.app_secret
 backend/data/.encryption_key
-
-# ─── EduScan committed data ───────────────────────────────────────────────────
-# The seeded demo SQLite database IS committed (backend/data/eduscan.db)
-# The official SF2 template IS committed (backend/data/templates/)
-# All grading Excel templates IS committed (backend/templates/)
 
 # ─── Ignore test output Excel files ──────────────────────────────────────────
 backend/test_export.xlsx
