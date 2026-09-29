@@ -46,9 +46,11 @@ def run_migrations(engine: Engine) -> list[str]:
     """Apply idempotent, recorded schema migrations instead of untracked create_all calls."""
     applied_now: list[str] = []
     with engine.begin() as connection:
+        dialect = engine.dialect.name
+        ts_type = "TIMESTAMP" if dialect != "sqlite" else "DATETIME"
         connection.execute(text(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
-            "version VARCHAR(80) PRIMARY KEY, description VARCHAR(255) NOT NULL, applied_at DATETIME NOT NULL)"
+            f"version VARCHAR(80) PRIMARY KEY, description VARCHAR(255) NOT NULL, applied_at {ts_type} NOT NULL)"
         ))
         applied = {row[0] for row in connection.execute(text("SELECT version FROM schema_migrations"))}
         for version, description in MIGRATIONS:
@@ -65,27 +67,31 @@ def run_migrations(engine: Engine) -> list[str]:
             elif version == "0004_section_adviser_account_link":
                 Base.metadata.create_all(bind=connection)
                 _add_column_if_missing(connection, "school_sections", "adviser_user_id", "INTEGER NULL")
+                active_val = "TRUE" if engine.dialect.name != "sqlite" else "1"
                 connection.execute(text(
                     "UPDATE school_sections SET adviser_user_id = ("
                     "SELECT users.id FROM users WHERE LOWER(TRIM(users.full_name)) = LOWER(TRIM(school_sections.adviser_name)) "
-                    "AND users.role = 'teacher' AND users.active = 1 LIMIT 1) "
+                    f"AND users.role = 'teacher' AND users.active = {active_val} LIMIT 1) "
                     "WHERE adviser_user_id IS NULL AND adviser_name IS NOT NULL"
                 ))
             elif version == "0005_station_security_sms_controls":
                 Base.metadata.create_all(bind=connection)
-                _add_column_if_missing(connection, "users", "must_change_password", "BOOLEAN NOT NULL DEFAULT 1")
+                bool_default = "DEFAULT TRUE" if engine.dialect.name != "sqlite" else "DEFAULT 1"
+                ts_type = "TIMESTAMP" if engine.dialect.name != "sqlite" else "DATETIME"
+                _add_column_if_missing(connection, "users", "must_change_password", f"BOOLEAN NOT NULL {bool_default}")
                 _add_column_if_missing(connection, "users", "failed_login_count", "INTEGER NOT NULL DEFAULT 0")
-                _add_column_if_missing(connection, "users", "locked_until", "DATETIME NULL")
-                _add_column_if_missing(connection, "users", "password_changed_at", "DATETIME NULL")
-                _add_column_if_missing(connection, "users", "last_login_at", "DATETIME NULL")
+                _add_column_if_missing(connection, "users", "locked_until", f"{ts_type} NULL")
+                _add_column_if_missing(connection, "users", "password_changed_at", f"{ts_type} NULL")
+                _add_column_if_missing(connection, "users", "last_login_at", f"{ts_type} NULL")
                 _add_column_if_missing(connection, "sms_outbox", "idempotency_key", "VARCHAR(160) NULL")
-                _add_column_if_missing(connection, "sms_outbox", "next_attempt_at", "DATETIME NULL")
+                _add_column_if_missing(connection, "sms_outbox", "next_attempt_at", f"{ts_type} NULL")
                 _create_index_if_missing(connection, "sms_outbox", "uq_sms_outbox_idempotency_key",
                                          "idempotency_key", unique=True)
                 _create_index_if_missing(connection, "sms_outbox", "ix_sms_outbox_next_attempt_at",
                                          "next_attempt_at")
             elif version == "0006_remove_station_direction_mode":
-                connection.execute(text("DELETE FROM system_settings WHERE `key` LIKE 'scanner:mode:%'"))
+                key_col = '"key"' if engine.dialect.name != "sqlite" else "`key`"
+                connection.execute(text(f"DELETE FROM system_settings WHERE {key_col} LIKE 'scanner:mode:%'"))
             elif version == "0007_personnel_attendance_schedules":
                 Base.metadata.create_all(bind=connection)
             elif version == "0008_completion_workflows":
@@ -93,10 +99,11 @@ def run_migrations(engine: Engine) -> list[str]:
                 _add_column_if_missing(connection, "class_schedules", "absence_cutoff", "TIME NULL")
                 _add_column_if_missing(connection, "personnel_schedules", "absence_cutoff", "TIME NULL")
                 _add_column_if_missing(connection, "grade_scores", "status", "VARCHAR(30) NOT NULL DEFAULT 'Scored'")
-                _add_column_if_missing(connection, "sms_outbox", "delivered_at", "DATETIME NULL")
-                _add_column_if_missing(connection, "sms_outbox", "cancelled_at", "DATETIME NULL")
-                _add_column_if_missing(connection, "sms_outbox", "exhausted_at", "DATETIME NULL")
-                _add_column_if_missing(connection, "sms_outbox", "gateway_status_checked_at", "DATETIME NULL")
+                ts_type2 = "TIMESTAMP" if engine.dialect.name != "sqlite" else "DATETIME"
+                _add_column_if_missing(connection, "sms_outbox", "delivered_at", f"{ts_type2} NULL")
+                _add_column_if_missing(connection, "sms_outbox", "cancelled_at", f"{ts_type2} NULL")
+                _add_column_if_missing(connection, "sms_outbox", "exhausted_at", f"{ts_type2} NULL")
+                _add_column_if_missing(connection, "sms_outbox", "gateway_status_checked_at", f"{ts_type2} NULL")
                 _create_index_if_missing(connection, "grade_scores", "ix_grade_scores_status", "status")
             elif version == "0009_grading_policy_engine":
                 Base.metadata.create_all(bind=connection)
