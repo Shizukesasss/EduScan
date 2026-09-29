@@ -1,80 +1,63 @@
-# Logs
-
-logs
-
+﻿# ─── Logs ────────────────────────────────────────────────────────────────────
+logs/
 *.log
-
 npm-debug.log*
-
 yarn-debug.log*
-
 yarn-error.log*
-
 pnpm-debug.log*
-
 lerna-debug.log*
 
-
-
-node_modules
-
-dist
-
-dist-ssr
-
+# ─── Node ────────────────────────────────────────────────────────────────────
+node_modules/
+dist/
+dist-ssr/
 *.local
-
 .npm-cache/
 
-
-
-# EduScan backend runtime data and secrets
-
+# ─── Python ──────────────────────────────────────────────────────────────────
+**/__pycache__/
+*.py[cod]
 backend/.venv/
 
-backend/.env*
+# ─── EduScan secrets & environment ───────────────────────────────────────────
+backend/.env
+# allow the example file
+!backend/.env.example
 
-backend/data/*
+# ─── EduScan runtime-generated data (NOT committed) ──────────────────────────
+backend/data/biometrics/
+backend/data/models/
+backend/data/exports/
+backend/data/backups/
+backend/data/pre_restore_*/
+backend/data/pending_restore/
+backend/data/.app_secret
+backend/data/.encryption_key
 
-!backend/data/templates/
+# ─── EduScan committed data ───────────────────────────────────────────────────
+# The seeded demo SQLite database IS committed (backend/data/eduscan.db)
+# The official SF2 template IS committed (backend/data/templates/)
+# All grading Excel templates IS committed (backend/templates/)
 
-backend/data/templates/*
+# ─── Ignore test output Excel files ──────────────────────────────────────────
+backend/test_export.xlsx
+backend/test_formula.xlsx
 
-!backend/data/templates/School Form 2 (SF2) Daily Attendance Report of Learners.xlsx
+# ─── Ignore root-level duplicate Excel files ─────────────────────────────────
+# (they are maintained inside backend/templates/ for the API)
+/*.xlsx
+/*.xls
 
-**/__pycache__/
-
-*.py[cod]
-
-
-
-# Editor directories and files
-
+# ─── Editor directories and files ────────────────────────────────────────────
 .vscode/*
-
 !.vscode/extensions.json
-
-.idea
-
+.idea/
 .DS_Store
-
 *.suo
-
 *.ntvs*
-
 *.njsproj
-
 *.sln
-
 *.sw?
 
-
-# Ignore local database and excel files
-*.db
-*.xls
-*.xlsx
-
-
-# Ignore agent scratch directory
+# ─── Agent scratch directory ──────────────────────────────────────────────────
 scratch/
-!backend/.env.example
