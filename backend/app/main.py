@@ -1242,7 +1242,7 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
     sections = db.scalars(select(SchoolSection).order_by(
         SchoolSection.grade_level_id, SchoolSection.name)).all()
     subjects = db.scalars(select(Subject).order_by(Subject.name)).all()
-    if user.role == "teacher":
+    if user.role == "teacher" and context != "grading":
         allowed_sections = adviser_sections(db, user)
         allowed_section_ids = {item.id for item in allowed_sections}
         allowed_grade_ids = {item.grade_level_id for item in allowed_sections}

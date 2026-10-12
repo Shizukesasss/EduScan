@@ -283,8 +283,8 @@ export default function Grading() {
                 : student.scores?.[item.id];
             const explicitStatus = editedStudentStatuses[item.id] || student.score_statuses?.[item.id];
             const isEmptyScore = rawScore === '' || rawScore === undefined || rawScore === null;
-            const rawStatus = isEmptyScore 
-              ? (explicitStatus === 'Excused' ? 'Excused' : 'Missing') 
+            const rawStatus = isEmptyScore
+              ? (explicitStatus === 'Excused' ? 'Excused' : 'Missing')
               : 'Scored';
 
             studentEntries.push({
@@ -409,13 +409,13 @@ export default function Grading() {
       const sId = String(student.person_id);
       for (const comp of fullGradebook.components) {
         for (const item of (comp.items || [])) {
-          const currentVal = scoreEdits[sId]?.[item.id] !== undefined 
-            ? scoreEdits[sId][item.id] 
+          const currentVal = scoreEdits[sId]?.[item.id] !== undefined
+            ? scoreEdits[sId][item.id]
             : student.scores?.[item.id];
           const currentStatus = statusEdits[sId]?.[item.id] !== undefined
             ? statusEdits[sId][item.id]
             : student.score_statuses?.[item.id];
-          
+
           if (currentVal !== '' && currentVal !== null && currentVal !== undefined) {
             activeItemIds.add(item.id);
           } else if (currentStatus && currentStatus !== 'Missing') {
@@ -430,15 +430,15 @@ export default function Grading() {
       for (const comp of fullGradebook.components) {
         for (const item of (comp.items || [])) {
           if (!activeItemIds.has(item.id)) continue;
-          
+
           const sId = String(student.person_id);
-          const currentVal = scoreEdits[sId]?.[item.id] !== undefined 
-            ? scoreEdits[sId][item.id] 
+          const currentVal = scoreEdits[sId]?.[item.id] !== undefined
+            ? scoreEdits[sId][item.id]
             : student.scores?.[item.id];
           const currentStatus = statusEdits[sId]?.[item.id] !== undefined
             ? statusEdits[sId][item.id]
             : student.score_statuses?.[item.id];
-          
+
           if ((currentVal === undefined || currentVal === null || currentVal === '') && currentStatus !== 'Excused') {
             hasMissing = true;
             break;
@@ -448,7 +448,7 @@ export default function Grading() {
       }
       if (hasMissing) break;
     }
-    
+
     if (hasMissing) {
       showError('Cannot finalize gradebook. There are missing activity grades. Please complete all scores for active activities.');
       return false;
@@ -545,7 +545,7 @@ export default function Grading() {
   // 9. Export & Print Handlers
   const handleExportXlsx = async () => {
     if (!gradebookId || !fullGradebook) return;
-    
+
     // Validate required fields
     if (!validateHeaderFields()) {
       return;
@@ -576,7 +576,7 @@ export default function Grading() {
 
   const gb = fullGradebook?.gradebook;  // Teachers and admins can both edit Draft gradebooks.
   const currentRole = String(auth.role()).toLowerCase();
-  const isEditable = gb && gb.status === 'Draft' && currentRole === 'teacher';
+  const isEditable = gb && gb.status === 'Draft' && (currentRole === 'teacher' || currentRole === 'admin');
 
   return (
     <div className="page-stack">

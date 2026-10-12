@@ -15,7 +15,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
   const [saving, setSaving] = useState(false);
   const { showSuccess, showError } = useToast();
   const [personId, setPersonId] = useState(person?.person_id || null);
-  const [form, setForm] = useState({ external_id: '', lrn: '', full_name: '', sex: 'Male', role: 'Student', grade: '10', section: 'Rizal', assignment: '', guardian_phone: '', biometric_consent: false });
+  const [form, setForm] = useState({ external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Male', role: 'Student', grade: '10', section: 'Rizal', assignment: '', guardian_phone: '', biometric_consent: false });
   const [changeReason, setChangeReason] = useState('');
 
   useEffect(() => () => streamRef.current?.getTracks().forEach((track) => track.stop()), []);
@@ -81,7 +81,10 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
         </div> : <div className="form-grid two-columns enrollment-fields">
           <label><span className="field-label">School ID / employee ID</span><input className="input-field" value={form.external_id} onChange={(e) => patch('external_id', e.target.value)} required /></label>
           <label><span className="field-label">LRN (students)</span><input className="input-field" value={form.lrn} onChange={(e) => patch('lrn', e.target.value)} /></label>
-          <label className="full-field"><span className="field-label">Full name (Last, First, MI)</span><input className="input-field" value={form.full_name} onChange={(e) => patch('full_name', e.target.value)} required /></label>
+          <label><span className="field-label">Last name</span><input className="input-field" value={form.surname} onChange={(e) => patch('surname', e.target.value)} required /></label>
+          <label><span className="field-label">First name</span><input className="input-field" value={form.first_name} onChange={(e) => patch('first_name', e.target.value)} required /></label>
+          <label><span className="field-label">Middle name</span><input className="input-field" value={form.middle_name} onChange={(e) => patch('middle_name', e.target.value)} /></label>
+          <label><span className="field-label">Extension (e.g., Jr.)</span><input className="input-field" value={form.name_extension} onChange={(e) => patch('name_extension', e.target.value)} /></label>
           <label><span className="field-label">Sex for official roster</span><select className="input-field" value={form.sex} onChange={(e) => patch('sex', e.target.value)}><option>Male</option><option>Female</option></select></label>
           <label><span className="field-label">Personnel group</span><select className="input-field" value={form.role} onChange={(e) => patch('role', e.target.value)}><option>Student</option><option>Faculty</option><option>Non-teaching Personnel</option></select></label>
           {form.role === 'Student' ? <><label><span className="field-label">Grade</span><input className="input-field" value={form.grade} onChange={(e) => patch('grade', e.target.value)} /></label><label><span className="field-label">Section</span><input className="input-field" value={form.section} onChange={(e) => patch('section', e.target.value)} /></label><label className="full-field"><span className="field-label">Parent/guardian mobile number</span><input className="input-field" placeholder="+639XXXXXXXXX" value={form.guardian_phone} onChange={(e) => patch('guardian_phone', e.target.value)} /></label></>
