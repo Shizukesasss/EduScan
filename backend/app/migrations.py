@@ -22,6 +22,13 @@ MIGRATIONS = (
     ("0009_grading_policy_engine", "Add policy-configurable gradebook engine and audit tables"),
     ("0010_subject_categories", "Add subject category column (JHS vs SHS Track)"),
     ("0011_person_name_parts", "Split person full name into surname, first_name, middle_name, and name_extension"),
+    ("0012_recoverable_academic_deletion", "Allow academic setup deletion while preserving linked records"),
+    ("0013_recoverable_academic_calendar_deletion", "Allow school year and grading period deletion while preserving class history"),
+    ("0014_person_assignment", "Map the optional personnel assignment without changing existing values"),
+    ("0015_remove_grade_level_sequence", "Remove the unused grade-level sort sequence"),
+    ("0016_grade_adjustment_notifications", "Track when teachers have seen adjustment decisions"),
+    ("0017_subject_teaching_assignments_and_electives", "Separate advisers from subject teachers and record elective tracks"),
+    ("0018_grade_criteria_adjustment_requests", "Allow teachers to request audited grading-weight changes after finalization"),
 )
 
 
@@ -48,7 +55,7 @@ def run_migrations(engine: Engine) -> list[str]:
     with engine.begin() as connection:
         connection.execute(text(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
-            "version VARCHAR(80) PRIMARY KEY, description VARCHAR(255) NOT NULL, applied_at DATETIME NOT NULL)"
+            "version VARCHAR(80) PRIMARY KEY, description VARCHAR(255) NOT NULL, applied_at TIMESTAMP NOT NULL)"
         ))
         applied = {row[0] for row in connection.execute(text("SELECT version FROM schema_migrations"))}
         for version, description in MIGRATIONS:
@@ -215,6 +222,32 @@ def run_migrations(engine: Engine) -> list[str]:
                 
                 # Backfill
                 connection.execute(text("UPDATE persons SET first_name = full_name, surname = '' WHERE first_name = ''"))
+            elif version == "0012_recoverable_academic_deletion":
+                for table in ("grade_levels", "school_sections", "subjects"):
+                    _add_column_if_missing(connection, table, "deleted_at", "TIMESTAMP NULL")
+            elif version == "0013_recoverable_academic_calendar_deletion":
+                for table in ("school_years", "grading_periods"):
+                    _add_column_if_missing(connection, table, "deleted_at", "TIMESTAMP NULL")
+            elif version == "0014_person_assignment":
+                _add_column_if_missing(connection, "persons", "assignment", "VARCHAR(180) NULL")
+            elif version == "0015_remove_grade_level_sequence":
+                columns = {item["name"] for item in inspect(connection).get_columns("grade_levels")}
+                if "sequence" in columns:
+                    connection.execute(text("ALTER TABLE grade_levels DROP COLUMN sequence"))
+            elif version == "0016_grade_adjustment_notifications":
+                _add_column_if_missing(connection, "grade_adjustment_requests", "requester_seen_at", "TIMESTAMP NULL")
+                connection.execute(text(
+                    "UPDATE grade_adjustment_requests SET requester_seen_at = CURRENT_TIMESTAMP "
+                    "WHERE status IN ('Approved', 'Rejected') AND requester_seen_at IS NULL"
+                ))
+            elif version == "0017_subject_teaching_assignments_and_electives":
+                _add_column_if_missing(connection, "school_sections", "track", "VARCHAR(40) NULL")
+                _add_column_if_missing(connection, "subjects", "is_elective", "BOOLEAN NOT NULL DEFAULT FALSE")
+                _add_column_if_missing(connection, "subjects", "elective_track", "VARCHAR(40) NULL")
+                Base.metadata.create_all(bind=connection)
+            elif version == "0018_grade_criteria_adjustment_requests":
+                from .models_grading import GradeCriteriaAdjustmentRequest
+                GradeCriteriaAdjustmentRequest.__table__.create(bind=connection, checkfirst=True)
             connection.execute(
                 text("INSERT INTO schema_migrations (version, description, applied_at) VALUES (:version, :description, :applied_at)"),
                 {"version": version, "description": description, "applied_at": datetime.utcnow()},

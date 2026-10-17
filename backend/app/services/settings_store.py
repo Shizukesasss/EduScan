@@ -39,8 +39,11 @@ def get_secret(db: Session, key: str, default: str = "") -> str:
     return fernet.decrypt(record.encrypted_value).decode()
 
 
-def set_secret(db: Session, key: str, value: str) -> None:
+def set_secret(db: Session, key: str, value: str, commit: bool = True) -> None:
     record = db.get(SystemSetting, key) or SystemSetting(key=key, value="null")
     record.encrypted_value = fernet.encrypt(value.encode()) if value else None
     db.add(record)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()

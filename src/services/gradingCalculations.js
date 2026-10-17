@@ -11,11 +11,12 @@
  * @param {number} initialGrade - Initial grade (0-100)
  * @returns {number|null}
  */
-export function applyTransmutation(initialGrade, transmutationTable = null) {
+export function applyTransmutation(initialGrade, transmutationTable = null, useLowerBounds = false) {
   if (initialGrade == null) return null;
   const grade = Math.max(0, Math.min(100, Number(initialGrade) || 0));
 
   if (transmutationTable && transmutationTable.length > 0) {
+    if (useLowerBounds) return [...transmutationTable].sort((a, b) => b.min - a.min).find(entry => grade >= entry.min)?.value ?? null;
     for (const entry of transmutationTable) {
       if (grade >= entry.min && grade <= entry.max) return entry.value;
     }
@@ -37,7 +38,7 @@ export function applyTransmutation(initialGrade, transmutationTable = null) {
  * @param {Array<{id, maxScore}>} items
  * @returns {{totalEarned, totalPossible, percentage, complete, scoredCount}}
  */
-export function calculateComponentPercentage(scores, items) {
+export function calculateComponentPercentage(scores, items, componentType = '') {
   const scoreMap = new Map(scores.map(s => [s.itemId, s]));
   let totalEarned = 0;
   let totalPossible = 0;
@@ -57,14 +58,43 @@ export function calculateComponentPercentage(scores, items) {
     return { totalEarned: 0, totalPossible: 0, percentage: null, complete: false, scoredCount: 0, itemCount: items.length };
   }
 
+  let percentage = (totalEarned / totalPossible) * 100;
+  if (componentType === 'Term Examinations') {
+    const portions = { ST1: 30, ST2: 30, TE: 40 };
+    const labels = new Set(items.map(item => item.label));
+    complete = complete && items.length === 3 && ['ST1', 'ST2', 'TE'].every(label => labels.has(label));
+    percentage = items.reduce((sum, item) => {
+      const entry = scoreMap.get(item.id);
+      return sum + (entry?.status === 'Scored' && !isBlankScore(entry.score)
+        ? Number(entry.score) / Number(item.max_score) * (portions[item.label] || 0) : 0);
+    }, 0);
+  }
   return {
     totalEarned,
     totalPossible,
-    percentage: (totalEarned / totalPossible) * 100,
+    percentage,
     complete,
     scoredCount,
     itemCount: items.length,
   };
+}
+
+export function isBlankScore(value) {
+  return value === '' || value === null || value === undefined;
+}
+
+export function resolveScoreEntry(value, status) {
+  if (status && status !== 'Scored') return { score: null, status };
+  return isBlankScore(value) ? { score: null, status: 'Missing' } : { score: value, status: 'Scored' };
+}
+
+export function roundGradeValue(value, decimalPlaces = 2, method = 'half_up') {
+  const factor = 10 ** decimalPlaces;
+  const scaled = value * factor;
+  const epsilon = Number.EPSILON * Math.max(1, Math.abs(scaled)) * 4;
+  if (method === 'floor') return Math.floor(scaled + epsilon) / factor;
+  if (method === 'ceiling') return Math.ceil(scaled - epsilon) / factor;
+  return Math.floor(scaled + 0.5 + epsilon) / factor;
 }
 
 /**
@@ -73,14 +103,18 @@ export function calculateComponentPercentage(scores, items) {
  * @param {Array<{name, weight, percentage, complete}>} componentResults
  * @returns {{initialGrade, complete, componentGrades}}
  */
-export function calculateWeightedGrade(componentResults) {
+export function calculateWeightedGrade(componentResults, decimalPlaces = 2, roundingMethod = 'half_up') {
   let allComplete = true;
   const componentGrades = [];
   let initialGrade = 0;
+  const weights = componentResults.map(result => Number(result.weight) || 0);
+  const fractional = weights.length > 0 && weights.every(weight => weight >= 0 && weight <= 1)
+    && Math.abs(weights.reduce((sum, weight) => sum + weight, 0) - 1) < 1e-6;
+  if (Math.abs(weights.reduce((sum, weight) => sum + weight, 0) * (fractional ? 100 : 1) - 100) > 0.01) allComplete = false;
 
   for (const r of componentResults) {
     const pct = r.percentage;
-    const weight = Number(r.weight) || 0;
+    const weight = (Number(r.weight) || 0) * (fractional ? 100 : 1);
 
     if (pct == null || !r.complete) {
       allComplete = false;
@@ -92,14 +126,14 @@ export function calculateWeightedGrade(componentResults) {
     initialGrade += weighted;
     componentGrades.push({
       name: r.name,
-      percentage: Math.round(pct * 100) / 100,
+      percentage: roundGradeValue(pct, decimalPlaces, roundingMethod),
       weight,
-      weightedScore: Math.round(weighted * 100) / 100,
+      weightedScore: roundGradeValue(weighted, decimalPlaces, roundingMethod),
     });
   }
 
   return {
-    initialGrade: allComplete ? Math.round(initialGrade * 100) / 100 : null,
+    initialGrade: allComplete ? roundGradeValue(initialGrade, decimalPlaces, roundingMethod) : null,
     complete: allComplete,
     componentGrades,
   };
@@ -128,7 +162,7 @@ export function determineStatus(reportedGrade, passingGrade = 75, allComplete = 
  * @param {number} params.passingGrade
  * @returns {object} Full calculation result
  */
-export function calculateStudentGrade({ studentScores, components, transmutationTable = null, passingGrade = 75 }) {
+export function calculateStudentGrade({ studentScores, components, transmutationTable = null, passingGrade = 75, roundingDecimalPlaces = 2, roundingMethod = 'half_up' }) {
   const scoreByItem = new Map(studentScores.map(s => [s.itemId, s]));
 
   const componentResults = components.map(comp => {
@@ -137,7 +171,7 @@ export function calculateStudentGrade({ studentScores, components, transmutation
       score: scoreByItem.get(item.id)?.score,
       status: scoreByItem.get(item.id)?.status || 'Missing',
     }));
-    const pctResult = calculateComponentPercentage(compScores, comp.items || []);
+    const pctResult = calculateComponentPercentage(compScores, comp.items || [], comp.component_type);
     return {
       name: comp.name,
       weight: comp.weight,
@@ -148,9 +182,11 @@ export function calculateStudentGrade({ studentScores, components, transmutation
     };
   });
 
-  const weighted = calculateWeightedGrade(componentResults);
+  const weighted = calculateWeightedGrade(componentResults, roundingDecimalPlaces, roundingMethod);
+  const templateExams = components.some(component => component.component_type === 'Term Examinations');
+  const rawInitial = templateExams ? componentResults.reduce((sum, component) => sum + component.percentage * component.weight / 100, 0) : weighted.initialGrade;
   const reportedGrade = weighted.initialGrade != null
-    ? applyTransmutation(weighted.initialGrade, transmutationTable)
+    ? applyTransmutation(rawInitial, transmutationTable, templateExams)
     : null;
   const status = determineStatus(reportedGrade, passingGrade, weighted.complete);
 

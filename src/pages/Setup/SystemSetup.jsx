@@ -3,16 +3,18 @@ import { AlertTriangle, CalendarDays, Clock3, ExternalLink, MessageSquareText, N
 import { api } from '../../api/client';
 import BiometricEnrollmentManager from '../../components/Setup/BiometricEnrollmentManager';
 import PersonnelScheduleManager from '../../components/Setup/PersonnelScheduleManager';
-import { useToast } from '../../contexts/ToastContext';
+import { useToast } from '../../contexts/useToast';
 
 const tabs = [['operations', 'Attendance rules'], ['personnel', 'Personnel schedules'], ['biometrics', 'Face enrollments'], ['sms', 'Android SMS'], ['privacy', 'Privacy & legal setup'], ['access', 'Roles & corrections']];
 const defaultSms = {
   enabled: false, gateway_url: 'http://192.168.1.100:8080', username: '', password: '', school_contact: 'the school office', max_messages_per_30_minutes: 50,
+  enrollment_notifications: true,
   templates: {
     time_in: 'EduScan: {name} entered San Jose National High School at {time} on {date}. If unexpected, contact {school_contact}.',
     time_out: 'EduScan: {name} left San Jose National High School at {time} on {date}. If unexpected, contact {school_contact}.',
     tardiness: 'EduScan: {name} arrived at {time} on {date} and was marked late for {class_name} (start: {class_start}). Contact {school_contact} for corrections.',
     absence: 'EduScan: No time-in was recorded for {name} by {absence_cutoff} on {date}; the learner was marked absent pending teacher review. Contact {school_contact}.',
+    enrollment: 'EduScan: School enrollment for {name} was {enrollment_action} on {date} at {time}. Contact {school_contact} for questions.',
   },
 };
 const complianceFields = [
@@ -24,7 +26,7 @@ const complianceFields = [
 
 export default function SystemSetup() {
   const [active, setActive] = useState('operations');
-  const [settings, setSettings] = useState({ attendance: { absence_cutoff: '09:00', duplicate_cooldown_seconds: 45, auto_close_enabled: true }, sms: defaultSms, compliance: {} });
+  const [settings, setSettings] = useState({ attendance: { absence_cutoff: '09:00', duplicate_cooldown_seconds: 5, auto_close_enabled: true }, sms: defaultSms, compliance: {} });
   const [schedules, setSchedules] = useState([]);
   const [personnelSchedules, setPersonnelSchedules] = useState([]);
   const [outbox, setOutbox] = useState([]);
@@ -37,23 +39,21 @@ export default function SystemSetup() {
   const [calendarRows, setCalendarRows] = useState([]);
   const [excusedRows, setExcusedRows] = useState([]);
   const [people, setPeople] = useState([]);
-  const [calendarForm, setCalendarForm] = useState({ event_date: new Date().toISOString().slice(0, 10), event_type: 'Holiday', reason: '', start_time: '', end_time: '', absence_cutoff: '' });
-  const [excusedForm, setExcusedForm] = useState({ person_id: '', event_date: new Date().toISOString().slice(0, 10), reason: '' });
+  const [calendarForm, setCalendarForm] = useState(() => ({ event_date: new Date().toISOString().slice(0, 10), event_type: 'Holiday', reason: '', start_time: '', end_time: '', absence_cutoff: '' }));
+  const [excusedForm, setExcusedForm] = useState(() => ({ person_id: '', event_date: new Date().toISOString().slice(0, 10), reason: '' }));
 
-  const load = useCallback(async () => {
-    try {
-      const [config, scheduleRows, personnelRows, smsRows, biometricStatus, calendarData, excusedData, personRows] = await Promise.all([api.get('/settings'), api.get('/schedules'), api.get('/personnel-schedules'), api.get('/sms/outbox'), api.get('/biometrics/status'), api.get('/calendar/exceptions'), api.get('/attendance/excused'), api.get('/persons')]);
+  const load = useCallback(() => Promise.all([api.get('/settings'), api.get('/schedules'), api.get('/personnel-schedules'), api.get('/sms/outbox'), api.get('/biometrics/status'), api.get('/calendar/exceptions'), api.get('/attendance/excused'), api.get('/persons')])
+    .then(([config, scheduleRows, personnelRows, smsRows, biometricStatus, calendarData, excusedData, personRows]) => {
       setSettings({ ...config, sms: { ...defaultSms, ...config.sms, templates: { ...defaultSms.templates, ...(config.sms?.templates || {}) } } });
       setSchedules(scheduleRows); setPersonnelSchedules(personnelRows); setOutbox(smsRows); setBiometric(biometricStatus);
       setCalendarRows(calendarData); setExcusedRows(excusedData); setPeople(personRows);
-    } catch (err) { setError(err.message); }
-  }, [showError]);
+    }).catch((err) => showError(err.message)), [showError]);
   useEffect(() => { load(); }, [load]);
   const success = (message) => { showSuccess(message); };
   const patchArea = (area, field, value) => setSettings((current) => ({ ...current, [area]: { ...current[area], [field]: value } }));
 
   const saveAttendance = async () => { try { await api.put('/settings/attendance', settings.attendance); success('Attendance rules saved to the database.'); } catch (err) { showError(err.message); } };
-  const saveSms = async () => { try { const s = settings.sms; await api.put('/settings/sms', { enabled: s.enabled, gateway_url: s.gateway_url, username: s.username, password: s.password || null, school_contact: s.school_contact, max_messages_per_30_minutes: Number(s.max_messages_per_30_minutes), time_in_template: s.templates.time_in, time_out_template: s.templates.time_out, tardiness_template: s.templates.tardiness, absence_template: s.templates.absence }); success('Android gateway credentials, rate control, and message templates saved; password stored encrypted.'); await load(); } catch (err) { showError(err.message); } };
+  const saveSms = async () => { try { const s = settings.sms; if (s.enabled && (!s.username.trim() || (!s.password && !s.password_configured))) return showError('Enter the phone gateway API username and password before enabling SMS.'); const result = await api.put('/settings/sms', { enabled: s.enabled, gateway_url: s.gateway_url, username: s.username, password: s.password || null, school_contact: s.school_contact, max_messages_per_30_minutes: Number(s.max_messages_per_30_minutes), time_in_template: s.templates.time_in, time_out_template: s.templates.time_out, tardiness_template: s.templates.tardiness, absence_template: s.templates.absence, enrollment_notifications: s.enrollment_notifications, enrollment_template: s.templates.enrollment }); success(`Android gateway settings saved; password stored encrypted.${result.held_messages ? ` ${result.held_messages} older pending messages held for review.` : ''}`); setGatewayCheck(null); await load(); } catch (err) { showError(err.message); } };
   const saveCompliance = async () => { try { await api.put('/settings/compliance', Object.fromEntries(complianceFields.map(([key]) => [key, settings.compliance[key] || '']))); success('Deployment evidence references saved.'); } catch (err) { showError(err.message); } };
   const addSchedule = async () => { if (!newSchedule.subject || !newSchedule.teacher_name) return showError('Subject and teacher are required.'); try { await api.post('/schedules', newSchedule); success('Class schedule saved.'); setNewSchedule((current) => ({ ...current, subject: '', teacher_name: '' })); await load(); } catch (err) { showError(err.message); } };
   const removeSchedule = async (id) => { try { await api.delete(`/schedules/${id}`); await load(); } catch (err) { showError(err.message); } };
@@ -67,7 +67,7 @@ export default function SystemSetup() {
   const removeExcused = async (id) => { try { await api.delete(`/attendance/excused/${id}`); await load(); } catch (err) { showError(err.message); } };
 
   return <div className="page-stack">
-    <div className="notice notice-blue"><ShieldCheck size={19} /><div><strong>LBPH runtime: {biometric?.enabled ? 'enabled' : 'server-disabled'}.</strong> {biometric?.model ? `Active model ${biometric.model.version}: ${biometric.model.person_count} enrolled person(s), ${biometric.model.sample_count} samples.` : 'No trained model yet. Enroll an authorized person from the gate station.'} Deployment evidence below does not switch off development operation; it records the approvals required before live school use.</div></div>
+    <div className="notice notice-blue"><ShieldCheck size={19} /><div><strong>LBPH runtime: {biometric?.enabled ? 'enabled' : 'server-disabled'}.</strong> {biometric?.model ? `Active model ${biometric.model.version}: ${biometric.model.person_count} enrolled person(s), ${biometric.model.sample_count} samples.` : 'No trained model yet. Enroll an authorized person from the gate station.'} {biometric?.model_readiness?.available === false && <span> {biometric.model_readiness.message} </span>} Deployment evidence below does not switch off development operation; it records the approvals required before live school use.</div></div>
     <div className="setup-tabs">{tabs.map(([id, label]) => <button key={id} className={active === id ? 'active' : ''} onClick={() => setActive(id)}>{label}</button>)}</div>
 
     {active === 'operations' && <div className="page-stack">
@@ -83,8 +83,15 @@ export default function SystemSetup() {
     {active === 'biometrics' && <BiometricEnrollmentManager onModelChanged={load} />}
 
     {active === 'sms' && <div className="page-stack">
+      <section className="card-static">
+        <h2>Enrollment SMS</h2>
+        <p className="section-copy">A successful student face enrollment or re-enrollment queues a confirmation to the saved parent/guardian mobile number. Rejected face captures do not create a notice. Enabling the gateway holds older pending notices for review under Oversight.</p>
+        <label className="checkbox-field"><input type="checkbox" checked={settings.sms.enrollment_notifications ?? true} onChange={(event) => patchArea('sms', 'enrollment_notifications', event.target.checked)} /><span>Send guardian confirmation after successful enrollment</span></label>
+        <p className="section-copy">Use the Local Server URL and API credentials displayed by the SMS Gateway app on your phone. These are separate from your EduScan login. Save the settings before checking the connection or sending a test.</p>
+        {!settings.sms.enabled && <div className="notice notice-warning">SMS dispatch is currently off. Enrollment and attendance can still be saved, but notices will not be sent.</div>}
+      </section>
       <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Real local relay</p><h2>Android SMS Gateway</h2></div><Smartphone size={26} /></div><ol className="numbered-list"><li>Install SMS Gateway for Android on a dedicated phone with a school-controlled SIM.</li><li>Place the phone and EduScan server on the same secured Wi-Fi; reserve the phone’s IP address.</li><li>In the app, enable Local Server mode and create a strong username/password.</li><li>Enter the local URL and credentials below. The backend posts to /message with HTTP Basic authentication.</li><li>Keep the phone charged, exempt the app from battery optimization, restrict the endpoint to the school LAN, and monitor failed messages.</li></ol><div className="form-grid two-columns"><label className="checkbox-field"><input type="checkbox" checked={settings.sms.enabled} onChange={(e) => patchArea('sms', 'enabled', e.target.checked)} /><span>Enable real Android gateway dispatch</span></label><label><span className="field-label">Gateway URL</span><input className="input-field" value={settings.sms.gateway_url} onChange={(e) => patchArea('sms', 'gateway_url', e.target.value)} /></label><label><span className="field-label">API username</span><input className="input-field" value={settings.sms.username} onChange={(e) => patchArea('sms', 'username', e.target.value)} /></label><label><span className="field-label">API password {settings.sms.password_configured && '(leave blank to keep current)'}</span><input className="input-field" type="password" value={settings.sms.password} onChange={(e) => patchArea('sms', 'password', e.target.value)} /></label><label><span className="field-label">School contact shown in SMS</span><input className="input-field" value={settings.sms.school_contact} onChange={(e) => patchArea('sms', 'school_contact', e.target.value)} /></label><label><span className="field-label">Local rate limit (messages per 30 minutes)</span><input className="input-field" type="number" min="1" max="500" value={settings.sms.max_messages_per_30_minutes} onChange={(e) => patchArea('sms', 'max_messages_per_30_minutes', Number(e.target.value))} /></label></div></section>
-      <section className="card-static"><h2>Approved message templates</h2><div className="template-grid">{Object.entries(settings.sms.templates).map(([key, value]) => <label key={key}><span className="field-label">{key.replace('_', ' ')}</span><textarea className="text-area" value={value} onChange={(e) => setSettings((current) => ({ ...current, sms: { ...current.sms, templates: { ...current.sms.templates, [key]: e.target.value } } }))} /><span className="token-help">Use: {'{name} {time} {date} {class_name} {class_start} {absence_cutoff} {school_contact}'}</span></label>)}</div><div className="modal-actions"><button className="btn-primary" onClick={saveSms}><Save size={16} /> Save gateway & templates</button></div></section>
+      <section className="card-static"><h2>Approved message templates</h2><div className="template-grid">{Object.entries(settings.sms.templates).map(([key, value]) => <label key={key}><span className="field-label">{key.replace('_', ' ')}</span><textarea className="text-area" value={value} onChange={(e) => setSettings((current) => ({ ...current, sms: { ...current.sms, templates: { ...current.sms.templates, [key]: e.target.value } } }))} /><span className="token-help">Use: {key === 'enrollment' ? '{name} {time} {date} {enrollment_action} {school_contact}' : '{name} {time} {date} {class_name} {class_start} {absence_cutoff} {school_contact}'}</span></label>)}</div><div className="modal-actions"><button className="btn-primary" onClick={saveSms}><Save size={16} /> Save gateway & templates</button></div></section>
       <section className="card-static"><h2>Connection test and delivery outbox</h2><p className="section-copy">First check local reachability without sending. Then send one real SMS to verify the saved credentials, SIM, signal, and Android permissions. Attendance notices use a unique event key, so retrying a failed delivery does not create a second outbox message.</p><div className="action-row"><button className="btn-secondary" onClick={checkGateway}><Network size={16} /> Check local connection</button><input className="input-field" placeholder="+639XXXXXXXXX" value={testPhone} onChange={(e) => setTestPhone(e.target.value)} /><button className="btn-secondary" onClick={sendTest}><MessageSquareText size={16} /> Send real test SMS</button></div>{gatewayCheck && <div className={`notice ${gatewayCheck.reachable ? 'notice-success' : 'notice-danger'}`}><Network size={17} /><div><strong>{gatewayCheck.reachable ? 'Phone reachable' : 'Phone unreachable'}.</strong> {gatewayCheck.message} Credentials configured: {gatewayCheck.username_configured && gatewayCheck.password_configured ? 'yes' : 'no'}.</div></div>}<details className="disclosure-panel"><summary>Delivery outbox ({outbox.length})</summary><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Created</th><th>Event</th><th>Recipient</th><th>Message</th><th>Status</th><th>Retry / error</th></tr></thead><tbody>{outbox.length === 0 && <tr><td colSpan="6" className="empty-cell">No messages queued.</td></tr>}{outbox.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.event_type}</td><td>{item.recipient}</td><td className="message-cell">{item.message}</td><td>{item.status}</td><td>{item.next_attempt_at ? `Retry ${new Date(item.next_attempt_at).toLocaleString('en-PH')}${item.last_error ? ` · ${item.last_error}` : ''}` : (item.last_error || '—')}</td></tr>)}</tbody></table></div></details></section>
     </div>}
 

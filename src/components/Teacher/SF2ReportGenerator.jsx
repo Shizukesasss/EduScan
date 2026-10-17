@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, ChevronDown, Download, FileSpreadsheet, ShieldCheck, Upload } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Download, FileSpreadsheet, Upload } from 'lucide-react';
 import { api, auth, localDate } from '../../api/client';
-import { useToast } from '../../contexts/ToastContext';
+import { useToast } from '../../contexts/useToast';
 
 export default function SF2ReportGenerator() {
   const [month, setMonth] = useState(localDate().slice(0, 7));
@@ -22,13 +22,12 @@ export default function SF2ReportGenerator() {
     }).catch((err) => showError(err.message));
   }, [showError]);
 
-  const load = useCallback(async () => {
-    if (!grade || !section) { setStudents([]); setTodayRows([]); return; }
-    try {
-      const query = `grade=${encodeURIComponent(grade)}&section=${encodeURIComponent(section)}`;
-      const [people, attendance] = await Promise.all([api.get(`/persons?role=Student&${query}`), api.get(`/attendance?date=${localDate()}&${query}`)]);
-      setStudents(people); setTodayRows(attendance);
-    } catch (err) { showError(err.message); }
+  const load = useCallback(() => {
+    if (!grade || !section) return;
+    const query = `grade=${encodeURIComponent(grade)}&section=${encodeURIComponent(section)}`;
+    return Promise.all([api.get(`/persons?role=Student&${query}`), api.get(`/attendance?date=${localDate()}&${query}`)])
+      .then(([people, attendance]) => { setStudents(people); setTodayRows(attendance); })
+      .catch((err) => showError(err.message));
   }, [grade, section, showError]);
   useEffect(() => { load(); }, [load]);
 

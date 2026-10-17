@@ -1,7 +1,6 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import { CheckCircle2, AlertTriangle, X } from 'lucide-react';
-
-const ToastContext = createContext(null);
+import { ToastContext } from './useToast';
 
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
@@ -39,7 +38,7 @@ export function ToastProvider({ children }) {
             </div>
             <div className="toast-message">{toast.message}</div>
             <button className="toast-close" onClick={() => dismissToast(toast.id)}>
-              <X size={16} />
+              <X size={16} /><span className="control-label">Dismiss</span>
             </button>
           </div>
         ))}
@@ -48,10 +47,3 @@ export function ToastProvider({ children }) {
   );
 }
 
-export function useToast() {
-  const context = useContext(ToastContext);
-  if (!context) {
-    throw new Error('useToast must be used within a ToastProvider');
-  }
-  return context;
-}

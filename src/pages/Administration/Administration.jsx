@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  AlertTriangle, ArchiveRestore, CheckCircle2, ChevronDown, ChevronUp,
+  AlertTriangle, ArchiveRestore, CheckCircle2, ChevronDown,
   Database, Download, FileUp, KeyRound, Pencil, Plus, Save,
-  ShieldAlert, Trash2, UserCog, Users, UserCheck, ChevronsUpDown
+  ShieldAlert, Trash2, UserCog, Users, UserCheck
 } from 'lucide-react';
 import { api, auth } from '../../api/client';
-import { useToast } from '../../contexts/ToastContext';
+import { availableOptionId, isJuniorHighGrade, isSeniorHighGrade } from '../../services/academicContext';
+import { useToast } from '../../contexts/useToast';
 
 const tabs = [
   ['people', 'People & records'],
@@ -21,6 +22,12 @@ const emptyPerson = {
   transfer_school: '', biometric_consent: false,
 };
 const emptyUser = { username: '', password: '', role: 'teacher', full_name: '', active: true };
+const SHS_TRACKS = ['STEM', 'ABM', 'HUMSS', 'GAS', 'TVL', 'Sports', 'Arts and Design'];
+const compareText = (left, right) => String(left ?? '').localeCompare(String(right ?? ''), undefined, { numeric: true, sensitivity: 'base' });
+const orderedOptions = (items, getLabel = (item) => item?.name) => [...items].sort((a, b) => compareText(getLabel(a), getLabel(b)));
+const orderedSections = (items) => [...items].sort((a, b) => compareText(a.grade, b.grade) || compareText(a.name, b.name));
+const orderedTracks = orderedOptions(SHS_TRACKS, (track) => track);
+const JHS_PROGRAMS = orderedOptions(['BEP', 'STE'], (program) => program);
 
 // ─── Confirmation Modal ─────────────────────────────────────────────────────
 function ConfirmModal({ title, message, onConfirm, onCancel, danger = false }) {
@@ -71,15 +78,52 @@ function Field({ label, value, onChange, type = 'text', required = false, disabl
     </label>
   );
 }
+function SectionAssignmentPicker({ sections, selectedIds, onChange }) {
+  const selected = new Set(selectedIds.map(Number));
+  const toggle = (sectionId) => {
+    const next = new Set(selected);
+    if (next.has(sectionId)) next.delete(sectionId);
+    else next.add(sectionId);
+    onChange([...next]);
+  };
+
+  return (
+    <fieldset className="assignment-section-picker">
+      <legend className="field-label">Sections</legend>
+      <div className="assignment-section-picker-header">
+        <span>{selected.size} of {sections.length} sections selected</span>
+        <div>
+          <button type="button" className="btn-link" onClick={() => onChange(sections.map((item) => item.id))} disabled={!sections.length}>Select all</button>
+          <button type="button" className="btn-link" onClick={() => onChange([])} disabled={!selected.size}>Clear</button>
+        </div>
+      </div>
+      {sections.length ? (
+        <div className="assignment-section-list">
+          {sections.map((item) => (
+            <label className="assignment-section-option" key={item.id}>
+              <input type="checkbox" checked={selected.has(item.id)} onChange={() => toggle(item.id)} />
+              <span>
+                <strong>Grade {item.grade} · Section {item.name}</strong>
+                {item.track && <small>{item.track}</small>}
+                {item.assigned_teacher_name && <small>Currently assigned to {item.assigned_teacher_name}</small>}
+              </span>
+            </label>
+          ))}
+        </div>
+      ) : <p className="section-copy assignment-section-empty">No active sections match this subject’s grade level or track.</p>}
+    </fieldset>
+  );
+}
 function SelectField({ label, value, onChange, options }) {
   const values = options.includes('admin')
-    ? [...new Set([...options, 'records_officer', 'privacy_officer', 'ict'])]
+    ? [...new Set([...options, 'records_officer', 'privacy_officer', 'ict', 'school_head'])]
     : options;
+  const sortedValues = [...values.filter((option) => option === ''), ...orderedOptions(values.filter((option) => option !== ''), (option) => option)];
   return (
     <label>
       <span className="field-label">{label}</span>
       <select className="input-field" value={value} onChange={(e) => onChange(e.target.value)}>
-        {values.map((option) => <option key={option}>{option}</option>)}
+        {sortedValues.map((option) => <option key={option} value={option}>{option === 'school_head' ? 'School head (read-only)' : option}</option>)}
       </select>
     </label>
   );
@@ -94,18 +138,18 @@ export default function Administration() {
   const [imports, setImports] = useState([]);
   const [disposals, setDisposals] = useState([]);
   const [backups, setBackups] = useState([]);
+  const [deletedReferences, setDeletedReferences] = useState([]);
   const { showSuccess, showError } = useToast();
 
-  const load = useCallback(async () => {
-    try {
-      const [personRows, accountRows, academicRows, importRows, disposalRows, backupRows] = await Promise.all([
-        api.get('/admin/persons'), api.get('/admin/users'), api.get('/admin/academic-structure'),
-        api.get('/admin/roster/imports'), api.get('/admin/disposals'), api.get('/admin/backups'),
-      ]);
+  const load = useCallback(() => Promise.all([
+    api.get('/admin/persons'), api.get('/admin/users'), api.get('/admin/academic-structure'),
+    api.get('/admin/roster/imports'), api.get('/admin/disposals'), api.get('/admin/backups'),
+    api.get('/admin/reference-deleted'),
+  ]).then(([personRows, accountRows, academicRows, importRows, disposalRows, backupRows, deletedRows]) => {
       setPeople(personRows); setUsers(accountRows); setStructure(academicRows);
       setImports(importRows); setDisposals(disposalRows); setBackups(backupRows);
-    } catch (err) { showError(err.message); }
-  }, [showError]);
+      setDeletedReferences(deletedRows);
+    }).catch((err) => showError(err.message)), [showError]);
 
   useEffect(() => { load(); }, [load]);
   const success = (msg) => showSuccess(msg);
@@ -119,8 +163,8 @@ export default function Administration() {
         ))}
       </div>
       {active === 'people'   && <PeopleManager people={people} disposals={disposals} reload={load} success={success} fail={fail} structure={structure} />}
-      {active === 'accounts' && <AccountManager users={users} reload={load} success={success} fail={fail} />}
-      {active === 'academic' && <AcademicManager structure={structure} teachers={users.filter((u) => u.role === 'teacher' && u.active)} reload={load} success={success} fail={fail} />}
+      {active === 'accounts' && <AccountManager users={users} schoolYears={structure.school_years} reload={load} success={success} fail={fail} />}
+      {active === 'academic' && <AcademicManager structure={structure} deletedReferences={deletedReferences} teachers={users.filter((u) => u.role === 'teacher' && u.active)} reload={load} success={success} fail={fail} />}
       {active === 'roster'   && <RosterManager imports={imports} reload={load} success={success} fail={fail} />}
       {active === 'recovery' && <RecoveryManager backups={backups} reload={load} success={success} fail={fail} />}
     </div>
@@ -160,8 +204,8 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
             <Field label="Guardian phone" value={form.guardian_phone} onChange={(v) => patch('guardian_phone', v)} />
             {form.role === 'Student' && (
               <>
-                <SelectField label="Grade level" value={form.grade} onChange={(v) => { patch('grade', v); patch('section', ''); }} options={['', ...structure.grade_levels.map(g => g.name)]} />
-                <SelectField label="Section" value={form.section} onChange={(v) => patch('section', v)} options={['', ...structure.sections.filter(s => s.grade_level_id === structure.grade_levels.find(g => g.name === form.grade)?.id).map(s => s.name)]} />
+                <SelectField label="Grade level" value={form.grade} onChange={(v) => { patch('grade', v); patch('section', ''); }} options={['', ...orderedOptions(structure.grade_levels).map((g) => g.name)]} />
+                <SelectField label="Section" value={form.section} onChange={(v) => patch('section', v)} options={['', ...orderedOptions(structure.sections.filter(s => s.grade_level_id === structure.grade_levels.find(g => g.name === form.grade)?.id), (s) => s.name).map((s) => s.name)]} />
               </>
             )}
             {form.role === 'Student' && <SelectField label="Enrollment / movement" value={form.enrollment_status} onChange={(v) => patch('enrollment_status', v)} options={['Regular', 'Transferred In', 'Transferred Out']} />}
@@ -191,7 +235,48 @@ function DisposalModal({ person, onClose, onDone, fail }) {
 }
 
 // ─── Account Manager ────────────────────────────────────────────────────────
-function AccountManager({ users, reload, success, fail }) {
+function SchoolHeadSettings({ schoolYears, success, fail }) {
+  const [assignments, setAssignments] = useState({});
+  const [yearId, setYearId] = useState('');
+  const selectedYearId = String(availableOptionId(schoolYears, yearId));
+  const form = assignments[selectedYearId] || { full_name: '', title: 'Principal' };
+  const updateForm = (field, value) => setAssignments((current) => ({ ...current, [selectedYearId]: { ...form, [field]: value } }));
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const { showError } = useToast();
+  useEffect(() => {
+    let cancelled = false;
+    api.get('/admin/school-heads').then((data) => {
+      if (cancelled) return;
+      setAssignments(data);
+    }).catch((error) => { if (!cancelled) showError(error.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [showError]);
+  const save = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      await api.put('/admin/school-heads', { school_year_id: Number(selectedYearId), ...form });
+      success('School head saved for this school year. New class-record exports will include the name.');
+    } catch (error) { fail(error); }
+    finally { setSaving(false); }
+  };
+  return <section className="card-static">
+    <div className="section-heading"><div><p className="eyebrow">Class-record export details</p><h2>School head</h2></div></div>
+    <p className="section-copy">Assign the principal for each school year. Update this when the school head changes; other school years and previously downloaded files keep their existing details. Manage their login separately in Accounts below.</p>
+    <form onSubmit={save}>
+      <div className="form-grid three-columns">
+        <label><span className="field-label">School year</span><select className="input-field" value={selectedYearId} disabled={loading || saving} onChange={(event) => setYearId(event.target.value)} required>{orderedOptions(schoolYears).map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
+        <label><span className="field-label">School head full name</span><input className="input-field" value={form.full_name} minLength={3} maxLength={160} disabled={loading || saving} onChange={(event) => updateForm('full_name', event.target.value)} required /></label>
+        <label><span className="field-label">Official title</span><input className="input-field" value={form.title} minLength={2} maxLength={100} disabled={loading || saving} onChange={(event) => updateForm('title', event.target.value)} required /></label>
+      </div>
+      <div className="modal-actions"><button className="btn-primary" disabled={loading || saving || !selectedYearId}>{saving ? 'Saving…' : 'Save school head'}</button></div>
+    </form>
+  </section>;
+}
+
+function AccountManager({ users, schoolYears, reload, success, fail }) {
   const [form, setForm] = useState(emptyUser); const [editing, setEditing] = useState(null);
   const [passwords, setPasswords] = useState({ current_password: '', new_password: '' });
   const patch = (field, value) => setForm((c) => ({ ...c, [field]: value }));
@@ -202,6 +287,7 @@ function AccountManager({ users, reload, success, fail }) {
   const changePassword = async (event) => { event.preventDefault(); try { await api.post('/auth/change-password', passwords); auth.passwordChanged(); setPasswords({ current_password: '', new_password: '' }); success('Your password was changed.'); } catch (err) { fail(err); } };
   return (
     <div className="page-stack">
+      <SchoolHeadSettings schoolYears={schoolYears} success={success} fail={fail} />
       <section className="card-static">
         <div className="section-heading"><div><p className="eyebrow">Role-based access</p><h2>{editing ? 'Edit account' : 'Create account'}</h2></div><UserCog size={24} /></div>
         <p className="section-copy">Temporary and reset passwords require at least 12 characters with uppercase, lowercase, number, and symbol. The account owner must replace them at next login.</p>
@@ -261,12 +347,20 @@ function AcademicCard({ title, eyebrow, columns, rows, onEdit, onDelete, extraAc
           <thead>
             <tr>
               {columns.map((col) => (
-                <th key={col.key} onClick={() => toggleSort(col.key)} style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <th key={col.key} style={{ userSelect: 'none', whiteSpace: 'nowrap' }}>
+                  <span className="academic-sort-heading">
                     {col.label}
-                    {sortKey === col.key
-                      ? (sortDir === 'asc' ? <ChevronUp size={13} /> : <ChevronDown size={13} />)
-                      : <ChevronsUpDown size={13} style={{ opacity: 0.35 }} />}
+                    <button
+                      type="button"
+                      className={`academic-sort-button${sortKey === col.key ? ' is-sorted' : ''}`}
+                      title={sortKey === col.key ? `Sorted ${sortDir === 'asc' ? 'ascending' : 'descending'}; click to reverse` : `Sort by ${col.label}`}
+                      aria-label={sortKey === col.key ? `Sorted ${sortDir === 'asc' ? 'ascending' : 'descending'} by ${col.label}; click to reverse` : `Sort by ${col.label}`}
+                      onClick={() => toggleSort(col.key)}
+                    >
+                      <svg className="sort-directions-icon" viewBox="0 0 28 24" aria-hidden="true" focusable="false">
+                        <path d="M2 8 8 2l6 6M8 2v20M14 16l6 6 6-6M20 2v20" />
+                      </svg>
+                    </button>
                   </span>
                 </th>
               ))}
@@ -300,24 +394,122 @@ function AcademicCard({ title, eyebrow, columns, rows, onEdit, onDelete, extraAc
 }
 
 // ─── Academic Manager ───────────────────────────────────────────────────────
-function AcademicManager({ structure, teachers, reload, success, fail }) {
-  const firstYear  = structure.school_years[0]?.id  || '';
-  const firstGrade = structure.grade_levels[0]?.id  || '';
+function AcademicManager({ structure, deletedReferences, teachers, reload, success, fail }) {
+  const sortedSchoolYears = orderedOptions(structure.school_years);
+  const sortedGradeLevels = orderedOptions(structure.grade_levels);
+  const sortedSubjects = orderedOptions(structure.subjects, (item) => `${item.name} (${item.category})`);
+  const sortedSections = orderedSections(structure.sections);
+  const sortedTeachers = orderedOptions(teachers, (item) => `${item.full_name} ${item.username}`);
+  const sortedTracks = orderedTracks;
+  const sortedJhsPrograms = JHS_PROGRAMS;
+  const firstYear  = sortedSchoolYears[0]?.id  || '';
+  const firstGrade = sortedGradeLevels[0]?.id  || '';
 
   const [year,    setYear]    = useState({ id: null, name: '', starts_on: '', ends_on: '', active: true });
   const [period,  setPeriod]  = useState({ id: null, school_year_id: '', name: 'Quarter 1', quarter: 1, starts_on: '', ends_on: '', active: true });
-  const [grade,   setGrade]   = useState({ id: null, name: '', sequence: 0, active: true });
-  const [section, setSection] = useState({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', active: true });
-  const [subject, setSubject] = useState({ id: null, code: '', name: '', category: 'JHS', active: true });
+  const [grade,   setGrade]   = useState({ id: null, name: '', active: true });
+  const [section, setSection] = useState({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', track: '', active: true });
+  const [subject, setSubject] = useState({ id: null, code: '', name: '', category: 'JHS', is_elective: false, elective_track: '', active: true });
+  const [teaching, setTeaching] = useState({ id: null, school_year_id: '', subject_id: '', teacher_user_id: '', section_ids: [] });
 
   const [adviserModal, setAdviserModal] = useState(null);
   const [newAdviserId, setNewAdviserId] = useState('');
   const [confirm, setConfirm] = useState(null);
 
-  useEffect(() => {
-    if (!period.school_year_id && firstYear)  setPeriod((c) => ({ ...c, school_year_id: firstYear }));
-    if (!section.grade_level_id && firstGrade) setSection((c) => ({ ...c, grade_level_id: firstGrade }));
-  }, [firstYear, firstGrade, period.school_year_id, section.grade_level_id]);
+  const periodYearId = availableOptionId(sortedSchoolYears, period.school_year_id);
+  const sectionGradeId = availableOptionId(sortedGradeLevels, section.grade_level_id);
+  const teachingYearId = availableOptionId(sortedSchoolYears, teaching.school_year_id);
+  const teachingSubjectId = availableOptionId(sortedSubjects, teaching.subject_id);
+  const selectedYearId = Number(teaching.school_year_id || teachingYearId);
+  const selectedSubjectId = Number(teaching.subject_id || teachingSubjectId);
+  const teachingSubject = sortedSubjects.find((item) => item.id === selectedSubjectId);
+  const existingAssignmentsBySection = new Map((structure.subject_assignments || [])
+    .filter((item) => item.school_year_id === selectedYearId && item.subject_id === selectedSubjectId)
+    .map((item) => [item.section_id, item]));
+  const eligibleTeachingSections = orderedSections(sortedSections.filter((item) => {
+    if (!teachingSubject) return false;
+    if (!item.active) return false;
+    const sectionIsShs = isSeniorHighGrade(item.grade);
+    if (sectionIsShs !== String(teachingSubject.category).toUpperCase().startsWith('SHS')) return false;
+    return !teachingSubject.is_elective || !teachingSubject.elective_track
+      || item.track?.trim().toLowerCase() === teachingSubject.elective_track.trim().toLowerCase();
+  })).map((item) => ({
+    ...item,
+    assigned_teacher_name: existingAssignmentsBySection.get(item.id)?.teacher_name || '',
+  }));
+  if (!period.id && period.school_year_id !== periodYearId) {
+    setPeriod({ ...period, school_year_id: periodYearId });
+  }
+  if (!section.id && section.grade_level_id !== sectionGradeId) {
+    setSection({ ...section, grade_level_id: sectionGradeId });
+  }
+  if ((!teaching.school_year_id && teachingYearId) || (!teaching.subject_id && teachingSubjectId)) {
+    setTeaching({ ...teaching, school_year_id: teaching.school_year_id || teachingYearId,
+      subject_id: teaching.subject_id || teachingSubjectId });
+  }
+
+  const teachingRows = Object.values((structure.subject_assignments || []).reduce((groups, item) => {
+    const key = `${item.school_year_id}:${item.subject_id}:${item.teacher_user_id}`;
+    if (!groups[key]) groups[key] = {
+      id: key, school_year_id: item.school_year_id, subject_id: item.subject_id,
+      subject_name: item.subject_name, teacher_user_id: item.teacher_user_id,
+      teacher_name: item.teacher_name, section_ids: [],
+      sections: [],
+    };
+    groups[key].section_ids.push(item.section_id);
+    groups[key].sections.push(`Grade ${item.grade} · Section ${item.section_name}`);
+    return groups;
+  }, {}));
+
+  const selectedTeacherId = Number(teaching.teacher_user_id);
+  const selectedTeacherOtherSubjects = (structure.subject_assignments || []).filter((item) =>
+    item.school_year_id === selectedYearId
+      && item.teacher_user_id === selectedTeacherId
+      && item.subject_id !== selectedSubjectId,
+  );
+  const selectedGradeCount = new Set(eligibleTeachingSections
+    .filter((item) => teaching.section_ids.map(Number).includes(item.id))
+    .map((item) => item.grade_level_id)).size;
+  const teachingConflictMessage = selectedTeacherOtherSubjects.length
+    ? `${sortedTeachers.find(item => item.id === selectedTeacherId)?.full_name || 'This teacher'} is already assigned to ${[...new Set(selectedTeacherOtherSubjects.map(item => item.subject_name))].join(', ')} this school year. Remove that assignment before assigning another subject.`
+    : selectedGradeCount > 1
+      ? 'Choose sections from one grade level for each teacher and subject assignment.'
+      : '';
+
+  const changeTeachingContext = (school_year_id, subject_id) => {
+    setTeaching({
+      id: null, school_year_id: Number(school_year_id) || '', subject_id: Number(subject_id) || '',
+      teacher_user_id: '', section_ids: [],
+    });
+  };
+
+  const saveTeaching = () => {
+    if (teachingConflictMessage) {
+      fail({ message: teachingConflictMessage });
+      return;
+    }
+    return confirmSave('subject-teaching-assignments', teaching, () => setTeaching({
+      id: null, school_year_id: teachingYearId, subject_id: teachingSubjectId, teacher_user_id: '', section_ids: [],
+    }), 'Subject teaching assignment');
+  };
+
+  const removeTeaching = (item) => setConfirm({
+    title: 'Remove subject teacher assignment',
+    message: `Remove ${item.teacher_name} from ${item.subject_name} for ${structure.school_years.find(yearItem => yearItem.id === item.school_year_id)?.name || 'this school year'}? Existing class records and grades will be preserved.`,
+    danger: true,
+    onConfirm: async () => {
+      setConfirm(null);
+      try {
+        await api.post('/admin/subject-teaching-assignments', {
+          school_year_id: item.school_year_id, subject_id: item.subject_id,
+          teacher_user_id: item.teacher_user_id, section_ids: [],
+        });
+        if (teaching.id === item.id) setTeaching({ id: null, school_year_id: item.school_year_id, subject_id: item.subject_id, teacher_user_id: '', section_ids: [] });
+        success('Subject teacher assignment removed. Existing grades were preserved.');
+        await reload();
+      } catch (err) { fail(err); }
+    },
+  });
 
   const confirmSave = (path, value, reset, label) => {
     setConfirm({
@@ -326,20 +518,55 @@ function AcademicManager({ structure, teachers, reload, success, fail }) {
       danger: false,
       onConfirm: async () => {
         setConfirm(null);
-        try { await api.post(`/admin/${path}`, value); reset(); success(`${label} saved.`); await reload(); }
+        try {
+          const result = await api.post(`/admin/${path}`, value);
+          reset();
+          success(result.restored ? `${label} restored and updated.` : `${label} saved.`);
+          await reload();
+        }
         catch (err) { fail(err); }
       },
     });
   };
 
   const confirmDelete = (kind, item, label) => {
+    const recoverable = ['school-years', 'grading-periods', 'grade-levels', 'sections', 'subjects'].includes(kind);
     setConfirm({
       title: `Delete ${label}`,
-      message: `Are you sure you want to permanently delete "${item.name || label}"? This cannot be undone. Ensure no gradebooks or students are currently linked to it.`,
+      message: recoverable
+        ? `Delete "${item.name || label}" from academic setup and new class selections? Existing students, scores, attendance, and class records will be preserved. ${kind === 'grade-levels' ? 'Sections under this grade level will also be hidden until the grade level is restored. ' : kind === 'school-years' ? 'Grading periods under this school year will also be hidden until the school year is restored. ' : ''}You can restore it from Deleted items.`
+        : `Are you sure you want to permanently delete "${item.name || label}"? This cannot be undone. Ensure no gradebooks or students are currently linked to it.`,
       danger: true,
       onConfirm: async () => {
         setConfirm(null);
-        try { await api.delete(`/admin/reference/${kind}/${item.id}`); success(`${label} deleted.`); await reload(); }
+        try {
+          await api.delete(`/admin/reference/${kind}/${item.id}`);
+          if (kind === 'school-years') {
+            if (year.id === item.id) setYear({ id: null, name: '', starts_on: '', ends_on: '', active: true });
+            if (Number(period.school_year_id) === item.id) setPeriod({ id: null, school_year_id: '', name: 'Quarter 1', quarter: 1, starts_on: '', ends_on: '', active: true });
+          }
+          if (kind === 'grading-periods' && period.id === item.id) setPeriod({ id: null, school_year_id: firstYear, name: 'Quarter 1', quarter: 1, starts_on: '', ends_on: '', active: true });
+          if (kind === 'grade-levels') {
+            if (grade.id === item.id) setGrade({ id: null, name: '', active: true });
+            if (section.grade_level_id === item.id) setSection({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', track: '', active: true });
+          }
+          if (kind === 'sections' && section.id === item.id) setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', active: true });
+          if (kind === 'subjects' && subject.id === item.id) setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, elective_track: '', active: true });
+          success(`${label} deleted.${recoverable ? ' Linked records were preserved.' : ''}`);
+          await reload();
+        }
+        catch (err) { fail(err); }
+      },
+    });
+  };
+
+  const confirmRestore = (item) => {
+    setConfirm({
+      title: `Restore ${item.name}`,
+      message: `Restore "${item.name}" to academic setup with its previous settings?${item.kind === 'grade-levels' ? ' Its sections will be visible again unless they were deleted separately.' : item.kind === 'school-years' ? ' Its grading periods will be visible again unless they were deleted separately.' : ''}`,
+      onConfirm: async () => {
+        setConfirm(null);
+        try { await api.post(`/admin/reference/${item.kind}/${item.id}/restore`, {}); success(`${item.name} restored.`); await reload(); }
         catch (err) { fail(err); }
       },
     });
@@ -362,7 +589,7 @@ function AcademicManager({ structure, teachers, reload, success, fail }) {
           await api.post('/admin/sections', {
             id: adviserModal.id, grade_level_id: adviserModal.grade_level_id,
             name: adviserModal.name, adviser_user_id: newAdviserId ? Number(newAdviserId) : null,
-            adviser_name: adviserModal.adviser_name, active: adviserModal.active,
+            adviser_name: adviserModal.adviser_name, track: adviserModal.track || null, active: adviserModal.active,
           });
           success(`Adviser for "${adviserModal.grade} - ${adviserModal.name}" updated to ${targetName}.`);
           setAdviserModal(null); await reload();
@@ -373,7 +600,26 @@ function AcademicManager({ structure, teachers, reload, success, fail }) {
 
   return (
     <div className="page-stack">
-      <div className="notice notice-blue"><Database size={18} /> These records organize gradebooks by school year, quarter, subject, grade level, and section. In-use references should be deactivated rather than deleted.</div>
+      <div className="notice notice-blue"><Database size={18} /> Admins can delete school years, grading periods, grade levels, sections, and subjects from setup. Linked student and class records are preserved. Deleted items can be restored below.</div>
+
+      <section className="card-static">
+        <details>
+          <summary>Deleted items ({deletedReferences.length})</summary>
+          <p className="section-copy">Restore an item to use it again. Restore a school year before its grading periods, or a grade level before its sections.</p>
+          <div className="table-scroll"><table className="interactive-table">
+            <thead><tr><th>Type</th><th>Name</th><th>Deleted</th><th>Action</th></tr></thead>
+            <tbody>
+              {deletedReferences.length === 0 && <tr><td colSpan="4" className="empty-cell">No deleted academic items.</td></tr>}
+              {deletedReferences.map((item) => <tr key={`${item.kind}-${item.id}`}>
+                <td>{{ 'school-years': 'School year', 'grading-periods': 'Grading period', 'grade-levels': 'Grade level', sections: 'Section', subjects: 'Subject' }[item.kind]}</td>
+                <td>{item.grade ? `${item.grade} — ${item.name}` : item.name}</td>
+                <td>{new Date(`${item.deleted_at}Z`).toLocaleString('en-PH')}</td>
+                <td><button className="btn-secondary" disabled={!item.can_restore} onClick={() => confirmRestore(item)}>Restore</button>{!item.can_restore && <p className="section-copy">{item.restore_hint || 'Restore the parent item first.'}</p>}</td>
+              </tr>)}
+            </tbody>
+          </table></div>
+        </details>
+      </section>
 
       <AcademicCard
         title="School Years" eyebrow="Academic calendar"
@@ -393,7 +639,7 @@ function AcademicManager({ structure, teachers, reload, success, fail }) {
         rows={structure.grading_periods}
         onEdit={(item) => setPeriod({ ...item })}
         onDelete={(item) => confirmDelete('grading-periods', item, 'Grading Period')}
-        form={<div className="form-grid three-columns"><label><span className="field-label">School Year</span><select className="input-field" value={period.school_year_id} onChange={(e) => setPeriod({ ...period, school_year_id: Number(e.target.value) })}>{structure.school_years.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><Field label="Name" value={period.name} onChange={(v) => setPeriod({ ...period, name: v })} /><Field label="Quarter" type="number" value={period.quarter} onChange={(v) => setPeriod({ ...period, quarter: Number(v) })} /><Field label="Starts" type="date" value={period.starts_on} onChange={(v) => setPeriod({ ...period, starts_on: v })} /><Field label="Ends" type="date" value={period.ends_on} onChange={(v) => setPeriod({ ...period, ends_on: v })} /></div>}
+        form={<div className="form-grid three-columns"><label><span className="field-label">School Year</span><select className="input-field" value={period.school_year_id} onChange={(e) => setPeriod({ ...period, school_year_id: Number(e.target.value) })}>{sortedSchoolYears.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><Field label="Name" value={period.name} onChange={(v) => setPeriod({ ...period, name: v })} /><Field label="Quarter" type="number" value={period.quarter} onChange={(v) => setPeriod({ ...period, quarter: Number(v) })} /><Field label="Starts" type="date" value={period.starts_on} onChange={(v) => setPeriod({ ...period, starts_on: v })} /><Field label="Ends" type="date" value={period.ends_on} onChange={(v) => setPeriod({ ...period, ends_on: v })} /></div>}
         onSave={() => confirmSave('grading-periods', period, () => setPeriod({ id: null, school_year_id: firstYear, name: 'Quarter 1', quarter: 1, starts_on: '', ends_on: '', active: true }), 'Grading Period')}
         onCancel={() => setPeriod({ id: null, school_year_id: firstYear, name: 'Quarter 1', quarter: 1, starts_on: '', ends_on: '', active: true })}
         isEditing={Boolean(period.id)}
@@ -405,36 +651,59 @@ function AcademicManager({ structure, teachers, reload, success, fail }) {
         rows={structure.grade_levels}
         onEdit={(item) => setGrade({ ...item })}
         onDelete={(item) => confirmDelete('grade-levels', item, 'Grade Level')}
-        form={<div className="form-grid two-columns"><Field label="Grade level (e.g. 7)" value={grade.name} onChange={(v) => setGrade({ ...grade, name: v })} /><Field label="Sort sequence" type="number" value={grade.sequence} onChange={(v) => setGrade({ ...grade, sequence: Number(v) })} /></div>}
-        onSave={() => confirmSave('grade-levels', grade, () => setGrade({ id: null, name: '', sequence: 0, active: true }), 'Grade Level')}
-        onCancel={() => setGrade({ id: null, name: '', sequence: 0, active: true })}
+        form={<div className="form-grid"><Field label="Grade level (e.g. 7)" value={grade.name} onChange={(v) => setGrade({ ...grade, name: v })} /></div>}
+        onSave={() => confirmSave('grade-levels', grade, () => setGrade({ id: null, name: '', active: true }), 'Grade Level')}
+        onCancel={() => setGrade({ id: null, name: '', active: true })}
         isEditing={Boolean(grade.id)}
       />
 
       <AcademicCard
         title="Sections" eyebrow="Class sections and adviser assignment"
-        columns={[{ key: 'grade', label: 'Grade' }, { key: 'name', label: 'Section' }, { key: 'adviser_name', label: 'Adviser', render: (v) => v || <span style={{ color: 'var(--text-muted, #888)' }}>Unassigned</span> }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
+        columns={[{ key: 'grade', label: 'Grade' }, { key: 'name', label: 'Section' }, { key: 'track', label: 'Program / track', render: (v) => v || '—' }, { key: 'adviser_name', label: 'Adviser', render: (v) => v || <span style={{ color: 'var(--text-muted, #888)' }}>Unassigned</span> }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
         rows={structure.sections}
         onEdit={(item) => setSection({ ...item, adviser_user_id: item.adviser_user_id || '' })}
         onDelete={(item) => confirmDelete('sections', item, `Section ${item.grade} - ${item.name}`)}
         extraActions={(item) => <button onClick={() => openAdviserModal(item)}><UserCheck size={14} /> Assign adviser</button>}
-        form={<div className="form-grid three-columns"><label><span className="field-label">Grade Level</span><select className="input-field" value={section.grade_level_id} onChange={(e) => setSection({ ...section, grade_level_id: Number(e.target.value) })}>{structure.grade_levels.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><Field label="Section name" value={section.name} onChange={(v) => setSection({ ...section, name: v })} /><label><span className="field-label">Adviser account</span><select className="input-field" value={section.adviser_user_id || ''} onChange={(e) => setSection({ ...section, adviser_user_id: e.target.value ? Number(e.target.value) : null })}><option value="">Unassigned</option>{teachers.map((item) => <option key={item.id} value={item.id}>{item.full_name} ({item.username})</option>)}</select></label></div>}
-        formNote="Teacher access is linked to the adviser account ID. Use 'Assign adviser' from the Manage menu to re-route a teacher who resigned or changed classes without editing other section details."
-        onSave={() => confirmSave('sections', section, () => setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', active: true }), 'Section')}
-        onCancel={() => setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', active: true })}
+        form={<div className="form-grid three-columns"><label><span className="field-label">Grade Level</span><select className="input-field" value={section.grade_level_id} onChange={(e) => setSection({ ...section, grade_level_id: Number(e.target.value), track: '' })}>{sortedGradeLevels.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><Field label="Section name" value={section.name} onChange={(v) => setSection({ ...section, name: v })} required />{isJuniorHighGrade(sortedGradeLevels.find(item => item.id === Number(section.grade_level_id))?.name) ? <label><span className="field-label">JHS Program</span><select className="input-field" required value={section.track || ''} onChange={(e) => setSection({ ...section, track: e.target.value })}><option value="">Choose program</option>{sortedJhsPrograms.map(program => <option key={program} value={program}>{program}</option>)}</select></label> : isSeniorHighGrade(sortedGradeLevels.find(item => item.id === Number(section.grade_level_id))?.name) ? <label><span className="field-label">SHS Track</span><select className="input-field" value={section.track || ''} onChange={(e) => setSection({ ...section, track: e.target.value })}><option value="">Choose track</option>{sortedTracks.map(track => <option key={track} value={track}>{track}</option>)}</select></label> : <span />}</div>}
+        formNote="Each teacher can advise one section. Subject teaching assignments below allow teachers to handle other subjects across sections."
+        onSave={() => {
+          const selectedGrade = sortedGradeLevels.find(item => item.id === Number(section.grade_level_id))?.name;
+          if (isJuniorHighGrade(selectedGrade) && !section.track) {
+            fail({ message: 'Choose BEP or STE for this junior high section.' });
+            return;
+          }
+          confirmSave('sections', { ...section, adviser_user_id: section.adviser_user_id || null, track: section.track || null }, () => setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', active: true }), 'Section');
+        }}
+        onCancel={() => setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', active: true })}
         isEditing={Boolean(section.id)}
       />
 
       <AcademicCard
         title="Subjects" eyebrow="Learning areas"
-        columns={[{ key: 'code', label: 'Code' }, { key: 'name', label: 'Subject Name' }, { key: 'category', label: 'Category' }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
-        rows={structure.subjects}
+        columns={[{ key: 'code', label: 'Code' }, { key: 'name', label: 'Subject Name' }, { key: 'category', label: 'Category' }, { key: 'elective_label', label: 'Elective' }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
+        rows={structure.subjects.map(item => ({ ...item, elective_label: item.is_elective ? `Yes${item.elective_track ? ` · ${item.elective_track}` : ''}` : 'No' }))}
         onEdit={(item) => setSubject({ ...item })}
         onDelete={(item) => confirmDelete('subjects', item, 'Subject')}
-        form={<div className="form-grid three-columns"><Field label="Subject code (e.g. ENG)" value={subject.code} onChange={(v) => setSubject({ ...subject, code: v })} /><Field label="Subject name" value={subject.name} onChange={(v) => setSubject({ ...subject, name: v })} /><label><span className="field-label">Category</span><select className="input-field" value={subject.category || 'JHS'} onChange={(e) => setSubject({ ...subject, category: e.target.value })}><option value="JHS">JHS (Grades 7-10)</option><option value="SHS">SHS Track (Grades 11-12)</option></select></label></div>}
-        onSave={() => confirmSave('subjects', subject, () => setSubject({ id: null, code: '', name: '', category: 'JHS', active: true }), 'Subject')}
-        onCancel={() => setSubject({ id: null, code: '', name: '', category: 'JHS', active: true })}
+        form={<div className="form-grid three-columns"><Field label="Subject code (e.g. ENG)" value={subject.code} onChange={(v) => setSubject({ ...subject, code: v })} /><Field label="Subject name" value={subject.name} onChange={(v) => setSubject({ ...subject, name: v })} /><label><span className="field-label">Category</span><select className="input-field" value={String(subject.category || 'JHS').toUpperCase().startsWith('SHS') ? 'SHS' : 'JHS'} onChange={(e) => setSubject({ ...subject, category: e.target.value, elective_track: e.target.value === 'JHS' ? '' : subject.elective_track })}><option value="JHS">JHS (Grades 7-10)</option><option value="SHS">SHS (Grades 11-12)</option></select></label><label className="checkbox-field"><input type="checkbox" checked={Boolean(subject.is_elective)} onChange={(e) => setSubject({ ...subject, is_elective: e.target.checked, elective_track: e.target.checked ? subject.elective_track : '' })} /><span>Elective subject</span></label>{String(subject.category || '').toUpperCase().startsWith('SHS') && subject.is_elective && <label><span className="field-label">Available to SHS track</span><select className="input-field" value={subject.elective_track || ''} onChange={(e) => setSubject({ ...subject, elective_track: e.target.value })}><option value="">Choose track</option>{sortedTracks.map(track => <option key={track} value={track}>{track}</option>)}</select></label>}{!String(subject.category || '').toUpperCase().startsWith('SHS') && subject.is_elective && <p className="section-copy">JHS electives are available to STE sections only. BEP sections do not take JHS electives.</p>}</div>}
+        onSave={() => confirmSave('subjects', subject, () => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, elective_track: '', active: true }), 'Subject')}
+        onCancel={() => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, elective_track: '', active: true })}
         isEditing={Boolean(subject.id)}
+      />
+
+      <AcademicCard
+        title="Subject Teaching Assignments" eyebrow="Teacher and class responsibility"
+        columns={[{ key: 'school_year_name', label: 'School Year' }, { key: 'subject_name', label: 'Subject' }, { key: 'teacher_name', label: 'Teacher' }, { key: 'sections_label', label: 'Assigned Grade / Section(s)' }]}
+        rows={teachingRows.map(item => ({ ...item,
+          school_year_name: structure.school_years.find(yearItem => yearItem.id === item.school_year_id)?.name || '—',
+          sections_label: item.sections.join(', '),
+        }))}
+        onEdit={(item) => setTeaching({ ...item })}
+        onDelete={removeTeaching}
+        form={<div className="form-grid two-columns"><label><span className="field-label">School year</span><select className="input-field" value={teaching.school_year_id || teachingYearId} onChange={(e) => changeTeachingContext(e.target.value, teaching.subject_id || teachingSubjectId)}>{orderedOptions(structure.school_years.filter(item => item.active)).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label><span className="field-label">Subject</span><select className="input-field" value={teaching.subject_id || teachingSubjectId} onChange={(e) => changeTeachingContext(teaching.school_year_id || teachingYearId, e.target.value)}>{orderedOptions(structure.subjects.filter(item => item.active), (item) => `${item.name} (${item.category})`).map(item => <option key={item.id} value={item.id}>{item.name} ({item.category})</option>)}</select></label><label><span className="field-label">Subject teacher</span><select className="input-field" value={teaching.teacher_user_id || ''} onChange={(e) => setTeaching({ ...teaching, teacher_user_id: e.target.value ? Number(e.target.value) : '' })}><option value="">Choose teacher</option>{sortedTeachers.map(item => <option key={item.id} value={item.id}>{item.full_name} ({item.username})</option>)}</select></label><SectionAssignmentPicker sections={eligibleTeachingSections} selectedIds={teaching.section_ids} onChange={(section_ids) => setTeaching({ ...teaching, section_ids })} /></div>}
+        formNote="Assign a teacher to one subject per school year. A teacher may cover multiple sections in one grade; different grades or sections may have different teachers for the same subject. Reassigning a section leaves other teachers’ assignments unchanged."
+        onSave={saveTeaching}
+        onCancel={() => setTeaching({ id: null, school_year_id: teachingYearId, subject_id: teachingSubjectId, teacher_user_id: '', section_ids: [] })}
+        isEditing={Boolean(teaching.id)}
       />
 
       {/* Adviser Reassignment Modal */}
@@ -451,7 +720,7 @@ function AcademicManager({ structure, teachers, reload, success, fail }) {
               <span className="field-label">New adviser account</span>
               <select className="input-field" value={newAdviserId} onChange={(e) => setNewAdviserId(e.target.value)}>
                 <option value="">Unassigned (remove adviser)</option>
-                {teachers.map((t) => <option key={t.id} value={t.id}>{t.full_name} ({t.username})</option>)}
+                {sortedTeachers.map((t) => <option key={t.id} value={t.id}>{t.full_name} ({t.username})</option>)}
               </select>
             </label>
             <div className="modal-actions" style={{ marginTop: '1rem' }}>

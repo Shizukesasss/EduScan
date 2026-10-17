@@ -40,6 +40,19 @@ class EduScanSmokeTest(unittest.TestCase):
             "current_password": "admin123", "new_password": "Smoke-Admin-Password-2026!",
         })
         assert changed.status_code == 200, changed.text
+        login = cls.client.post("/api/auth/login", json={"username": "teacher", "password": "teacher123"})
+        assert login.status_code == 200, login.text
+        cls.teacher_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        changed = cls.client.post("/api/auth/change-password", headers=cls.teacher_headers, json={
+            "current_password": "teacher123", "new_password": "Smoke-Teacher-Password-2026!",
+        })
+        assert changed.status_code == 200, changed.text
+        teacher = next(item for item in cls.client.get("/api/admin/users", headers=cls.headers).json() if item["username"] == "teacher")
+        structure = cls.client.get("/api/admin/academic-structure", headers=cls.headers).json()
+        section = next(item for item in structure["sections"] if item["name"] == "Rizal")
+        assigned = cls.client.post("/api/admin/sections", headers=cls.headers,
+                                   json={**section, "adviser_user_id": teacher["id"], "adviser_name": teacher["full_name"]})
+        assert assigned.status_code == 200, assigned.text
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -50,7 +63,7 @@ class EduScanSmokeTest(unittest.TestCase):
 
     def test_biometric_enrollment_crud_and_audit(self) -> None:
         person = self.client.post("/api/persons", headers=self.headers, json={
-            "external_id": "BIO-CRUD-001", "lrn": "999999999991", "full_name": "AUDIT, FACE TEST",
+            "external_id": "BIO-CRUD-001", "lrn": "999999999991", "surname": "AUDIT", "first_name": "FACE TEST",
             "sex": "Female", "role": "Student", "grade": "10", "section": "Rizal",
             "guardian_phone": "+639171111111", "biometric_consent": True,
         })
@@ -71,9 +84,13 @@ class EduScanSmokeTest(unittest.TestCase):
                 cv2.line(image, (78, 126), (122, 126 + (index % 3)), 25, 4)
                 ok, encoded = cv2.imencode(".png", image)
                 self.assertTrue(ok)
-                result.append(ProcessedFace(image=image, encoded=encoded.tobytes(), quality=92 + index / 10))
+                result.append(ProcessedFace(image=image, encoded=encoded.tobytes(), quality=92 + index / 10,
+                                            eye_count=0 if index == 6 else 2, human_verified=True, presentation_score=.99))
             return result
 
+        identity = np.zeros(128, np.float32); identity[0] = 1
+        self.identity_patch = patch.object(biometric_service, '_identity_feature', return_value=identity)
+        self.identity_patch.start(); self.addCleanup(self.identity_patch.stop)
         uploads = [("frames", (f"frame-{index}.jpg", b"test-frame", "image/jpeg")) for index in range(15)]
         with patch.object(biometric_service, "process_frame", side_effect=face_set(0)):
             created = self.client.post(f"/api/biometrics/enrollments/{person_id}", headers=self.headers,
@@ -116,7 +133,10 @@ class EduScanSmokeTest(unittest.TestCase):
         self.assertEqual(deleted.json()["removed_samples"], 15)
         self.assertEqual(deleted.json()["removed_model_records"], 1)
         self.assertIsNone(deleted.json()["model"])
-        self.assertEqual(self.client.get("/api/biometrics/enrollments", headers=self.headers).json(), [])
+        registry = self.client.get("/api/biometrics/enrollments", headers=self.headers).json()
+        entry = next(item for item in registry if item["person_id"] == person_id)
+        self.assertFalse(entry["enrolled"])
+        self.assertEqual(entry["sample_count"], 0)
         with SessionLocal() as db:
             self.assertEqual(db.query(BiometricSample).filter_by(person_id=person_id).count(), 0)
             self.assertEqual(db.query(BiometricModel).count(), 0)
@@ -130,7 +150,7 @@ class EduScanSmokeTest(unittest.TestCase):
 
     def test_persistent_attendance_correction_and_gradebook(self) -> None:
         person = self.client.post("/api/persons", headers=self.headers, json={
-            "external_id": "SMOKE-001", "lrn": "123456789012", "full_name": "TEST, LEARNER A",
+            "external_id": "SMOKE-001", "lrn": "123456789012", "surname": "TEST", "first_name": "LEARNER A",
             "sex": "Male", "role": "Student", "grade": "10", "section": "Rizal",
             "guardian_phone": "+639171234567", "biometric_consent": True,
         })
@@ -164,7 +184,7 @@ class EduScanSmokeTest(unittest.TestCase):
             self.assertIn(b"EduScan Tardy 14-4", drawing)
 
         class_key = "10-rizal-mathematics"
-        gradebook = self.client.put(f"/api/gradebook/{class_key}", headers=self.headers, json={
+        gradebook = self.client.put(f"/api/gradebook/{class_key}", headers=self.teacher_headers, json={
             "class_key": class_key, "school_year": "2026-2027", "quarter": 1,
             "subject": "Mathematics", "grade": "10", "section": "Rizal",
             "change_reason": "Initial verified grading setup", "passing_grade": 75,
@@ -252,6 +272,15 @@ class EduScanSmokeTest(unittest.TestCase):
             "0007_personnel_attendance_schedules",
             "0008_completion_workflows",
             "0009_grading_policy_engine",
+            "0010_subject_categories",
+            "0011_person_name_parts",
+            "0012_recoverable_academic_deletion",
+            "0013_recoverable_academic_calendar_deletion",
+            "0014_person_assignment",
+            "0015_remove_grade_level_sequence",
+            "0016_grade_adjustment_notifications",
+            "0017_subject_teaching_assignments_and_electives",
+            "0018_grade_criteria_adjustment_requests",
         ])
         inspector = inspect(legacy_engine)
         self.assertTrue(inspector.has_table("attendance_reset_audits"))
@@ -318,7 +347,7 @@ class EduScanSmokeTest(unittest.TestCase):
         from app.services.settings_store import set_json
 
         created = self.client.post("/api/persons", headers=self.headers, json={
-            "external_id": "EXTENDED-001", "lrn": "999999999981", "full_name": "REENTRY, LEARNER",
+            "external_id": "EXTENDED-001", "lrn": "999999999981", "surname": "REENTRY", "first_name": "LEARNER",
             "sex": "Male", "role": "Student", "grade": "10", "section": "Rizal",
             "guardian_phone": "+639181111111", "biometric_consent": False,
         })
@@ -355,7 +384,7 @@ class EduScanSmokeTest(unittest.TestCase):
             "time_in": "07:20", "time_out": "16:15", "reason": "Verified against the signed gate record",
         })
         self.assertEqual(correction.status_code, 200, correction.text)
-        gradebook = self.client.put("/api/gradebook/disposal-gradebook", headers=self.headers, json={
+        gradebook = self.client.put("/api/gradebook/disposal-gradebook", headers=self.teacher_headers, json={
             "class_key": "disposal-gradebook", "school_year": "2026-2027", "quarter": 1,
             "subject": "Mathematics", "grade": "10", "section": "Rizal",
             "change_reason": "Initial authorized score entry",
@@ -391,10 +420,15 @@ class EduScanSmokeTest(unittest.TestCase):
         from app.services.biometrics import ProcessedFace, biometric_service
         from app.services.sf2 import generate_sf2
 
+        grade = self.client.post("/api/admin/grade-levels", headers=self.headers, json={"name": "9", "active": True})
+        self.assertEqual(grade.status_code, 200, grade.text)
+        section = self.client.post("/api/admin/sections", headers=self.headers,
+                                   json={"grade_level_id": grade.json()["id"], "name": "Multi", "active": True})
+        self.assertEqual(section.status_code, 200, section.text)
         people = []
         for external_id, name, sex in (("MULTI-001", "Zulu, Ana", "Female"), ("MULTI-002", "Alpha, Bea", "Female")):
             response = self.client.post("/api/persons", headers=self.headers, json={
-                "external_id": external_id, "lrn": None, "full_name": name, "sex": sex, "role": "Student",
+                "external_id": external_id, "lrn": None, "surname": name.split(',')[0], "first_name": name.split(',')[1].strip(), "sex": sex, "role": "Student",
                 "grade": "9", "section": "Multi", "guardian_phone": None, "biometric_consent": True,
             })
             self.assertEqual(response.status_code, 200, response.text)
@@ -416,9 +450,16 @@ class EduScanSmokeTest(unittest.TestCase):
                     db.add(BiometricSample(id=str(uuid.uuid4()), person_id=person["id"], encrypted_path=str(path),
                                            sha256=hashlib.sha256(raw).hexdigest(), quality_score=96))
             db.commit(); biometric_service.train(db)
+            def synthetic_identity(image):
+                vector = np.zeros(128, np.float32)
+                vector[0 if float(cv2.Sobel(image, cv2.CV_32F, 1, 0).var()) > float(cv2.Sobel(image, cv2.CV_32F, 0, 1).var()) else 1] = 1
+                return vector
+            biometric_service._identity_cache = {}
+            identity_patch = patch.object(biometric_service, '_identity_feature', side_effect=synthetic_identity)
+            identity_patch.start(); self.addCleanup(identity_patch.stop)
             with patch.object(biometric_service, "process_faces", return_value=[
-                ProcessedFace(base_faces[0], b"face-a", 96, (10, 10, 100, 100)),
-                ProcessedFace(base_faces[1], b"face-b", 96, (120, 10, 100, 100)),
+                ProcessedFace(base_faces[0], b"face-a", 96, (10, 10, 100, 100), presentation_score=0.99),
+                ProcessedFace(base_faces[1], b"face-b", 96, (120, 10, 100, 100), presentation_score=0.99),
             ]):
                 matches = biometric_service.recognize_many(db, b"two-face-frame")
             self.assertEqual({match["person"].id for match in matches if match.get("person")}, {item["id"] for item in people})
@@ -456,7 +497,10 @@ class EduScanSmokeTest(unittest.TestCase):
     def test_reporting_scope_transfer_deduplication_and_clean_slate(self) -> None:
         from openpyxl import load_workbook
         from app.database import SessionLocal
-        from app.models import Person
+        from app.models import (
+            GradeLevel, Person, SchoolSection, SchoolYear, Subject,
+            SubjectTeachingAssignment,
+        )
         from app.services.attendance import MANILA, record_gate_match
         from app.services.settings_store import set_json
 
@@ -477,11 +521,11 @@ class EduScanSmokeTest(unittest.TestCase):
 
         students = []
         payloads = [
-            {"external_id": "SCOPE-002", "lrn": "777777777772", "full_name": "BETA, LEARNER",
+            {"external_id": "SCOPE-002", "lrn": "777777777772", "surname": "BETA", "first_name": "LEARNER",
              "sex": "Male", "enrollment_status": "Regular"},
-            {"external_id": "SCOPE-001", "lrn": "777777777771", "full_name": "ALPHA, LEARNER",
+            {"external_id": "SCOPE-001", "lrn": "777777777771", "surname": "ALPHA", "first_name": "LEARNER",
              "sex": "Male", "enrollment_status": "Regular"},
-            {"external_id": "SCOPE-003", "lrn": "777777777773", "full_name": "CRUZ, TRANSFEREE",
+            {"external_id": "SCOPE-003", "lrn": "777777777773", "surname": "CRUZ", "first_name": "TRANSFEREE",
              "sex": "Female", "enrollment_status": "Transferred In", "enrollment_start_date": "2026-08-10",
              "transfer_school": "Previous National High School"},
         ]
@@ -498,6 +542,29 @@ class EduScanSmokeTest(unittest.TestCase):
             "grade": "11-T", "section": "Advisory", "guardian_phone": None, "biometric_consent": False,
         })
         self.assertEqual(duplicate_id.status_code, 409, duplicate_id.text)
+
+        with SessionLocal() as db:
+            grade_level = db.query(GradeLevel).filter_by(name="11-T").one()
+            teaching_section = SchoolSection(grade_level_id=grade_level.id, name="Teaching", active=True)
+            outside_section = SchoolSection(grade_level_id=grade_level.id, name="Outside", active=True)
+            year = SchoolYear(name="Scope-2026-2027", starts_on=date(2026, 8, 1),
+                              ends_on=date(2027, 6, 30), active=True)
+            subject = Subject(code="SCOPE-SUBJECT", name="Scope Subject", category="JHS", active=True)
+            db.add_all([teaching_section, outside_section, year, subject])
+            db.flush()
+            db.add(SubjectTeachingAssignment(
+                school_year_id=year.id, subject_id=subject.id, section_id=teaching_section.id,
+                teacher_user_id=account.json()["id"], active=True,
+            ))
+            db.commit()
+        for external_id, section_name in (("SCOPE-004", "Teaching"), ("SCOPE-005", "Outside")):
+            response = self.client.post("/api/persons", headers=self.headers, json={
+                "external_id": external_id, "lrn": f"77777777777{external_id[-1]}",
+                "surname": external_id, "first_name": "LEARNER", "sex": "Male", "role": "Student",
+                "grade": "11-T", "section": section_name, "guardian_phone": None,
+                "biometric_consent": False,
+            })
+            self.assertEqual(response.status_code, 200, response.text)
 
         all_school = self.client.get("/api/attendance/temporary-log?date=2026-08-24", headers=self.headers)
         self.assertEqual(all_school.status_code, 200, all_school.text)
@@ -519,6 +586,25 @@ class EduScanSmokeTest(unittest.TestCase):
         self.assertEqual(teacher_password.status_code, 200, teacher_password.text)
         assigned = self.client.get("/api/my/advisory-sections", headers=teacher_headers)
         self.assertEqual([(item["grade"], item["section"]) for item in assigned.json()], [("11-T", "Advisory")])
+        advisory_roster = self.client.get("/api/persons?role=Student", headers=teacher_headers)
+        self.assertEqual({item["section"] for item in advisory_roster.json()}, {"Advisory"})
+        teaching_roster = self.client.get("/api/persons?role=Student&scope=assigned", headers=teacher_headers)
+        self.assertEqual({item["section"] for item in teaching_roster.json()}, {"Advisory", "Teaching"})
+        self.assertEqual(len(teaching_roster.json()), 4)
+        self.assertNotIn("Outside", {item["section"] for item in teaching_roster.json()})
+        advisory_attendance = self.client.get("/api/attendance?date=2026-08-24", headers=teacher_headers)
+        self.assertEqual(len(advisory_attendance.json()), 3)
+        assigned_attendance = self.client.get(
+            "/api/attendance?date=2026-08-24&scope=assigned", headers=teacher_headers,
+        )
+        self.assertEqual(len(assigned_attendance.json()), 4)
+        self.assertEqual(self.client.get(
+            "/api/attendance?date=2026-08-24&grade=11-T&section=Teaching", headers=teacher_headers,
+        ).status_code, 403)
+        self.assertEqual(self.client.get(
+            "/api/attendance?date=2026-08-24&grade=11-T&section=Outside&scope=assigned",
+            headers=teacher_headers,
+        ).status_code, 403)
         scoped = self.client.get(
             "/api/attendance/temporary-log?date=2026-08-24&grade=11-T&section=Advisory",
             headers=teacher_headers,

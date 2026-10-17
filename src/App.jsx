@@ -31,6 +31,7 @@ function RoleGuard({ roles, children, allowPasswordChange = false }) {
 
 function WorkspaceHome() {
   const role = auth.role();
+  if (role === 'school_head') return <Navigate to="/dashboard/grading" replace />;
   if (role === 'records_officer') return <Navigate to="/dashboard/reports" replace />;
   if (role === 'privacy_officer' || role === 'ict') return <Navigate to="/dashboard/oversight" replace />;
   return <Dashboard />;
@@ -45,16 +46,17 @@ function App() {
           <Route element={<PublicLayout />}>
             <Route path="/" element={<Navigate to="/login" replace />} />
             <Route path="/login" element={<Login />} />
-            <Route path="/account/security" element={<RoleGuard roles={['admin', 'teacher', 'scanner', 'records_officer', 'privacy_officer', 'ict']} allowPasswordChange><AccountSecurity /></RoleGuard>} />
+            <Route path="/account/security" element={<RoleGuard roles={['admin', 'teacher', 'scanner', 'records_officer', 'privacy_officer', 'ict', 'school_head']} allowPasswordChange><AccountSecurity /></RoleGuard>} />
             <Route path="/scanner" element={<RoleGuard roles={['admin', 'scanner']}><Scanner /></RoleGuard>} />
+            <Route path="/scanner/test" element={<RoleGuard roles={['admin']}><Navigate to="/scanner?preview=1" replace /></RoleGuard>} />
           </Route>
 
           {/* Protected Routes (Authentication required in a real app) */}
-          <Route path="/dashboard" element={<RoleGuard roles={['admin', 'records_officer', 'privacy_officer', 'ict']}><AdminLayout /></RoleGuard>}>
+          <Route path="/dashboard" element={<RoleGuard roles={['admin', 'records_officer', 'privacy_officer', 'ict', 'school_head']}><AdminLayout /></RoleGuard>}>
             <Route index element={<WorkspaceHome />} />
             <Route path="attendance" element={<RoleGuard roles={['admin']}><Attendance /></RoleGuard>} />
-            <Route path="grading" element={<RoleGuard roles={['admin', 'records_officer']}><Grading /></RoleGuard>} />
-            <Route path="reports" element={<RoleGuard roles={['admin', 'records_officer']}><Reports /></RoleGuard>} />
+            <Route path="grading" element={<RoleGuard roles={['admin', 'records_officer', 'school_head']}><Grading /></RoleGuard>} />
+            <Route path="reports" element={<RoleGuard roles={['admin', 'records_officer', 'school_head']}><Reports /></RoleGuard>} />
             <Route path="oversight" element={<RoleGuard roles={['admin', 'records_officer', 'privacy_officer', 'ict']}><Oversight /></RoleGuard>} />
             <Route path="setup" element={<RoleGuard roles={['admin']}><SystemSetup /></RoleGuard>} />
             <Route path="administration" element={<RoleGuard roles={['admin']}><Administration /></RoleGuard>} />

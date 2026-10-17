@@ -1,10 +1,9 @@
 import React, { useState, useMemo, useRef } from 'react';
 import { Search, Calculator, ArrowUpDown } from 'lucide-react';
-import { calculateStudentGrade } from '../../services/gradingCalculations';
-import { useToast } from '../../contexts/ToastContext';
+import { calculateComponentPercentage, calculateStudentGrade, isBlankScore, resolveScoreEntry, roundGradeValue } from '../../services/gradingCalculations';
+import { useToast } from '../../contexts/useToast';
+import { gradingPeriodLabel } from '../../services/academicContext';
 import './GradingSheet.css';
-
-const QUARTER_LABELS = ['FIRST', 'SECOND', 'THIRD', 'FOURTH'];
 
 const STATUS_CONFIG = {
   Draft: { label: 'DRAFT', cls: 'deped-status-draft' },
@@ -21,24 +20,31 @@ export default function GradingSheet({
   scoreStatuses,
   passingGrade,
   transmutationTable,
+  roundingDecimalPlaces = 2,
+  roundingMethod = 'half_up',
   disabled,
+  loading = false,
+  emptyMessage,
   onScoreChange,
   onStatusChange,
   onStudentBreakdown,
   selectors = {},
-  isSeniorHigh = false,
   region,
-  setRegion,
   division,
-  setDivision,
   schoolId,
-  setSchoolId,
 }) {
   const { showError } = useToast();
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState('All');
   const [sortBy, setSortBy] = useState('name');
+  const [activeComponentId, setActiveComponentId] = useState(components[0]?.id);
   const inputRefs = useRef(new Map());
+  const [scoreCell, setScoreCell] = useState(null);
+  const openScoreStatus = (event, student, item, value, status) => {
+    if (disabled) return;
+    event.preventDefault();
+    setScoreCell({ personId: student.person_id, learner: student.full_name, item, value, status });
+  };
 
   // Flattened assessment items for column index tracking
   const flatItems = useMemo(() =>
@@ -46,92 +52,67 @@ export default function GradingSheet({
     [components]
   );
 
-  // Compute active items based on live scores (an item is active if ANY student has a non-empty score or explicit status)
-  const activeItemIds = useMemo(() => {
-    const activeIds = new Set();
-    for (const student of students) {
+  // Unused configured columns are capacity, not part of this class's grade.
+  const liveGradebook = useMemo(() => {
+    const rows = students.map(student => {
       const sId = String(student.person_id);
       const liveScores = scores[sId] || {};
       const liveStatuses = scoreStatuses[sId] || {};
-
-      for (const item of flatItems) {
-        const val = liveScores[item.id] !== undefined
-          ? liveScores[item.id]
-          : (student.scores?.[item.id] ?? '');
-        const explicitStat = liveStatuses[item.id] || student.score_statuses?.[item.id];
-
-        if (val !== '' || (explicitStat && explicitStat !== 'Missing')) {
-          activeIds.add(item.id);
-        }
-      }
-    }
-    return activeIds;
-  }, [students, scores, scoreStatuses, flatItems]);
-
-  // Highest Possible Score per component (only summing active items)
-  const hpsPerComponent = useMemo(() => {
-    const map = {};
-    for (const comp of components) {
-      map[comp.id] = (comp.items || [])
-        .filter(item => activeItemIds.has(item.id))
-        .reduce((s, item) => s + Number(item.max_score || 0), 0);
-    }
-    return map;
-  }, [components, activeItemIds]);
-
-  // Compute live student data including per-component PS / WS
-  const computedStudents = useMemo(() => {
-    return students.map(student => {
-      const sId = String(student.person_id);
-      const liveScores = scores[sId] || {};
-      const liveStatuses = scoreStatuses[sId] || {};
-
       const formattedScores = flatItems.map(item => {
         const val = liveScores[item.id] !== undefined
           ? liveScores[item.id]
           : (student.scores?.[item.id] ?? '');
         const explicitStat = liveStatuses[item.id] || student.score_statuses?.[item.id];
-        const stat = val === '' ? (explicitStat === 'Excused' ? 'Excused' : 'Missing') : 'Scored';
-        return { itemId: item.id, score: val, status: stat };
+        return { itemId: item.id, active: !isBlankScore(val) || Boolean(explicitStat && explicitStat !== 'Missing'), ...resolveScoreEntry(val, explicitStat) };
       });
+      return { student, liveScores, liveStatuses, formattedScores };
+    });
+    const activeItemIds = new Set(flatItems
+      .filter(item => rows.some(row => row.formattedScores.find(entry => entry.itemId === item.id)?.active))
+      .map(item => item.id));
+    return { rows, activeItemIds };
+  }, [students, scores, scoreStatuses, flatItems]);
 
+  const hpsPerComponent = useMemo(() => {
+    const map = {};
+    for (const comp of components) {
+      map[comp.id] = (comp.items || [])
+        .filter(item => liveGradebook.activeItemIds.has(item.id))
+        .reduce((s, item) => s + Number(item.max_score || 0), 0);
+    }
+    return map;
+  }, [components, liveGradebook.activeItemIds]);
+
+  // Compute live student data including per-component PS / WS
+  const computedStudents = useMemo(() => {
+    return liveGradebook.rows.map(({ student, liveScores, liveStatuses, formattedScores }) => {
       // Per-component computed values: total raw score, PS (%), WS (weighted)
       const componentCalcs = components.map(comp => {
-        const items = (comp.items || []).filter(item => activeItemIds.has(item.id));
-        const hps = hpsPerComponent[comp.id] || 0;
-        let total = 0;
-        let complete = items.length > 0;
+        const items = (comp.items || []).filter(item => comp.component_type === 'Term Examinations' || liveGradebook.activeItemIds.has(item.id));
+        const scoreCalc = calculateComponentPercentage(formattedScores, items, comp.component_type);
+        const total = scoreCalc.scoredCount ? scoreCalc.totalEarned : null;
+        const hps = scoreCalc.totalPossible;
+        const ps = scoreCalc.percentage;
+        const ws = ps !== null ? roundGradeValue(ps * (comp.weight / 100), roundingDecimalPlaces, roundingMethod) : null;
 
-        for (const item of items) {
-          const entry = formattedScores.find(f => f.itemId === item.id);
-          if (!entry || entry.status !== 'Scored' || entry.score === '' || entry.score == null) {
-            complete = false;
-          } else {
-            total += Number(entry.score);
-          }
-        }
-
-        const ps = (hps > 0 && complete) ? (total / hps) * 100 : null;
-        const ws = ps !== null ? ps * (comp.weight / 100) : null;
-
-        return { compId: comp.id, total: complete ? total : null, hps, ps, ws };
+        return { compId: comp.id, total, hps, ps, ws };
       });
-
-      const filteredComponents = components.map(c => ({
-        ...c,
-        items: (c.items || []).filter(item => activeItemIds.has(item.id))
-      }));
 
       const calc = calculateStudentGrade({
         studentScores: formattedScores,
-        components: filteredComponents,
+        components: components.map(comp => ({
+          ...comp,
+          items: (comp.items || []).filter(item => comp.component_type === 'Term Examinations' || liveGradebook.activeItemIds.has(item.id)),
+        })),
         transmutationTable,
         passingGrade,
+        roundingDecimalPlaces,
+        roundingMethod,
       });
 
       return { ...student, liveScores, liveStatuses, componentCalcs, calc };
     });
-  }, [students, scores, scoreStatuses, flatItems, components, hpsPerComponent, transmutationTable, passingGrade, activeItemIds]);
+  }, [liveGradebook, components, transmutationTable, passingGrade, roundingDecimalPlaces, roundingMethod]);
 
   // Filter + sort
   const displayedStudents = useMemo(() => {
@@ -184,11 +165,12 @@ export default function GradingSheet({
   }, [displayedStudents]);
 
   const totalNavRows = displayedStudents.length;
+  const isGradeSummary = activeComponentId === 'grade-summary';
+  const activeComponent = components.find(component => component.id === activeComponentId) || components[0];
+  const visibleItems = activeComponent?.items || [];
 
   // Column count for the empty-state row colspan
-  const totalColSpan = 2
-    + components.reduce((sum, c) => sum + (c.items || []).length + 3, 0)
-    + 3; // Initial + Quarterly + Action
+  const totalColSpan = isGradeSummary ? 5 : 2 + visibleItems.length + 3;
 
   // Keyboard navigation
   const handleKeyDown = (e, navRowIdx, colIdx) => {
@@ -208,7 +190,7 @@ export default function GradingSheet({
       e.preventDefault();
       nextRow = Math.max(0, navRowIdx - 1);
     } else if (e.key === 'ArrowRight' && e.target.selectionStart === e.target.value.length) {
-      if (colIdx < flatItems.length - 1) nextCol = colIdx + 1;
+      if (colIdx < visibleItems.length - 1) nextCol = colIdx + 1;
     } else if (e.key === 'ArrowLeft' && e.target.selectionStart === 0) {
       if (colIdx > 0) nextCol = colIdx - 1;
     }
@@ -220,13 +202,13 @@ export default function GradingSheet({
   };
 
   // Derived header values
-  const quarterLabel = gradebook?.quarter
-    ? `${QUARTER_LABELS[(gradebook.quarter - 1)] || gradebook.quarter} QUARTER`
-    : 'QUARTER';
+  const quarterLabel = gradebook?.grading_period_name || (gradebook?.quarter
+    ? gradingPeriodLabel(gradebook.quarter)
+    : 'TERM');
   const statusCfg = STATUS_CONFIG[gradebook?.status] || STATUS_CONFIG.Draft;
 
   return (
-    <section className="deped-class-record">
+    <section className="deped-class-record" aria-busy={loading}>
 
       {/* â• â•  DepEd Class Record Header Block â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â•  */}
       <div className="deped-header-block">
@@ -239,7 +221,9 @@ export default function GradingSheet({
             <div className="deped-header-subtitle">(Pursuant to DepEd Order #8, s.2015)</div>
           </div>
           <div className="deped-header-right">
-            <div className={`deped-status-badge ${statusCfg.cls}`}>{statusCfg.label}</div>
+            <div className={`deped-status-badge ${statusCfg.cls}`} role={loading ? 'status' : undefined}>
+              {loading ? 'LOADING…' : gradebook ? statusCfg.label : 'NO RECORD'}
+            </div>
           </div>
         </div>
 
@@ -249,37 +233,21 @@ export default function GradingSheet({
             <tr>
               <th>REGION</th>
               <td>
-                <input
-                  type="text"
-                  className="deped-header-input"
-                  placeholder="e.g. I, II, III, IV..."
-                  value={region}
-                  readOnly
-                />
+                {region}
               </td>
               <th>DIVISION</th>
               <td>
-                <input
-                  type="text"
-                  className="deped-header-input"
-                  placeholder="e.g. I, II, III, IV..."
-                  value={division}
-                  readOnly
-                />
+                {division}
               </td>
+              <th>SCHOOL HEAD</th>
+              <td>{gradebook ? (gradebook.school_head || 'Not configured') : ''}</td>
             </tr>
             <tr>
               <th>SCHOOL NAME</th>
               <td>San Jose National High School</td>
               <th>SCHOOL ID</th>
               <td>
-                <input
-                  type="text"
-                  className="deped-header-input"
-                  placeholder="e.g. 123456"
-                  value={schoolId}
-                  readOnly
-                />
+                {schoolId}
               </td>
               <th>SCHOOL YEAR</th>
               <td>{selectors.schoolYear || gradebook?.school_year_name || ''}</td>
@@ -302,7 +270,7 @@ export default function GradingSheet({
               </td>
               <th>TEACHER:</th>
               <td>{gradebook?.teacher_name || '-'}</td>
-              <th>{isSeniorHigh ? 'TRACK:' : 'SUBJECT:'}</th>
+              <th>SUBJECT:</th>
               <td>{selectors.subject || gradebook?.subject_name || '-'}</td>
             </tr>
           </tbody>
@@ -345,78 +313,97 @@ export default function GradingSheet({
             </div>
 
             <span className="deped-learner-count">
+              {!disabled && <span>Right-click a score or press Shift+F10 to set its status. </span>}
               {displayedStudents.length} / {students.length} learners
             </span>
+            {computedStudents.some(student => !student.calc.complete) && (
+              <span className="deped-learner-count" role="status">
+                Initial and term grades appear after every activity used in this class is scored for each learner.
+              </span>
+            )}
+          </div>
+
+          <div className="deped-assessment-tabs" role="group" aria-label="Class record view">
+            {components.map(component => {
+              const label = component.component_type === 'Term Examinations' ? 'Quarterly Assessment' : component.name;
+              const selected = component.id === activeComponent?.id;
+              return (
+                <button key={component.id} type="button" aria-pressed={selected}
+                  className={`deped-assessment-tab${selected ? ' deped-assessment-tab-active' : ''}`}
+                  onClick={() => setActiveComponentId(component.id)}>
+                  {label} <span>{component.weight}%</span>
+                </button>
+              );
+            })}
+            <button type="button" aria-pressed={isGradeSummary}
+              className={`deped-assessment-tab${isGradeSummary ? ' deped-assessment-tab-active' : ''}`}
+              onClick={() => setActiveComponentId('grade-summary')}>
+              Grades &amp; Calculation
+            </button>
           </div>
 
           {/* â• â•  DepEd Spreadsheet Table â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â•  */}
           <div className="deped-table-scroll">
             <table className="deped-sheet-table">
               <thead>
-
-                {/* â”€â”€ Tier 1: Component group headers â”€â”€ */}
-                <tr className="deped-tier-1">
-                  <th rowSpan={2} className="deped-th deped-th-no">No.</th>
-                  <th rowSpan={2} className="deped-th deped-th-name deped-sticky-col">
-                    LEARNERS' NAMES
-                  </th>
-
-                  {components.map(comp => (
-                    <th
-                      key={comp.id}
-                      colSpan={(comp.items || []).length + 3}
-                      className="deped-th deped-th-comp-group"
-                    >
-                      {comp.name.toUpperCase()} ({comp.weight}%)
-                    </th>
-                  ))}
-
-                  <th rowSpan={2} className="deped-th deped-th-grade-col">Initial<br />Grade</th>
-                  <th rowSpan={2} className="deped-th deped-th-quarterly-col">Quarterly<br />Grade</th>
-                  <th rowSpan={2} className="deped-th deped-th-action-col"><Calculator size={11} /></th>
-                </tr>
-
-                {/* â”€â”€ Tier 2: Item numbers + Total / PS / WS labels â”€â”€ */}
-                <tr className="deped-tier-2">
-                  {components.flatMap(comp => [
-                    ...(comp.items || []).map((_, i) => (
-                      <th key={`${comp.id}-item-${i}`} className="deped-th deped-th-item">{i + 1}</th>
-                    )),
-                    <th key={`${comp.id}-total`} className="deped-th deped-th-computed-label">Total</th>,
-                    <th key={`${comp.id}-ps`} className="deped-th deped-th-computed-label">PS</th>,
-                    <th key={`${comp.id}-ws`} className="deped-th deped-th-ws-label">WS</th>,
-                  ])}
-                </tr>
-
-                {/* â”€â”€ HPS Row (Highest Possible Score) â”€â”€ */}
-                <tr className="deped-hps-row">
-                  <th className="deped-hps-cell deped-hps-no">-</th>
-                  <th className="deped-hps-cell deped-hps-label deped-sticky-col">
-                    HIGHEST POSSIBLE SCORE
-                  </th>
-                  {components.flatMap(comp => {
-                    const hps = hpsPerComponent[comp.id] || 0;
-                    return [
-                      ...(comp.items || []).map(item => (
-                        <th key={`hps-${item.id}`} className="deped-hps-cell">{item.max_score}</th>
-                      )),
-                      <th key={`hps-${comp.id}-total`} className="deped-hps-cell">{hps}</th>,
-                      <th key={`hps-${comp.id}-ps`} className="deped-hps-cell">100.00</th>,
-                      <th key={`hps-${comp.id}-ws`} className="deped-hps-cell deped-hps-ws">{comp.weight}%</th>,
-                    ];
-                  })}
-                  <th className="deped-hps-cell"></th>
-                  <th className="deped-hps-cell"></th>
-                  <th className="deped-hps-cell"></th>
-                </tr>
-
+                {isGradeSummary ? (
+                  <tr className="deped-tier-1">
+                    <th className="deped-th deped-th-no">No.</th>
+                    <th className="deped-th deped-th-name deped-sticky-col">LEARNERS' NAMES</th>
+                    <th className="deped-th deped-th-grade-col">Initial Grade</th>
+                    <th className="deped-th deped-th-quarterly-col">Term Grade</th>
+                    <th className="deped-th deped-th-action-col"><Calculator size={11} /><span className="control-label">Calculation</span></th>
+                  </tr>
+                ) : (
+                  <>
+                    <tr className="deped-tier-1">
+                      <th rowSpan={2} className="deped-th deped-th-no">No.</th>
+                      <th rowSpan={2} className="deped-th deped-th-name deped-sticky-col">LEARNERS' NAMES</th>
+                      {activeComponent && (
+                        <th key={activeComponent.id} colSpan={visibleItems.length + 3} className="deped-th deped-th-comp-group">
+                          {(activeComponent.component_type === 'Term Examinations' ? 'Quarterly Assessment' : activeComponent.name).toUpperCase()} ({activeComponent.weight}%)
+                        </th>
+                      )}
+                    </tr>
+                    <tr className="deped-tier-2">
+                      {activeComponent && [
+                        ...visibleItems.map((item, i) => (
+                          <th key={`${activeComponent.id}-item-${i}`} className="deped-th deped-th-item">{activeComponent.component_type === 'Term Examinations' ? item.label : i + 1}</th>
+                        )),
+                        <th key={`${activeComponent.id}-total`} className="deped-th deped-th-computed-label">Total</th>,
+                        <th key={`${activeComponent.id}-ps`} className="deped-th deped-th-computed-label">PS</th>,
+                        <th key={`${activeComponent.id}-ws`} className="deped-th deped-th-ws-label">WS</th>,
+                      ]}
+                    </tr>
+                    <tr className="deped-hps-row">
+                      <th className="deped-hps-cell deped-hps-no">-</th>
+                      <th className="deped-hps-cell deped-hps-label deped-sticky-col">HIGHEST POSSIBLE SCORE</th>
+                      {activeComponent && (() => {
+                        const comp = activeComponent;
+                        const hps = hpsPerComponent[comp.id] || 0;
+                        return [
+                          ...(comp.items || []).map(item => (
+                            <th key={`hps-${item.id}`} className="deped-hps-cell">{item.max_score}</th>
+                          )),
+                          <th key={`hps-${comp.id}-total`} className="deped-hps-cell">{hps}</th>,
+                          <th key={`hps-${comp.id}-ps`} className="deped-hps-cell">100.00</th>,
+                          <th key={`hps-${comp.id}-ws`} className="deped-hps-cell deped-hps-ws">{comp.weight}%</th>,
+                        ];
+                      })()}
+                    </tr>
+                  </>
+                )}
               </thead>
 
               <tbody>
                 {displayedStudents.length === 0 ? (
                   <tr>
                     <td colSpan={totalColSpan} className="deped-empty-cell">
-                      No learners match the current filter or search criteria.
+                      {loading
+                        ? 'Loading class record…'
+                        : !gradebook
+                          ? (emptyMessage || 'Choose a school year, grading period, grade, section, and subject in the header to open a class record.')
+                          : 'No learners match the current filter or search criteria.'}
                     </td>
                   </tr>
                 ) : (
@@ -449,15 +436,31 @@ export default function GradingSheet({
                               {student.full_name}
                             </td>
 
+                            {isGradeSummary ? (
+                              <>
+                                <td className="deped-cell deped-cell-initial">
+                                  {student.calc.initialGrade != null ? student.calc.initialGrade.toFixed(2) : ''}
+                                </td>
+                                <td className={`deped-cell deped-cell-quarterly${isPassing ? ' deped-passing' : isFailing ? ' deped-failing' : ''}`}>
+                                  {student.calc.reportedGrade != null ? <strong>{student.calc.reportedGrade}</strong> : ''}
+                                </td>
+                                <td className="deped-cell deped-cell-action">
+                                  <button type="button" className="deped-calc-btn" title="View step-by-step DepEd computation" onClick={() => onStudentBreakdown?.(student.person_id)}>
+                                    <Calculator size={11} /><span className="control-label">Calculation</span>
+                                  </button>
+                                </td>
+                              </>
+                            ) : (
+                              <>
                             {/* Score cells + computed columns per component */}
-                            {components.flatMap((comp, compIdx) => {
-                              const items = comp.items || [];
+                            {activeComponent && (() => {
+                              const comp = activeComponent;
+                              const compIdx = components.findIndex(component => component.id === comp.id);
+                              const items = visibleItems;
                               const cc = student.componentCalcs[compIdx];
 
                               if (items.length === 0) {
-                                return [
-                                  <td key={`${comp.id}-empty`} className="deped-cell deped-cell-computed" colSpan={3}>-</td>,
-                                ];
+                                return <td key={`${comp.id}-empty`} className="deped-cell deped-cell-computed" colSpan={3}>-</td>;
                               }
 
                               const scoreCells = items.map(item => {
@@ -466,9 +469,7 @@ export default function GradingSheet({
                                   ? student.liveScores[item.id]
                                   : (student.scores?.[item.id] ?? '');
                                 const explicitStatus = student.liveStatuses[item.id] || student.score_statuses?.[item.id];
-                                const currentStatus = currentVal === ''
-                                  ? (explicitStatus === 'Excused' ? 'Excused' : 'Missing')
-                                  : 'Scored';
+                                const currentStatus = resolveScoreEntry(currentVal, explicitStatus).status;
                                 const isScored = currentStatus === 'Scored';
                                 const isOverMax = isScored && Number(currentVal) > item.max_score;
                                 const isNeg = isScored && Number(currentVal) < 0;
@@ -485,7 +486,7 @@ export default function GradingSheet({
                                         else inputRefs.current.delete(`${student.navIdx}-${itemColIdx}`);
                                       }}
                                       type="number"
-                                      step="0.5"
+                                      step="any"
                                       min="0"
                                       max={item.max_score}
                                       className={`deped-score-input${hasError ? ' deped-input-error' : ''}`}
@@ -493,13 +494,19 @@ export default function GradingSheet({
                                       value={currentVal}
                                       placeholder=""
                                       onChange={e => onScoreChange?.(student.person_id, item.id, e.target.value)}
-                                      onKeyDown={e => handleKeyDown(e, student.navIdx, itemColIdx)}
+                                      aria-label={`${student.full_name} — ${item.label}`}
+                                      onContextMenu={event => openScoreStatus(event, student, item, currentVal, currentStatus)}
+                                      onKeyDown={event => {
+                                        if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                                          openScoreStatus(event, student, item, currentVal, currentStatus);
+                                        } else handleKeyDown(event, student.navIdx, itemColIdx);
+                                      }}
                                       title={hasError
                                         ? `Score must be between 0 and ${item.max_score}`
                                         : `${item.label} (Max: ${item.max_score})`}
                                     />
-                                    {currentStatus === 'Excused' && (
-                                      <div className="deped-excused-tag">EXC</div>
+                                    {!['Scored', 'Missing'].includes(currentStatus) && (
+                                      <div className="deped-excused-tag" title={currentStatus}>{currentStatus === 'Not Applicable' ? 'N/A' : currentStatus.slice(0, 3).toUpperCase()}</div>
                                     )}
                                   </td>
                                 );
@@ -520,34 +527,10 @@ export default function GradingSheet({
                                   {cc.ws !== null ? cc.ws.toFixed(2) : ''}
                                 </td>,
                               ];
-                            })}
+                            })()}
 
-                            {/* Initial Grade */}
-                            <td className="deped-cell deped-cell-initial">
-                              {student.calc.initialGrade != null
-                                ? student.calc.initialGrade.toFixed(2)
-                                : ''}
-                            </td>
-
-                            {/* Quarterly Grade */}
-                            <td className={`deped-cell deped-cell-quarterly${isPassing ? ' deped-passing' : isFailing ? ' deped-failing' : ''}`}>
-                              {student.calc.reportedGrade != null
-                                ? <strong>{student.calc.reportedGrade}</strong>
-                                : ''}
-                            </td>
-
-                            {/* Step-by-step calculation breakdown */}
-                            <td className="deped-cell deped-cell-action">
-                              <button
-                                type="button"
-                                className="deped-calc-btn"
-                                title="View step-by-step DepEd computation"
-                                onClick={() => onStudentBreakdown?.(student.person_id)}
-                              >
-                                <Calculator size={11} />
-                              </button>
-                            </td>
-
+                              </>
+                            )}
                           </tr>
                         );
                       })}
@@ -558,6 +541,31 @@ export default function GradingSheet({
             </table>
           </div>
         </>
+      {scoreCell && (
+        <div className="modal-backdrop">
+          <form className="modal-card modal-sm" role="dialog" aria-modal="true" aria-labelledby="score-status-title" onSubmit={event => {
+            event.preventDefault();
+            if (disabled) return;
+            if (scoreCell.status === 'Scored') {
+              if (isBlankScore(scoreCell.value) || !Number.isFinite(Number(scoreCell.value)) || Number(scoreCell.value) < 0 || Number(scoreCell.value) > scoreCell.item.max_score) {
+                showError(`Enter a score between 0 and ${scoreCell.item.max_score}.`);
+                return;
+              }
+              onScoreChange?.(scoreCell.personId, scoreCell.item.id, scoreCell.value);
+            }
+            onStatusChange?.(scoreCell.personId, scoreCell.item.id, scoreCell.status);
+            setScoreCell(null);
+          }}>
+            <div className="modal-header"><h3 id="score-status-title">Assessment score &amp; status</h3></div>
+            <p>{scoreCell.learner}<br />{scoreCell.item.label}</p>
+            <label><span className="field-label">Status</span><select autoFocus className="input-field" value={scoreCell.status} disabled={disabled} onChange={event => setScoreCell({ ...scoreCell, status: event.target.value })}>
+              {['Scored', 'Missing', 'Absent', 'Excused', 'Incomplete', 'Not Applicable'].map(status => <option key={status}>{status}</option>)}
+            </select></label>
+            {scoreCell.status === 'Scored' && <label><span className="field-label">Score (0–{scoreCell.item.max_score})</span><input className="input-field" type="number" step="any" min="0" max={scoreCell.item.max_score} value={scoreCell.value} disabled={disabled} onChange={event => setScoreCell({ ...scoreCell, value: event.target.value })} required /></label>}
+            <div className="modal-actions"><button className="btn-secondary" type="button" onClick={() => setScoreCell(null)}>Cancel</button><button className="btn-primary" type="submit" disabled={disabled}>Apply to draft</button></div>
+          </form>
+        </div>
+      )}
     </section>
   );
 }

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, ChevronDown, Clock3, Download, Eraser, FileEdit, MessageSquareText, ShieldCheck, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronDown, Clock3, Download, Eraser, FileEdit, MessageSquareText, ShieldCheck, X } from 'lucide-react';
 import { api, auth, displayTime, localDate } from '../../api/client';
-import { useToast } from '../../contexts/ToastContext';
+import { useToast } from '../../contexts/useToast';
 
 const statusColor = {
   Present: 'var(--success)', Late: '#b45309', Absent: 'var(--danger)', 'No scan': 'var(--text-muted)',
@@ -20,6 +20,7 @@ export default function Attendance() {
   const [resetting, setResetting] = useState(false);
   const { showSuccess, showError } = useToast();
   const [roleFilter, setRoleFilter] = useState('All');
+  const attendanceRequest = useRef(0);
 
   const selectedSection = useMemo(() => sections.find((item) => `${item.grade}|${item.section}` === sectionKey), [sections, sectionKey]);
   const sectionQuery = selectedSection ? `&grade=${encodeURIComponent(selectedSection.grade)}&section=${encodeURIComponent(selectedSection.section)}` : '';
@@ -31,18 +32,51 @@ export default function Attendance() {
     }).catch((err) => showError(err.message));
   }, [showError]);
 
-  const load = useCallback(async () => {
-    try {
-      const requests = [api.get(`/attendance?date=${date}${sectionQuery}`), api.get('/attendance/corrections')];
-      if (auth.role() === 'admin') requests.push(api.get('/sms/outbox'), api.get('/attendance/resets'));
-      const [attendance, audit, outbox = [], resetRows = []] = await Promise.all(requests);
-      setRows(attendance); setCorrections(audit); setOutboxCount(outbox.length); setResets(resetRows);
-    } catch (err) { showError(err.message); }
+  const loadRows = useCallback(() => {
+    const requestId = ++attendanceRequest.current;
+    return api.get(`/attendance?date=${date}${sectionQuery}`).then((attendance) => {
+      if (requestId === attendanceRequest.current) setRows(attendance);
+    }).catch((err) => {
+      if (requestId === attendanceRequest.current) showError(err.message);
+    });
   }, [date, sectionQuery, showError]);
-  useEffect(() => { load(); }, [load]);
+
+  const load = useCallback(() => {
+    const attendance = loadRows();
+    const requests = [api.get('/attendance/corrections')];
+    if (auth.role() === 'admin') requests.push(api.get('/sms/outbox'), api.get('/attendance/resets'));
+    const metadata = Promise.allSettled(requests).then(([audit, outbox, resetRows]) => {
+      if (audit.status === 'fulfilled') setCorrections(audit.value);
+      if (outbox?.status === 'fulfilled') setOutboxCount(outbox.value.length);
+      if (resetRows?.status === 'fulfilled') setResets(resetRows.value);
+      const failed = [audit, outbox, resetRows].find((result) => result?.status === 'rejected');
+      if (failed) showError(failed.reason.message);
+    }).catch((err) => showError(err.message));
+    return Promise.all([attendance, metadata]);
+  }, [loadRows, showError]);
+  useEffect(() => {
+    load();
+    return () => { attendanceRequest.current += 1; };
+  }, [load]);
+  useEffect(() => {
+    let busy = false;
+    const refresh = async () => {
+      if (busy || document.visibilityState === 'hidden' || !auth.token()) return;
+      busy = true;
+      try { await loadRows(); } finally { busy = false; }
+    };
+    const timer = window.setInterval(refresh, 5000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [loadRows]);
 
   const filtered = roleFilter === 'All' ? rows : rows.filter((row) => row.role === roleFilter);
-  const counts = rows.reduce((result, row) => ({ ...result, [row.status]: (result[row.status] || 0) + 1 }), {});
+  const counts = filtered.reduce((result, row) => ({ ...result, [row.status]: (result[row.status] || 0) + 1 }), {});
   const downloadLog = () => {
     if (auth.role() === 'teacher' && !selectedSection) return showError('Ask the administrator to assign your adviser account to a section first.');
     const query = new URLSearchParams({ date });
@@ -59,7 +93,8 @@ export default function Attendance() {
   };
 
   return <div className="page-stack">
-    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '1rem' }}><button className="btn-primary" onClick={downloadLog}><Download size={17} /> Download current log</button></div>
+    <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}><button className="btn-secondary" onClick={load}>Refresh attendance</button><button className="btn-primary" onClick={downloadLog}><Download size={17} /> Download current log</button></div>
+    <p className="muted-small">Attendance updates every 5 seconds while this page is visible. Registered students appear in the roster; a successful Time In marks them Present or Late. Time Out keeps their attendance for the day and records their departure time.</p>
     <div className="notice notice-blue"><ShieldCheck size={19} /><div><strong>One row per unique student ID or LRN.</strong> The all-school file includes every active record; adviser downloads are filtered by section and alphabetized. Raw scans and clean-slate actions remain auditable.</div></div>
 
     <div className="metric-grid compact-grid">{[['Present', counts.Present || 0], ['Late', counts.Late || 0], ['Absent', counts.Absent || 0], ['Pending / no scan', counts['No scan'] || 0]].map(([label, value]) => <div className="metric-card" key={label}><span>{label}</span><strong>{value}</strong></div>)}</div>
@@ -75,7 +110,7 @@ export default function Attendance() {
       {auth.role() === 'teacher' && sections.length === 0 && <div className="notice notice-warning">No adviser section is assigned to {auth.name()}. An administrator must select this account’s full name in Administration → Academic structure → Sections.</div>}
       <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>Role / class</th><th>Time in</th><th>Time out</th><th>Status</th><th>Source</th><th>Action</th></tr></thead><tbody>
         {filtered.length === 0 && <tr><td colSpan="7" className="empty-cell">No active records are available for this scope.</td></tr>}
-        {filtered.map((row) => <tr key={row.person_id}><td><strong>{row.full_name}</strong><div className="muted-small">{row.external_id}{row.lrn ? ` · LRN ${row.lrn}` : ''} · {row.sex}</div></td><td>{row.role}<div className="muted-small">{row.role === 'Student' ? `Grade ${row.grade} — ${row.section}` : row.assignment}</div></td><td>{displayTime(row.time_in)}</td><td>{displayTime(row.time_out)}</td><td><span style={{ color: statusColor[row.status], fontWeight: 700 }}>{row.status}</span></td><td>{row.source}{row.correction_reason && <div className="muted-small">Reason: {row.correction_reason}</div>}</td><td><button className="btn-link" onClick={() => setEditing(row)}><FileEdit size={15} /> Correct</button></td></tr>)}
+        {filtered.map((row) => <tr key={row.person_id}><td><strong>{row.full_name}</strong><div className="muted-small">{row.external_id}{row.lrn ? ` · LRN ${row.lrn}` : ''} · {row.sex}</div></td><td>{row.role}<div className="muted-small">{row.role === 'Student' ? `Grade ${row.grade} — ${row.section}` : row.assignment}</div></td><td>{displayTime(row.time_in)}</td><td>{displayTime(row.time_out)}</td><td><span style={{ color: statusColor[row.status], fontWeight: 700 }}>{row.status}</span></td><td>{row.source}{row.correction_reason && <div className="muted-small">Reason: {row.correction_reason}</div>}</td><td><button className="btn-link" onClick={() => setEditing(row)}><FileEdit size={15} /> Correct</button><button className="btn-link" onClick={() => setEditing({ ...row, assisted: true })}>Assist</button></td></tr>)}
       </tbody></table></div>
     </section>
 
@@ -90,16 +125,35 @@ export default function Attendance() {
 }
 
 function CorrectionModal({ row, date, onClose, onSaved }) {
-  const [form, setForm] = useState({ status: row.status === 'No scan' ? 'Present' : row.status, time_in: row.time_in || '', time_out: row.time_out || '', reason: '' });
+  const assisted = Boolean(row.assisted);
+  const [identityVerified, setIdentityVerified] = useState(false);
+  const [form, setForm] = useState({ status: assisted ? (row.status === 'Late' ? 'Late' : 'Present') : ['No scan', 'Time Out'].includes(row.status) ? 'Present' : row.status, time_in: row.time_in || '', time_out: row.time_out || '', reason: '' });
   const [error, setError] = useState('');
-  const update = (field) => (event) => setForm((current) => ({ ...current, [field]: event.target.value }));
+  const update = (field) => (event) => setForm((current) => ({ ...current, [field]: event.target.value,
+    ...(field === 'status' && event.target.value === 'No scan' ? { time_in: '', time_out: '' } : {}),
+  }));
   const submit = async (event) => {
     event.preventDefault();
+    if (assisted && (!identityVerified || !form.time_in)) return setError('Confirm the school ID or official roster and enter the verified arrival time.');
     if (form.reason.trim().length < 8) return setError('Enter a specific correction reason (at least 8 characters).');
-    try { await api.post('/attendance/corrections', { person_id: row.person_id, attendance_date: date, status: form.status, time_in: form.time_in || null, time_out: form.time_out || null, reason: form.reason }); await onSaved(); }
+    try { await api.post('/attendance/corrections', { person_id: row.person_id, attendance_date: date, status: form.status, time_in: form.time_in || null, time_out: form.time_out || null, reason: form.reason, assisted, identity_verified: identityVerified }); await onSaved(); }
     catch (err) { setError(err.message); }
   };
-  return <div className="modal-backdrop"><form className="modal-card" onSubmit={submit}><div className="modal-header"><div><p className="eyebrow">Documented correction</p><h2>{row.full_name}</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={20} /></button></div><p className="section-copy">The raw gate event remains unchanged. This becomes a separate attributable record for {date}.</p><div className="form-grid two-columns"><label><span className="field-label">Authorized account</span><input className="input-field" value={`${auth.name()} (${auth.role()})`} readOnly /></label><label><span className="field-label">Corrected status</span><select className="input-field" value={form.status} onChange={update('status')}><option>Present</option><option>Late</option><option>Absent</option><option>Time Out</option></select></label><label><span className="field-label">Corrected time in</span><input className="input-field" type="time" value={form.time_in} onChange={update('time_in')} /></label><label><span className="field-label">Corrected time out</span><input className="input-field" type="time" value={form.time_out} onChange={update('time_out')} /></label></div><label><span className="field-label">Required reason and supporting detail</span><textarea className="text-area" value={form.reason} onChange={update('reason')} /></label>{error && <p className="error-text">{error}</p>}<div className="modal-actions"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary" type="submit">Save correction</button></div></form></div>;
+  return <div className="modal-backdrop"><form className="modal-card" onSubmit={submit}>
+    <div className="modal-header"><div><p className="eyebrow">{assisted ? 'Staff-assisted attendance' : 'Documented correction'}</p><h2>{row.full_name}</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={20} /><span className="control-label">Close</span></button></div>
+    <p className="section-copy">The raw gate event remains unchanged. This becomes a separate attributable record for {date}.</p>
+    {assisted && <div className="notice notice-blue">Use this option when face capture or blinking is difficult, including facial differences. Confirm identity in person, enter the observed times, and apply the existing school rules for Present or Late. Do not enter medical details.</div>}
+    <div className="form-grid two-columns">
+      <label><span className="field-label">Authorized account</span><input className="input-field" value={`${auth.name()} (${auth.role()})`} readOnly /></label>
+      <label><span className="field-label">{assisted ? 'Verified attendance status' : 'Corrected status'}</span><select className="input-field" value={form.status} onChange={update('status')}><option>Present</option><option>Late</option>{!assisted && <><option>Absent</option><option>No scan</option></>}</select></label>
+      <label><span className="field-label">{assisted ? 'Verified arrival time' : 'Corrected time in'}</span><input className="input-field" type="time" required={assisted} disabled={form.status === 'No scan'} value={form.time_in} onChange={update('time_in')} /></label>
+      <label><span className="field-label">{assisted ? 'Verified departure time (if any)' : 'Corrected time out'}</span><input className="input-field" type="time" disabled={form.status === 'No scan'} value={form.time_out} onChange={update('time_out')} /></label>
+    </div>
+    {assisted && <label className="checkbox-field"><input type="checkbox" checked={identityVerified} onChange={(event) => setIdentityVerified(event.target.checked)} required /><span>I checked this person's school ID or official roster in person: {row.external_id}{row.lrn ? ` · LRN ${row.lrn}` : ''}.</span></label>}
+    <label><span className="field-label">Required reason and supporting detail</span><textarea className="text-area" value={form.reason} onChange={update('reason')} maxLength={1000} required /></label>
+    {error && <p className="error-text" role="alert">{error}</p>}
+    <div className="modal-actions"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary" type="submit">{assisted ? 'Save assisted attendance' : 'Save correction'}</button></div>
+  </form></div>;
 }
 
 function ResetDayModal({ date, onClose, onSaved }) {
@@ -111,5 +165,5 @@ function ResetDayModal({ date, onClose, onSaved }) {
     try { await onSaved(await api.post('/attendance/reset', { attendance_date: date, reason, confirmation })); }
     catch (err) { setError(err.message); }
   };
-  return <div className="modal-backdrop"><form className="modal-card" onSubmit={submit}><div className="modal-header"><div><p className="eyebrow">Admin-only clean slate</p><h2>Reset reporting view for {date}</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={20} /></button></div><div className="notice notice-warning">Existing scans and corrections are retained for accountability but superseded in attendance, scanner history, and generated logs. New scans after this reset become the active records.</div><label><span className="field-label">Documented reason</span><textarea className="text-area" value={reason} onChange={(event) => setReason(event.target.value)} required /></label><label><span className="field-label">Type {date} to confirm</span><input className="input-field" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label>{error && <p className="error-text">{error}</p>}<div className="modal-actions"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-danger" disabled={confirmation !== date || reason.trim().length < 12}><Eraser size={16} /> Start clean slate</button></div></form></div>;
+  return <div className="modal-backdrop"><form className="modal-card" onSubmit={submit}><div className="modal-header"><div><p className="eyebrow">Admin-only clean slate</p><h2>Reset reporting view for {date}</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={20} /><span className="control-label">Close</span></button></div><div className="notice notice-warning">Existing scans and corrections are retained for accountability but superseded in attendance, scanner history, and generated logs. New scans after this reset become the active records.</div><label><span className="field-label">Documented reason</span><textarea className="text-area" value={reason} onChange={(event) => setReason(event.target.value)} required /></label><label><span className="field-label">Type {date} to confirm</span><input className="input-field" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label>{error && <p className="error-text">{error}</p>}<div className="modal-actions"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-danger" disabled={confirmation !== date || reason.trim().length < 12}><Eraser size={16} /> Start clean slate</button></div></form></div>;
 }

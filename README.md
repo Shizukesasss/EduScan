@@ -9,6 +9,7 @@ EduScan is the working local-first attendance, SMS, grading, and SF2 reporting s
 - [RAD progress report](docs/RAD_PROGRESS_REPORT.txt) — completed work organized around Rapid Application Development phases
 - [Disaster-recovery procedure](docs/DISASTER_RECOVERY.md) — encrypted backup, integrity verification, staged restoration, and recovery testing
 - [SQLite to MySQL migration](docs/MYSQL_MIGRATION.md) — non-destructive copy, row-count verification, cutover, and rollback
+- [PostgreSQL / Supabase setup](docs/POSTGRESQL_SETUP.md) and [recovery](docs/POSTGRES_RECOVERY.md) — database connection and controlled encrypted recovery
 - [Android SMS Gateway setup](docs/ANDROID_SMS_GATEWAY.md) — offline LAN setup, connection tests, and troubleshooting
 
 ## Implemented system
@@ -18,7 +19,7 @@ EduScan is the working local-first attendance, SMS, grading, and SF2 reporting s
 - Minimum-quality and one-face-only enrollment checks
 - Encrypted biometric samples and models outside the web root; versioned LBPH models with SHA-256 integrity records
 - Audited biometric CRUD; deletion purges encrypted samples, sample rows, obsolete LBPH files, and obsolete model rows while retaining only the required non-biometric audit record
-- Persistent SQLAlchemy database (SQLite by default; MySQL supported through `DATABASE_URL`)
+- Persistent SQLAlchemy database (SQLite by default; MySQL and PostgreSQL/Supabase supported through `DATABASE_URL`)
 - Student, faculty, and non-teaching personnel attendance
 - Accepted matches alternate automatically between time-in and time-out after the duplicate-scan cooldown, supporting repeated exits and re-entries
 - Administrator-defined faculty and non-teaching duty schedules, late-grace classification, and schedule-aware automatic absence closing
@@ -35,12 +36,12 @@ EduScan is the working local-first attendance, SMS, grading, and SF2 reporting s
 - Adviser-scoped, teacher-configurable quizzes, summative tests, periodic tests, overall grade input, server-validated scores, and DepEd transmutation display
 - Raw-score grading with highest-possible scores, missing/excused/incomplete states, finalization locks, authorized reason-based reopening, class statistics, printable summaries, and XLSX exports
 - School-year, grading-period, quarter, subject, grade-level, and section organization with grade-change audit history
-- Date-range student/personnel attendance exports, registered report hashes, and records-officer review/approval history
+- Date-range student/personnel attendance exports with batched daily reads, isolated download files, registered report hashes, and records-officer review/approval history
 - Administrative CRUD for accounts, students, employees, grade levels, sections, and subjects
 - Restricted records-officer, privacy-officer, and ICT roles plus a unified before/after administrative audit
 - Approved XLSX roster preview/import plus alphabetically arranged male/female SF2 placement
 - Separate full school-record disposal with an attributable, non-identifying disposal audit
-- Passphrase-encrypted backup/restoration of SQLite or MySQL together with the matching application secret, encryption key, biometric artifacts, models, and templates
+- Passphrase-encrypted backup/restoration of SQLite, MySQL, or PostgreSQL together with the matching application secret, encryption key, biometric artifacts, models, and templates. See [PostgreSQL recovery](docs/POSTGRES_RECOVERY.md).
 - Daily/weekly encrypted backup scheduling, rotation, off-device copies, run inventory, failure visibility, key fingerprint, model version, and file integrity hash
 - Approval-driven retention previews, legal holds, expired operational-record cleanup, and disposal certificates without deleting official attendance/grade records outside an approved schedule
 - Blink-based liveness gating, spoof-suspicion/unknown-face review records without retained review images, and a documented correction fallback
@@ -63,7 +64,7 @@ For a fresh clone and future `git pull` instructions, read [docs/INSTALLATION.md
 
 The setup creates `backend/.venv`, installs the backend and frontend dependencies, creates `backend/.env`, and optionally copies the official SF2 workbook.
 
-Review `backend/.env` before deployment, keep the generated encryption and application-secret files backed up securely, set allowed origins, and configure either SQLite or MySQL. If `EDUSCAN_SECRET_KEY` is not supplied, EduScan creates a unique ignored `backend/data/.app_secret` instead of using a shared development secret. Example MySQL URL:
+Review `backend/.env` before deployment, keep the generated encryption and application-secret files backed up securely, set allowed origins, and configure SQLite, MySQL, or PostgreSQL/Supabase. If `EDUSCAN_SECRET_KEY` is not supplied, EduScan creates a unique ignored `backend/data/.app_secret` instead of using a shared development secret. Example MySQL URL:
 
 ```text
 DATABASE_URL=mysql+pymysql://eduscan:strong-password@127.0.0.1:3306/eduscan?charset=utf8mb4
@@ -120,6 +121,10 @@ The tested recovery runbook is in `docs/DISASTER_RECOVERY.md`. Its isolated veri
 Use [SMS Gateway for Android](https://github.com/capcom6/android-sms-gateway) in Local Server mode. Keep the phone and EduScan server on the same protected school network. The backend sends HTTP Basic-authenticated `POST /message` requests to the phone. Do not expose the gateway directly to the internet. Use a school-controlled SIM, confirm the carrier plan permits the intended institutional messages, reserve the phone IP, enable kiosk/battery-exemption settings, and monitor the outbox.
 
 ## Biometric storage
+
+Each enrollment frame must contain exactly one clear human face. A bundled OpenCV YuNet detector checks facial landmark geometry and agreement with the LBPH crop before the frame can be saved. Missing or damaged detector files block enrollment. Animals, objects, and unverified frames are rejected by the enrollment checks; camera validation is required because face detection is probabilistic and is not a guarantee against every false positive or photo/video spoof.
+
+Enrollment checks incoming frames against other authorized facial enrollments before saving samples or retraining the gate model. Exact duplicate crops, or a consistent LBPH match confirmed by face-crop structure across most accepted frames, are rejected with the existing person's identity. Re-enrollment excludes that person's own samples, while still rejecting a match to somebody else. Missing or unreadable existing samples must be restored before enrollment can continue. PostgreSQL enrollment transactions are serialized to prevent simultaneous requests from bypassing this check. These are similarity checks, not a guarantee of unique real-world identity; verify them with authorized camera captures under the station's lighting. Existing duplicate enrollments require separate review and are not deleted automatically.
 
 LBPH does not produce a reusable single face vector suitable for a document column. EduScan stores quality-checked grayscale face crops as individually Fernet-encrypted files under `backend/data/biometrics`, and stores paths, hashes, consent state, and model metadata in SQL. The trained LBPH YAML is also Fernet-encrypted under `backend/data/models` and is decrypted only to a short-lived local file while OpenCV loads it. This keeps structured records in SQL while treating biometric artifacts as encrypted files. Back up `backend/data/.encryption_key` securely; losing it makes the samples and models unreadable.
 

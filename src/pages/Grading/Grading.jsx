@@ -1,5 +1,9 @@
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { api, auth } from '../../api/client';
+import { normalizeGradeName, isSeniorHighGrade, subjectMatchesGrade, availableOptionId } from '../../services/academicContext';
+import { buildScoreUpdates, validateGradebookForFinalization } from '../../services/gradingWorkflow';
+import { groupAdminGradebooks } from '../../services/gradebookSelection';
+import { watchGradebookUpdates } from '../../services/gradebookRefresh';
 
 import GradebookSummary from '../../components/Grading/GradebookSummary';
 import GradebookActions from '../../components/Grading/GradebookActions';
@@ -10,10 +14,14 @@ import AuditHistory from '../../components/Grading/AuditHistory';
 import AdjustmentRequestsModal from '../../components/Grading/AdjustmentRequestsModal';
 import ValidationChecklist from '../../components/Grading/ValidationChecklist';
 import GlobalAdjustmentsTab from '../../components/Grading/GlobalAdjustmentsTab';
-import { Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
-import { useToast } from '../../contexts/ToastContext';
+import { Loader2 } from 'lucide-react';
+import { useToast } from '../../contexts/useToast';
 
 export default function Grading() {
+  const currentRole = String(auth.role()).toLowerCase();
+  const isTeacher = currentRole === 'teacher';
+  const isReviewer = ['admin', 'records_officer', 'school_head'].includes(currentRole);
+  const canReviewAdjustments = ['admin', 'records_officer'].includes(currentRole);
   const [structure, setStructure] = useState({
     school_years: [],
     grading_periods: [],
@@ -28,12 +36,20 @@ export default function Grading() {
   const [gradeId, setGradeId] = useState('');
   const [sectionId, setSectionId] = useState('');
   const [subjectId, setSubjectId] = useState('');
+  const [existingGradebooks, setExistingGradebooks] = useState([]);
+  const [existingGradebooksLoading, setExistingGradebooksLoading] = useState(isReviewer);
+  const [existingGradebooksError, setExistingGradebooksError] = useState('');
+  const [includeHistoricalGradebooks, setIncludeHistoricalGradebooks] = useState(false);
+  const [adminGradebookId, setAdminGradebookId] = useState('');
+  const [adminGradebookSearch, setAdminGradebookSearch] = useState('');
 
   // Active Gradebook data from API
   const [gradebookId, setGradebookId] = useState(null);
   const [fullGradebook, setFullGradebook] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [structureLoading, setStructureLoading] = useState(!isReviewer);
   const [saving, setSaving] = useState(false);
+  const loadRequestRef = useRef(0);
   const { showSuccess, showError } = useToast();
 
   // Unsaved score & status changes
@@ -42,9 +58,9 @@ export default function Grading() {
   const [isDirty, setIsDirty] = useState(false);
 
   // Form states for export templates
-  const [region, setRegion] = useState('V');
-  const [division, setDivision] = useState('V');
-  const [schoolId, setSchoolId] = useState('301874');
+  const region = 'V';
+  const division = 'V';
+  const schoolId = '301874';
 
   // Modal / drawer states
   const [showConfig, setShowConfig] = useState(false);
@@ -61,22 +77,66 @@ export default function Grading() {
   // Badge States
   const [adminPendingCount, setAdminPendingCount] = useState(0);
   const [teacherAdjustmentCount, setTeacherAdjustmentCount] = useState(0);
+  const lastAdminPendingCount = useRef(null);
 
-  // Load global pending adjustments count for admins
+  const updateAdminPendingCount = useCallback((data) => {
+    const count = data.filter(request => request.status === 'Pending').length;
+    lastAdminPendingCount.current = count;
+    setAdminPendingCount(count);
+  }, []);
+
   const loadAdminPendingCount = useCallback(() => {
-    if (auth.role() === 'admin' || auth.role() === 'records_officer') {
+    if (canReviewAdjustments) {
       api.get('/admin/grade-adjustments')
         .then(data => {
-          const pending = data.filter(r => r.status === 'Pending').length;
-          setAdminPendingCount(pending);
+          const count = data.filter(request => request.status === 'Pending').length;
+          if (lastAdminPendingCount.current !== null && count > lastAdminPendingCount.current) {
+            if (document.visibilityState === 'visible') showSuccess('A new teacher grade adjustment request is waiting for review.');
+            else return setAdminPendingCount(count);
+          }
+          lastAdminPendingCount.current = count;
+          setAdminPendingCount(count);
         })
         .catch(console.error);
     }
-  }, []);
+  }, [canReviewAdjustments, showSuccess]);
 
   useEffect(() => {
     loadAdminPendingCount();
-  }, [loadAdminPendingCount]);
+    if (!canReviewAdjustments) return undefined;
+    const interval = window.setInterval(loadAdminPendingCount, 15000);
+    return () => window.clearInterval(interval);
+  }, [canReviewAdjustments, loadAdminPendingCount]);
+
+  useEffect(() => {
+    if (!isTeacher) return undefined;
+    let stopped = false;
+    const notified = new Set();
+    const checkNotifications = async () => {
+      try {
+        if (document.visibilityState !== 'visible') return;
+        const notifications = await api.get('/teacher/grade-adjustment-notifications');
+        if (stopped || notifications.length === 0) return;
+        const unseen = notifications.filter(item => !notified.has(item.id));
+        for (const item of unseen) {
+          notified.add(item.id);
+          const outcome = item.status === 'Approved' ? 'approved' : 'rejected';
+          const context = [item.person_name, item.grading_period_name, item.subject_name].filter(Boolean).join(' · ');
+          const requestLabel = item.request_type === 'criteria' ? 'criteria adjustment' : 'grade adjustment';
+          const message = `Your ${requestLabel} was ${outcome}${context ? `: ${context}` : ''}${item.review_note ? `. ${item.review_note}` : ''}`;
+          (item.status === 'Approved' ? showSuccess : showError)(message);
+        }
+        if (unseen.length) {
+          await api.post('/teacher/grade-adjustment-notifications/read', { request_ids: unseen.map(item => item.id) });
+        }
+      } catch (error) {
+        if (!stopped) console.error('Failed to check grade adjustment notifications:', error);
+      }
+    };
+    checkNotifications();
+    const interval = window.setInterval(checkNotifications, 15000);
+    return () => { stopped = true; window.clearInterval(interval); };
+  }, [isTeacher, showError, showSuccess]);
 
   // Load specific gradebook adjustments count for teachers
   const loadTeacherAdjustmentCount = useCallback(() => {
@@ -84,7 +144,7 @@ export default function Grading() {
     if (currentRole === 'teacher' && gradebookId) {
       api.get(`/gradebooks/${gradebookId}/adjustments`)
         .then(data => {
-          setTeacherAdjustmentCount(data.length);
+          setTeacherAdjustmentCount(data.filter(request => request.status === 'Pending').length);
         })
         .catch(console.error);
     }
@@ -96,9 +156,11 @@ export default function Grading() {
 
   // 1. Initial Load: Academic Structure
   useEffect(() => {
-    api
-      .get('/admin/academic-structure?context=grading')
+    if (isReviewer) return undefined;
+    let stopped = false;
+    api.get('/admin/academic-structure?context=grading')
       .then((data) => {
+        if (stopped) return;
         setStructure(data);
 
         const activeYear = data.school_years?.find((y) => y.active) || data.school_years?.[0];
@@ -114,8 +176,32 @@ export default function Grading() {
         const activeSubject = data.subjects?.find((s) => s.active) || data.subjects?.[0];
         if (activeSubject) setSubjectId(activeSubject.id);
       })
-      .catch((err) => showError(err.message));
-  }, [showError]);
+      .catch((err) => { if (!stopped) showError(err.message); })
+      .finally(() => { if (!stopped) setStructureLoading(false); });
+    return () => { stopped = true; };
+  }, [showError, isReviewer]);
+
+  useEffect(() => {
+    if (!isReviewer) return undefined;
+    let stopped = false;
+    let inFlight = false;
+    const refresh = () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      api.get(`/gradebooks?current_only=${!includeHistoricalGradebooks}`, { signal: AbortSignal.timeout(30000) })
+        .then((books) => { if (!stopped) { setExistingGradebooks(books); setExistingGradebooksError(''); } })
+        .catch((err) => { if (!stopped) { setExistingGradebooksError(err.message); showError(err.message); } })
+        .finally(() => { inFlight = false; if (!stopped) setExistingGradebooksLoading(false); });
+    };
+    refresh();
+    const stopWatching = watchGradebookUpdates(refresh);
+    return () => { stopped = true; stopWatching(); };
+  }, [isReviewer, showError, includeHistoricalGradebooks]);
+
+  const { count: filteredGradebookCount, groups: groupedAdminGradebooks } = useMemo(
+    () => groupAdminGradebooks(existingGradebooks, adminGradebookSearch),
+    [existingGradebooks, adminGradebookSearch],
+  );
 
 
   // Filter sections when selected grade changes
@@ -129,10 +215,14 @@ export default function Grading() {
     return [...(structure.school_years || [])].sort((a, b) => b.name.localeCompare(a.name));
   }, [structure.school_years]);
 
+  const availablePeriods = useMemo(() => (structure.grading_periods || [])
+    .filter(period => period.school_year_id === Number(schoolYearId))
+    .sort((a, b) => a.quarter - b.quarter), [structure.grading_periods, schoolYearId]);
+
   const sortedGradeLevels = useMemo(() => {
     return [...(structure.grade_levels || [])].sort((a, b) => {
-      const numA = Number(a.name);
-      const numB = Number(b.name);
+      const numA = Number(normalizeGradeName(a.name));
+      const numB = Number(normalizeGradeName(b.name));
       if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
       return a.name.localeCompare(b.name);
     });
@@ -140,31 +230,53 @@ export default function Grading() {
 
   const isSeniorHigh = useMemo(() => {
     const selectedGrade = (structure.grade_levels || []).find((g) => g.id === Number(gradeId));
-    return selectedGrade ? ['11', '12'].includes(String(selectedGrade.name)) : false;
+    return selectedGrade ? isSeniorHighGrade(selectedGrade.name) : false;
   }, [structure.grade_levels, gradeId]);
 
+  const teacherSubjectIds = useMemo(() => new Set(
+    (structure.subject_assignments || [])
+      .filter((assignment) => assignment.school_year_id === Number(schoolYearId)
+        && assignment.teacher_user_id === structure.current_user_id)
+      .map((assignment) => assignment.subject_id),
+  ), [structure.subject_assignments, structure.current_user_id, schoolYearId]);
+  const teacherAssignmentConflict = isTeacher && teacherSubjectIds.size > 1;
+
   const sortedSubjects = useMemo(() => {
+    const selectedSection = (structure.sections || []).find((section) => section.id === Number(sectionId));
+    const assignments = (structure.subject_assignments || []).filter((assignment) =>
+      assignment.school_year_id === Number(schoolYearId));
+    const assignedSubjectKeys = new Set((structure.subject_assignment_subjects || []).map(([yearId, subjectKey]) =>
+      `${yearId}:${subjectKey}`));
     const filtered = (structure.subjects || []).filter((s) => {
-      const cat = s.category || 'JHS';
-      return isSeniorHigh ? cat === 'SHS' : cat === 'JHS';
+      if (!subjectMatchesGrade(s, isSeniorHigh ? '11' : '7')) return false;
+      if (s.is_elective && s.elective_track
+        && selectedSection?.track?.trim().toLowerCase() !== s.elective_track.trim().toLowerCase()) return false;
+      if (!isTeacher) return true;
+      if (teacherSubjectIds.size > 1) return false;
+      const subjectAssignments = assignments.filter((assignment) => assignment.subject_id === s.id);
+      if (teacherSubjectIds.size === 1) {
+        return teacherSubjectIds.has(s.id) && subjectAssignments.some((assignment) =>
+          assignment.section_id === Number(sectionId)
+            && assignment.teacher_user_id === structure.current_user_id);
+      }
+      if (assignedSubjectKeys.has(`${schoolYearId}:${s.id}`)) {
+        return subjectAssignments.some((assignment) => assignment.section_id === Number(sectionId)
+          && assignment.teacher_user_id === structure.current_user_id);
+      }
+      return false;
     });
     return [...filtered].sort((a, b) => a.name.localeCompare(b.name));
-  }, [structure.subjects, isSeniorHigh]);
+  }, [structure.subjects, structure.sections, structure.subject_assignments, structure.subject_assignment_subjects,
+    structure.current_user_id, teacherSubjectIds,
+    isSeniorHigh, schoolYearId, sectionId, isTeacher]);
 
-  // When gradeId changes, ensure valid sectionId
-  useEffect(() => {
-    if (availableSections.length > 0 && (!sectionId || !availableSections.some((s) => s.id === Number(sectionId)))) {
-      setSectionId(availableSections[0].id);
-    }
-  }, [gradeId, availableSections, sectionId]);
+  // Resolve dependent selections before rendering a class from the new context.
+  const validSectionId = availableOptionId(availableSections, sectionId);
+  const validSubjectId = availableOptionId(sortedSubjects, subjectId);
+  if (sectionId !== validSectionId) setSectionId(validSectionId);
+  if (subjectId !== validSubjectId) setSubjectId(validSubjectId);
 
-  useEffect(() => {
-    if (sortedSubjects.length > 0 && (!subjectId || !sortedSubjects.some((s) => s.id === Number(subjectId)))) {
-      setSubjectId(sortedSubjects[0].id);
-    }
-  }, [isSeniorHigh, sortedSubjects, subjectId]);
-
-  // Match grading_period_id for selected quarter & school year
+  // Match the selected academic period for the current school year.
   const gradingPeriodId = useMemo(() => {
     const period = (structure.grading_periods || []).find(
       (p) => p.school_year_id === Number(schoolYearId) && p.quarter === Number(quarter)
@@ -172,55 +284,89 @@ export default function Grading() {
     return period ? period.id : null;
   }, [structure.grading_periods, schoolYearId, quarter]);
 
-  // 2. Fetch or Create Gradebook
-  const loadGradebook = useCallback(async () => {
-    if (!schoolYearId || !gradeId || !sectionId || !subjectId || !gradingPeriodId) {
-      setFullGradebook(null);
-      return;
-    }
-
-    setLoading(true);
+  const contextKey = `${schoolYearId}:${gradingPeriodId}:${gradeId}:${sectionId}:${subjectId}`;
+  const validContext = Boolean(schoolYearId && gradeId && sectionId && subjectId && gradingPeriodId
+    && availableSections.some(section => section.id === Number(sectionId))
+    && sortedSubjects.some(subject => subject.id === Number(subjectId)));
+  const [previousContext, setPreviousContext] = useState(contextKey);
+  if (previousContext !== contextKey) {
+    setPreviousContext(contextKey);
+    setLoading(isTeacher && validContext);
     setScoreEdits({});
     setStatusEdits({});
     setIsDirty(false);
+    if (isTeacher && !validContext) { setFullGradebook(null); setGradebookId(null); }
+  }
 
-    try {
-      // Find or create gradebook
-      const res = await api.post('/gradebooks', {
-        school_year_id: Number(schoolYearId),
-        grading_period_id: Number(gradingPeriodId),
-        grade_level_id: Number(gradeId),
-        section_id: Number(sectionId),
-        subject_id: Number(subjectId),
-      });
+  // 2. Fetch or Create Gradebook
+  const loadGradebook = useCallback(() => {
+    if ((isReviewer && !adminGradebookId) || (isTeacher && !validContext)) return undefined;
+    const requestId = ++loadRequestRef.current;
+    const context = {
+      school_year_id: Number(schoolYearId),
+      grading_period_id: Number(gradingPeriodId),
+      grade_level_id: Number(gradeId),
+      section_id: Number(sectionId),
+      subject_id: Number(subjectId),
+    };
+    // Viewing a class must not create or modify its record for Admin.
+    const request = isReviewer
+      ? api.get(`/gradebooks/${adminGradebookId}`, { signal: AbortSignal.timeout(30000) })
+      : api.post('/gradebooks', context);
+    return request.then(async (res) => {
+      if (requestId !== loadRequestRef.current) return;
+      if (isReviewer) {
+        setGradebookId(Number(adminGradebookId));
+        setFullGradebook(res);
+        return;
+      }
+      if (!res.id) {
+        setFullGradebook(null);
+        setGradebookId(null);
+        return;
+      }
 
       const gbId = res.id;
+      if (requestId !== loadRequestRef.current) return;
       setGradebookId(gbId);
 
       // Load full gradebook data
       const full = await api.get(`/gradebooks/${gbId}`);
+      if (requestId !== loadRequestRef.current) return;
       setFullGradebook(full);
-    } catch (err) {
+    }).catch((err) => {
+      if (requestId !== loadRequestRef.current) return;
       showError(err.message);
       setFullGradebook(null);
       setGradebookId(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [schoolYearId, gradingPeriodId, gradeId, sectionId, subjectId]);
+    }).finally(() => {
+      if (requestId === loadRequestRef.current) setLoading(false);
+    });
+  }, [schoolYearId, gradingPeriodId, gradeId, sectionId, subjectId, validContext, showError, isTeacher, isReviewer, adminGradebookId]);
 
   useEffect(() => {
     loadGradebook();
+    return () => { loadRequestRef.current += 1; };
   }, [loadGradebook]);
 
   // Refresh gradebook when switching tabs to ensure changes from other tabs (like Adjustments) are reflected
   useEffect(() => {
-    if ((activeTab === 'gradebook' || activeTab === 'metrics') && gradebookId) {
-      api.get(`/gradebooks/${gradebookId}`)
-        .then(setFullGradebook)
-        .catch(err => console.error('Failed to refresh gradebook:', err));
-    }
-  }, [activeTab, gradebookId]);
+    let cancelled = false;
+    const requestId = loadRequestRef.current;
+    if ((activeTab !== 'gradebook' && activeTab !== 'metrics') || !gradebookId || saving || isDirty) return undefined;
+    let inFlight = false;
+    const refresh = () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      api.get(`/gradebooks/${gradebookId}`, { signal: AbortSignal.timeout(30000) })
+        .then(data => { if (!cancelled && requestId === loadRequestRef.current) setFullGradebook(data); })
+        .catch(err => console.error('Failed to refresh gradebook:', err))
+        .finally(() => { inFlight = false; });
+    };
+    refresh();
+    const stopWatching = isReviewer ? watchGradebookUpdates(refresh) : () => {};
+    return () => { cancelled = true; stopWatching(); };
+  }, [activeTab, gradebookId, saving, isDirty, isReviewer]);
 
   // 3. Handle Score and Status Edits in Memory
   const handleScoreChange = (studentId, itemId, value) => {
@@ -232,6 +378,7 @@ export default function Grading() {
         [itemId]: value,
       },
     }));
+    setStatusEdits(prev => ({ ...prev, [sId]: { ...(prev[sId] || {}), [itemId]: value === '' ? 'Missing' : 'Scored' } }));
     setIsDirty(true);
   };
 
@@ -260,58 +407,36 @@ export default function Grading() {
   // 4. Save Draft
   const handleSaveDraft = async (silent = false) => {
     if (!gradebookId || !fullGradebook) return false;
+    const payloadScores = buildScoreUpdates(fullGradebook.students || [], fullGradebook.components || [], scoreEdits, statusEdits);
+    const hasChanges = Object.keys(payloadScores).length > 0;
+    loadRequestRef.current += 1;
 
     setSaving(true);
 
     try {
-      // Format payload for /api/gradebooks/{id}/scores
-      const payloadScores = {};
-      const allStudents = fullGradebook.students || [];
-
-      for (const student of allStudents) {
-        const sId = String(student.person_id);
-        const editedStudentScores = scoreEdits[sId] || {};
-        const editedStudentStatuses = statusEdits[sId] || {};
-
-        // Only include if modified or if we want to preserve
-        const studentEntries = [];
-        for (const comp of fullGradebook.components || []) {
-          for (const item of comp.items || []) {
-            const rawScore =
-              editedStudentScores[item.id] !== undefined
-                ? editedStudentScores[item.id]
-                : student.scores?.[item.id];
-            const explicitStatus = editedStudentStatuses[item.id] || student.score_statuses?.[item.id];
-            const isEmptyScore = rawScore === '' || rawScore === undefined || rawScore === null;
-            const rawStatus = isEmptyScore
-              ? (explicitStatus === 'Excused' ? 'Excused' : 'Missing')
-              : 'Scored';
-
-            studentEntries.push({
-              assessment_item_id: item.id,
-              score: rawStatus === 'Scored' && rawScore !== '' && rawScore !== null && rawScore !== undefined
-                ? Number(rawScore)
-                : null,
-              status: rawStatus,
-            });
-          }
-        }
-        payloadScores[sId] = studentEntries;
+      if (hasChanges) {
+        await api.put(`/gradebooks/${gradebookId}/scores`, {
+          scores: payloadScores,
+          change_reason: 'Teacher saved class record scores',
+        });
       }
-
-      await api.put(`/gradebooks/${gradebookId}/scores`, {
-        scores: payloadScores,
-        change_reason: 'Teacher saved draft gradebook updates',
-      });
-
-      if (!silent) showSuccess('Gradebook draft and student scores saved successfully.');
-      setIsDirty(false);
-      setScoreEdits({});
-      setStatusEdits({});
 
       // Reload gradebook calculations from authority
       const refreshed = await api.get(`/gradebooks/${gradebookId}`);
       setFullGradebook(refreshed);
+      setIsDirty(false);
+      setScoreEdits({});
+      setStatusEdits({});
+      if (!silent) {
+        const incomplete = Number(refreshed.statistics?.incomplete || 0);
+        showSuccess(hasChanges
+          ? incomplete
+            ? `Scores saved. Grades stay blank for learners missing an activity used in this class (${incomplete} learner(s) incomplete).`
+            : 'Scores saved and grades recalculated.'
+          : incomplete
+            ? `No unsaved scores. Grades stay blank for learners missing an activity used in this class (${incomplete} learner(s) incomplete).`
+            : 'Scores are already saved and grades are up to date.');
+      }
       return true;
     } catch (err) {
       showError(err.message);
@@ -325,17 +450,19 @@ export default function Grading() {
   // 5. Update Assessment Components & Items
   const handleSaveComponents = async (updatedComponents, changeReason) => {
     if (!gradebookId) return;
+    if (isDirty && !await handleSaveDraft()) return;
+    loadRequestRef.current += 1;
     setSaving(true);
     try {
       await api.put(`/gradebooks/${gradebookId}/components`, {
         components: updatedComponents,
         change_reason: changeReason,
       });
-      setShowConfig(false);
-      showSuccess('Assessment components and activities updated successfully.');
       // Refresh
       const refreshed = await api.get(`/gradebooks/${gradebookId}`);
       setFullGradebook(refreshed);
+      setShowConfig(false);
+      showSuccess('Assessment components and activities updated successfully.');
       setScoreEdits({});
       setStatusEdits({});
       setIsDirty(false);
@@ -347,25 +474,6 @@ export default function Grading() {
   };
 
   // 6. Workflow Transitions
-  const handleSubmitGradebook = async (reason) => {
-    if (!gradebookId) return;
-    if (isDirty) {
-      await handleSaveDraft(true);
-    }
-    setSaving(true);
-    try {
-      await api.post(`/gradebooks/${gradebookId}/submit`, { reason });
-      showSuccess('Gradebook submitted for administrative review.');
-      const refreshed = await api.get(`/gradebooks/${gradebookId}`);
-      setFullGradebook(refreshed);
-    } catch (err) {
-      showError(err.message);
-      throw err;
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const validateHeaderFields = () => {
     const missingFields = [];
     if (!region.trim()) missingFields.push('REGION');
@@ -377,15 +485,10 @@ export default function Grading() {
       return false;
     }
 
-    const romanRegex = /^[IVXLCDM\s\-]+$/i;
+    const romanRegex = /^[IVXLCDM\s-]+$/i;
 
     if (!romanRegex.test(region.trim())) {
       showError('REGION must use ONLY Roman Numerals (e.g., I, II, IV, IV-A).');
-      return false;
-    }
-
-    if (!romanRegex.test(division.trim())) {
-      showError('DIVISION must use ONLY Roman Numerals (e.g., I, II, IV).');
       return false;
     }
 
@@ -403,57 +506,12 @@ export default function Grading() {
       return false;
     }
 
-    // Determine active items
-    const activeItemIds = new Set();
-    for (const student of fullGradebook.students) {
-      const sId = String(student.person_id);
-      for (const comp of fullGradebook.components) {
-        for (const item of (comp.items || [])) {
-          const currentVal = scoreEdits[sId]?.[item.id] !== undefined
-            ? scoreEdits[sId][item.id]
-            : student.scores?.[item.id];
-          const currentStatus = statusEdits[sId]?.[item.id] !== undefined
-            ? statusEdits[sId][item.id]
-            : student.score_statuses?.[item.id];
-
-          if (currentVal !== '' && currentVal !== null && currentVal !== undefined) {
-            activeItemIds.add(item.id);
-          } else if (currentStatus && currentStatus !== 'Missing') {
-            activeItemIds.add(item.id);
-          }
-        }
-      }
-    }
-
-    let hasMissing = false;
-    for (const student of fullGradebook.students) {
-      for (const comp of fullGradebook.components) {
-        for (const item of (comp.items || [])) {
-          if (!activeItemIds.has(item.id)) continue;
-
-          const sId = String(student.person_id);
-          const currentVal = scoreEdits[sId]?.[item.id] !== undefined
-            ? scoreEdits[sId][item.id]
-            : student.scores?.[item.id];
-          const currentStatus = statusEdits[sId]?.[item.id] !== undefined
-            ? statusEdits[sId][item.id]
-            : student.score_statuses?.[item.id];
-
-          if ((currentVal === undefined || currentVal === null || currentVal === '') && currentStatus !== 'Excused') {
-            hasMissing = true;
-            break;
-          }
-        }
-        if (hasMissing) break;
-      }
-      if (hasMissing) break;
-    }
-
-    if (hasMissing) {
-      showError('Cannot finalize gradebook. There are missing activity grades. Please complete all scores for active activities.');
+    try {
+      return validateGradebookForFinalization(fullGradebook.students, fullGradebook.components, scoreEdits, statusEdits);
+    } catch (error) {
+      showError(error.message);
       return false;
     }
-    return true;
   };
 
   const handleFinalizeGradebook = async (reason) => {
@@ -461,10 +519,11 @@ export default function Grading() {
     if (isDirty) {
       await handleSaveDraft(true);
     }
+    loadRequestRef.current += 1;
     setSaving(true);
     try {
       await api.post(`/gradebooks/${gradebookId}/finalize`, { reason });
-      showSuccess('Gradebook finalized! Quarterly grades have been officially computed.');
+      showSuccess('Gradebook finalized! Term grades have been officially computed.');
       const refreshed = await api.get(`/gradebooks/${gradebookId}`);
       setFullGradebook(refreshed);
     } catch (err) {
@@ -477,6 +536,7 @@ export default function Grading() {
 
   const handleLockGradebook = async (reason) => {
     if (!gradebookId) return;
+    loadRequestRef.current += 1;
     setSaving(true);
     try {
       await api.post(`/gradebooks/${gradebookId}/lock`, { reason });
@@ -493,6 +553,7 @@ export default function Grading() {
 
   const handleReopenGradebook = async (reason) => {
     if (!gradebookId) return;
+    loadRequestRef.current += 1;
     setSaving(true);
     try {
       await api.post(`/gradebooks/${gradebookId}/reopen`, { reason });
@@ -524,7 +585,7 @@ export default function Grading() {
     try {
       const data = await api.get(`/gradebooks/${gradebookId}/adjustments`);
       setAdjustmentsList(data);
-      setTeacherAdjustmentCount(data.length);
+      setTeacherAdjustmentCount(data.filter(request => request.status === 'Pending').length);
       setShowAdjustments(true);
     } catch (err) {
       showError(err.message);
@@ -534,6 +595,7 @@ export default function Grading() {
   // 8. Breakdown Modal Fetcher
   const handleStudentBreakdown = async (personId) => {
     if (!gradebookId) return;
+    if (isDirty) return showError('Save your scores before viewing the official calculation breakdown.');
     try {
       const data = await api.get(`/gradebooks/${gradebookId}/calculation/${personId}`);
       setBreakdownData(data);
@@ -545,6 +607,7 @@ export default function Grading() {
   // 9. Export & Print Handlers
   const handleExportXlsx = async () => {
     if (!gradebookId || !fullGradebook) return;
+    if (isDirty) return showError('Save your scores before exporting the class record.');
 
     // Validate required fields
     if (!validateHeaderFields()) {
@@ -552,7 +615,7 @@ export default function Grading() {
     }
 
     const gb = fullGradebook.gradebook;
-    const filename = `Gradebook-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-Q${gb.quarter}.xlsx`;
+    const filename = `ClassRecord-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-Term${gb.quarter}.xlsx`;
     try {
       const q = new URLSearchParams({
         region,
@@ -567,6 +630,7 @@ export default function Grading() {
 
   const handlePrintReport = async () => {
     if (!gradebookId) return;
+    if (isDirty) return showError('Save your scores before printing the class record.');
     try {
       await api.printHtml(`/gradebooks/${gradebookId}/report/print`);
     } catch (err) {
@@ -574,9 +638,19 @@ export default function Grading() {
     }
   };
 
-  const gb = fullGradebook?.gradebook;  // Teachers and admins can both edit Draft gradebooks.
-  const currentRole = String(auth.role()).toLowerCase();
-  const isEditable = gb && gb.status === 'Draft' && (currentRole === 'teacher' || currentRole === 'admin');
+  const gb = fullGradebook?.gradebook;
+  const sheetLoading = structureLoading || loading;
+  const sheetData = sheetLoading ? null : fullGradebook;
+  const isEditable = gb && ['Draft', 'Submitted'].includes(gb.status) && currentRole === 'teacher';
+  const changeContext = (setter, value) => {
+    if (saving) return;
+    if (isDirty) {
+      showError('Save your score changes before switching to another class record.');
+      return;
+    }
+    setter(value);
+    return true;
+  };
 
   return (
     <div className="page-stack">
@@ -596,42 +670,92 @@ export default function Grading() {
         >
           Class Performance Metrics
         </button>
-        {auth.role() === 'admin' && (
-          <button
-            className={activeTab === 'adjustments' ? 'active' : ''}
-            onClick={() => setActiveTab('adjustments')}
-          >
-            Adjustment Requests
-            {adminPendingCount > 0 && <span className="notification-badge">{adminPendingCount}</span>}
-          </button>
-        )}
+        {canReviewAdjustments && <button className={activeTab === 'adjustments' ? 'active' : ''} onClick={() => setActiveTab('adjustments')}>
+          Adjustment Requests
+          {adminPendingCount > 0 && <span className="notification-badge">{adminPendingCount}</span>}
+        </button>}
+
       </div>
 
-      {activeTab === 'adjustments' && (
-        <GlobalAdjustmentsTab onRefresh={(data) => {
-          if (auth.role() === 'admin' || auth.role() === 'records_officer') {
-            const pending = data.filter(r => r.status === 'Pending').length;
-            setAdminPendingCount(pending);
-          }
-        }} />
-      )}
+      {teacherAssignmentConflict && <div className="notice notice-warning" role="alert">
+        Your account has active subject assignments in more than one subject for this school year. Gradebooks are unavailable until an administrator corrects the assignments.
+      </div>}
+      {isTeacher && teacherSubjectIds.size === 0 && <div className="notice notice-warning" role="status">
+        No subject is assigned to your account for this school year. Ask an administrator to assign your subject in Administration → Subject Teaching Assignments.
+      </div>}
+
+      {activeTab === 'adjustments' && canReviewAdjustments && <GlobalAdjustmentsTab onRefresh={updateAdminPendingCount} />}
 
       {(activeTab === 'gradebook' || activeTab === 'metrics') && (
         <>
+          {isReviewer && <div className="card-static mb-4">
+            <label className="mb-2 block">
+              <span className="field-label">Find a class record</span>
+              <input className="input-field" type="search" value={adminGradebookSearch}
+                aria-label="Search teacher class records"
+                placeholder="Search by school year, term, grade, section, subject, or teacher"
+                onChange={(event) => {
+                  setAdminGradebookSearch(event.target.value);
+                  setAdminGradebookId('');
+                  setFullGradebook(null);
+                  setGradebookId(null);
+                  setLoading(false);
+                }} />
+            </label>
+            <label>
+              <span className="field-label">Teacher class record</span>
+              <select className="input-field" value={adminGradebookId} disabled={existingGradebooksLoading || Boolean(existingGradebooksError) || filteredGradebookCount === 0}
+                onChange={(event) => {
+                  const id = event.target.value;
+                  setAdminGradebookId(id);
+                  setFullGradebook(null);
+                  setGradebookId(null);
+                  setLoading(Boolean(id));
+                }}>
+                <option value="">{existingGradebooksLoading ? 'Loading class records…' : existingGradebooksError ? 'Class records could not be loaded' : 'Select a class record'}</option>
+                {groupedAdminGradebooks.map((group) => <optgroup key={group.label} label={group.label}>
+                  {group.books.map((book) => <option key={book.id} value={book.id}>
+                    Grade {normalizeGradeName(book.grade_name)} · Section {book.section_name} — {book.subject_name} · {book.teacher_name} · {book.status}
+                  </option>)}
+                </optgroup>)}
+              </select>
+            </label>
+            {!existingGradebooksLoading && !existingGradebooksError && <p className="muted-small mt-2" aria-live="polite">
+              Showing {filteredGradebookCount} {includeHistoricalGradebooks ? 'saved' : 'current'} class records. One record is saved for each subject, grade and section, and term, so the same class may appear in multiple terms.
+            </p>}
+            <label className="checkbox-field mt-2">
+              <input type="checkbox" checked={includeHistoricalGradebooks}
+                onChange={(event) => {
+                  setIncludeHistoricalGradebooks(event.target.checked);
+                  setExistingGradebooksLoading(true);
+                  setExistingGradebooksError('');
+                  setAdminGradebookId('');
+                  setFullGradebook(null);
+                  setGradebookId(null);
+                  setLoading(false);
+                }} />
+              <span>Include older or inactive class records</span>
+            </label>
+            {existingGradebooksError && <p className="notice notice-danger mt-2" role="alert">Could not load teacher class records: {existingGradebooksError}</p>}
+            {!existingGradebooksLoading && !existingGradebooksError && existingGradebooks.length === 0 && <p className="text-muted mt-2">{includeHistoricalGradebooks ? 'No saved class records are available.' : 'No current class records match the active academic setup. Include older records to browse saved history.'}</p>}
+            {!existingGradebooksLoading && !existingGradebooksError && existingGradebooks.length > 0 && filteredGradebookCount === 0 && <p className="text-muted mt-2">No class records match that search.</p>}
+          </div>}
 
           {/* Loading indicator */}
-          {loading && (
+          {activeTab === 'metrics' && sheetLoading && (
             <div className="loading-state-card card-static text-center py-8">
               <Loader2 size={32} className="spin text-primary mx-auto mb-2" />
               <p className="text-muted">Loading gradebook and assessment records...</p>
             </div>
           )}
+          {activeTab === 'metrics' && !sheetLoading && !sheetData && isReviewer && (
+            <div className="card-static text-center py-8 text-muted">Select an existing class record to view its performance metrics.</div>
+          )}
 
           {/* Main Gradebook Workspace */}
-          {!loading && fullGradebook && (
-            <>
+          <>
 
-              {activeTab === 'metrics' && (
+              {activeTab === 'metrics' && sheetData && (
                 <GradebookSummary
                   statistics={fullGradebook.statistics}
                   passingGrade={fullGradebook.gradebook?.passing_grade || 75}
@@ -641,60 +765,70 @@ export default function Grading() {
               {activeTab === 'gradebook' && (
                 <>
                   {/* Validation Checklist Panel (when toggled) */}
-                  {showValidation && (
+                  {showValidation && sheetData && (
                     <ValidationChecklist
                       components={fullGradebook.components}
                       students={fullGradebook.students}
                       status={fullGradebook.gradebook?.status}
                       passingGrade={fullGradebook.gradebook?.passing_grade || 75}
-                      onOpenConfig={() => setShowConfig(true)}
+                      hasPendingEdits={isDirty}
                       onClose={() => setShowValidation(false)}
                     />
                   )}
 
                   {/* Interactive Spreadsheet Sheet */}
                   <GradingSheet
-                    gradebook={fullGradebook.gradebook}
-                    isSeniorHigh={['11', '12'].includes(String(fullGradebook.gradebook?.grade_name))}
-                    students={fullGradebook.students}
-                    components={fullGradebook.components}
+                    key={isReviewer ? `admin:${adminGradebookId}` : `${schoolYearId}:${quarter}:${gradeId}:${sectionId}:${subjectId}`}
+                    gradebook={sheetData?.gradebook}
+                    students={sheetData?.students || []}
+                    components={sheetData?.components || []}
                     scores={scoreEdits}
                     scoreStatuses={statusEdits}
-                    passingGrade={fullGradebook.gradebook?.passing_grade || 75}
-                    transmutationTable={fullGradebook.policy?.transmutation_table}
-                    disabled={!isEditable}
+                    passingGrade={sheetData?.gradebook?.passing_grade || 75}
+                    transmutationTable={sheetData?.policy?.transmutation_table}
+                    roundingDecimalPlaces={sheetData?.policy?.rounding_decimal_places ?? 2}
+                    roundingMethod={sheetData?.policy?.rounding_method ?? 'half_up'}
+                    disabled={sheetLoading || saving || !isEditable}
+                    emptyMessage={isReviewer ? 'Select an existing class record above to view its grades.' : undefined}
+                    loading={sheetLoading}
                     onScoreChange={handleScoreChange}
                     onStatusChange={handleStatusChange}
                     onStudentBreakdown={handleStudentBreakdown}
                     region={region}
-                    setRegion={setRegion}
                     division={division}
-                    setDivision={setDivision}
                     schoolId={schoolId}
-                    setSchoolId={setSchoolId}
-                    selectors={{
+                    selectors={isReviewer ? {} : {
                       schoolYear: (
-                        <select className="deped-header-select" value={schoolYearId} onChange={(e) => setSchoolYearId(Number(e.target.value))}>
+                        <select className="deped-header-select" value={schoolYearId} onChange={(e) => {
+                          const nextYearId = Number(e.target.value);
+                          if (changeContext(setSchoolYearId, nextYearId)) {
+                            const nextPeriod = (structure.grading_periods || []).find(period => period.school_year_id === nextYearId);
+                            if (nextPeriod) setQuarter(nextPeriod.quarter);
+                          }
+                        }}>
                           {sortedSchoolYears.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                         </select>
                       ),
                       quarter: (
-                        <select className="deped-header-select" value={quarter} onChange={(e) => setQuarter(Number(e.target.value))}>
-                          {(isSeniorHigh ? [1, 2] : [1, 2, 3, 4]).map((q) => <option key={q} value={q}>{isSeniorHigh ? 'TERM' : 'QUARTER'} {q}</option>)}
+                        <select className="deped-header-select" value={quarter} onChange={(e) => changeContext(setQuarter, Number(e.target.value))}>
+                          {availablePeriods.length === 0 && <option value="">No periods available</option>}
+                          {availablePeriods.map((period) => <option key={period.id} value={period.quarter}>{period.name}</option>)}
                         </select>
                       ),
                       grade: (
-                        <select className="deped-header-select" value={gradeId} onChange={(e) => setGradeId(Number(e.target.value))}>
-                          {sortedGradeLevels.map((item) => <option key={item.id} value={item.id}>Grade {item.name}</option>)}
+                        <select className="deped-header-select" value={gradeId} onChange={(e) => changeContext(setGradeId, Number(e.target.value))}>
+                          {sortedGradeLevels.map((item) => <option key={item.id} value={item.id}>Grade {normalizeGradeName(item.name)}</option>)}
                         </select>
                       ),
                       section: (
-                        <select className="deped-header-select" value={sectionId} onChange={(e) => setSectionId(Number(e.target.value))}>
+                        <select className="deped-header-select" value={sectionId} onChange={(e) => changeContext(setSectionId, Number(e.target.value))}>
+                          {availableSections.length === 0 && <option value="">No sections available</option>}
                           {availableSections.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                         </select>
                       ),
                       subject: (
-                        <select className="deped-header-select" value={subjectId} onChange={(e) => setSubjectId(Number(e.target.value))}>
+                        <select className="deped-header-select" value={subjectId} onChange={(e) => changeContext(setSubjectId, Number(e.target.value))}>
+                          {sortedSubjects.length === 0 && <option value="">No subjects available</option>}
                           {sortedSubjects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                         </select>
                       ),
@@ -702,13 +836,12 @@ export default function Grading() {
                   />
 
                   {/* Action Toolbar */}
-                  <GradebookActions
+                  {sheetData && <GradebookActions
                     gradebook={fullGradebook.gradebook}
                     isDirty={isDirty}
                     isSaving={saving}
                     onSaveDraft={handleSaveDraft}
                     onOpenConfig={() => setShowConfig(true)}
-                    onSubmit={handleSubmitGradebook}
                     onFinalize={handleFinalizeGradebook}
                     onLock={handleLockGradebook}
                     onReopen={handleReopenGradebook}
@@ -720,14 +853,13 @@ export default function Grading() {
                     onPrintReport={handlePrintReport}
                     disabled={loading || saving}
                     onValidateFinalize={handleValidateFinalize}
-                  />
+                  />}
                 </>
               )}
             </>
-          )}
 
           {/* Assessment Component Setup Modal */}
-          {showConfig && fullGradebook && (
+          {showConfig && fullGradebook && isEditable && (
             <AssessmentConfig
               components={fullGradebook.components}
               onSave={handleSaveComponents}
@@ -749,7 +881,6 @@ export default function Grading() {
             <AuditHistory
               audit={auditList}
               onClose={() => setShowAudit(false)}
-              onRefresh={handleOpenAudit}
             />
           )}
 

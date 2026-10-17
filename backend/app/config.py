@@ -26,8 +26,8 @@ def _apply_pending_restore() -> None:
         restore_state = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
-    if restore_state.get("manifest", {}).get("database_backend") == "mysql":
-        # A MySQL restore must be performed while the API is stopped by the
+    if restore_state.get("manifest", {}).get("database_backend", "sqlite") != "sqlite":
+        # A server database restore must be performed while the API is stopped by the
         # controlled restore tool. Importing SQL during module import could
         # leave a partially restored live database.
         return

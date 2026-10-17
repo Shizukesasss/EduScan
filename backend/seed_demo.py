@@ -93,8 +93,8 @@ def seed(db) -> None:
 
     # ── Grade Levels ─────────────────────────────────────────────────────────
     grade_levels = []
-    for i, g in enumerate(range(7, 13)):
-        grade_levels.append(m.GradeLevel(name=f"Grade {g}", sequence=i + 1, active=True))
+    for g in range(7, 13):
+        grade_levels.append(m.GradeLevel(name=f"Grade {g}", active=True))
     db.add_all(grade_levels)
     db.flush()
     gl_by_name = {gl.name: gl.id for gl in grade_levels}

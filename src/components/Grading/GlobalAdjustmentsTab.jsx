@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
-import { Loader2, AlertCircle, CheckCircle2, XCircle } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { api } from '../../api/client';
-import { useToast } from '../../contexts/ToastContext';
+import { useToast } from '../../contexts/useToast';
 
 export default function GlobalAdjustmentsTab({ onRefresh }) {
   const [loading, setLoading] = useState(true);
@@ -13,26 +13,20 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
   const [reviewAction, setReviewAction] = useState('Approved');
   const [reviewNote, setReviewNote] = useState('');
 
-  const loadAdjustments = async () => {
-    setLoading(true);
-    try {
-      const data = await api.get('/admin/grade-adjustments');
+  const loadAdjustments = useCallback(() => api.get('/admin/grade-adjustments')
+    .then((data) => {
       setAdjustments(data);
       onRefresh?.(data);
-    } catch (err) {
-      showError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+    }).catch((err) => showError(err.message))
+    .finally(() => setLoading(false)), [onRefresh, showError]);
 
   useEffect(() => {
     loadAdjustments();
-  }, []);
+  }, [loadAdjustments]);
 
   const handleReview = async (id, status) => {
-    if (!reviewNote.trim()) {
-      showError('A review note is required to approve or reject an adjustment.');
+    if (reviewNote.trim().length < 5) {
+      showError('A review note of at least 5 characters is required to approve or reject an adjustment.');
       return;
     }
     setLoading(true);
@@ -63,8 +57,8 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
     <div className="card-static mt-2">
       <div className="card-header border-b border-border pb-4 mb-0">
         <div>
-          <h2 className="text-xl font-bold">Global Adjustment Requests</h2>
-          <p className="text-sm text-secondary">Manage grade corrections across all sections and subjects.</p>
+          <h2 className="text-xl font-bold">Teacher Grade Adjustment Requests</h2>
+          <p className="text-sm text-secondary">Review and approve or reject corrections requested by teachers. Approved changes are applied to the teacher’s class record.</p>
         </div>
       </div>
       
@@ -98,16 +92,22 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
                     <tr key={req.id}>
                       <td>
                         <strong>{req.grade_name} - {req.section_name}</strong>
-                        <div className="muted-small">{req.subject_name}</div>
+                        <div className="muted-small">{[req.school_year_name, req.grading_period_name, req.subject_name].filter(Boolean).join(' · ')}</div>
+                      </td>
+                      <td><strong>{req.request_type === 'criteria' ? 'Entire class' : (req.person_name || `ID: ${req.person_id}`)}</strong></td>
+                      <td>
+                        <span>{req.request_type === 'criteria' ? 'Grading criteria' : (req.assessment_label || `Item #${req.assessment_item_id}`)}</span>
                       </td>
                       <td>
-                        <strong>{req.person_name || `ID: ${req.person_id}`}</strong>
-                      </td>
-                      <td>
-                        <span>{req.assessment_label || `Item #${req.assessment_item_id}`}</span>
-                      </td>
-                      <td>
-                        <div className="value-diff flex items-center gap-2">
+                        {req.request_type === 'criteria' ? (
+                          <div className="text-sm">
+                            {req.old_criteria?.map((item) => {
+                              const next = req.new_criteria?.find((entry) => entry.component_id === item.component_id);
+                              return <div key={item.component_id}>{item.name}: {item.weight}% → <strong>{next?.weight}%</strong></div>;
+                            })}
+                            {isPending && <div className="muted-small mt-1">Approval recalculates grades for the whole class.</div>}
+                          </div>
+                        ) : <div className="value-diff flex items-center gap-2">
                           <span className="old-val text-muted line-through">
                             {req.old_score != null ? req.old_score : req.old_status || '—'}
                           </span>
@@ -115,7 +115,7 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
                           <span className="new-val font-bold">
                             {req.new_score != null ? req.new_score : req.new_status}
                           </span>
-                        </div>
+                        </div>}
                       </td>
                       <td>
                         <p className="reason-text text-sm mb-1">{req.reason}</p>
@@ -159,7 +159,7 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
                                     type="button"
                                     className={`btn btn-sm ${reviewAction === 'Approved' ? 'btn-success' : 'btn-danger'}`}
                                     onClick={() => handleReview(req.id, reviewAction)}
-                                    disabled={loading || !reviewNote.trim()}
+                                    disabled={loading || reviewNote.trim().length < 5}
                                   >
                                     Confirm {reviewAction === 'Approved' ? 'Approve' : 'Reject'}
                                   </button>

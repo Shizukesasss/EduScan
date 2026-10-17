@@ -1,12 +1,12 @@
 import React from 'react';
-import { CheckCircle2, AlertTriangle, XCircle, ShieldCheck, X } from 'lucide-react';
+import { AlertTriangle, XCircle, X } from 'lucide-react';
 
 export default function ValidationChecklist({
   components = [],
   students = [],
   status = 'Draft',
   passingGrade = 75,
-  onOpenConfig,
+  hasPendingEdits = false,
   onClose,
 }) {
   const totalWeight = components.reduce((sum, c) => sum + (Number(c.weight) || 0), 0);
@@ -40,11 +40,13 @@ export default function ValidationChecklist({
     {
       id: 'scores',
       title: 'Learner Scores Completion',
-      description: allScoresComplete
+      description: hasPendingEdits
+        ? 'Unsaved score changes are waiting. Save them to refresh this completion check.'
+        : allScoresComplete
         ? `All ${students.length} enrolled learner(s) have complete computed scores.`
         : `${incompleteStudents.length} of ${students.length} learner(s) have missing, excused, or blank scores.`,
-      status: allScoresComplete ? 'pass' : status === 'Draft' ? 'warn' : 'error',
-      hint: 'Required prior to Finalization. Drafts may be saved with partial scores.',
+      status: hasPendingEdits ? 'warn' : allScoresComplete ? 'pass' : status === 'Draft' ? 'warn' : 'error',
+      hint: hasPendingEdits ? 'The checklist reflects saved scores; pending edits are visible in the grade sheet.' : 'Required prior to Finalization. Drafts may be saved with partial scores.',
     },
     {
       id: 'policy',
@@ -66,7 +68,7 @@ export default function ValidationChecklist({
         </div>
         {onClose && (
           <button type="button" className="btn-icon" onClick={onClose} aria-label="Close checklist">
-            <X size={18} />
+            <X size={18} /><span className="control-label">Close</span>
           </button>
         )}
       </div>
@@ -75,12 +77,12 @@ export default function ValidationChecklist({
         {hasErrors ? (
           <div className="notice notice-danger compact-notice">
             <XCircle size={18} />
-            <span><strong>Submission Blocked:</strong> Resolve critical errors before submitting or finalizing.</span>
+            <span><strong>Finalization Blocked:</strong> Resolve these errors before finalizing.</span>
           </div>
         ) : hasWarnings ? (
           <div className="notice notice-warning compact-notice">
             <AlertTriangle size={18} />
-            <span><strong>Ready for Draft/Review:</strong> Partial scores exist. All scores must be entered before Finalization.</span>
+            <span><strong>Draft only:</strong> Partial scores may be saved. Complete every activity used in this class for every learner before finalizing.</span>
           </div>
         ) : null}
       </div>

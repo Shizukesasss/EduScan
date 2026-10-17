@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Phone, Calendar, Plus, X } from 'lucide-react';
 import { api } from '../../api/client';
-import { useToast } from '../../contexts/ToastContext';
+import { useToast } from '../../contexts/useToast';
 
 export default function TruancyInterventions() {
   const [students, setStudents] = useState([]);
@@ -16,5 +16,5 @@ function InterventionModal({ student, onClose, onSaved, showError, showSuccess }
   const [type, setType] = useState('Parent Conference');
   const [note, setNote] = useState('');
   const submit = async (event) => { event.preventDefault(); try { await api.post('/interventions', { person_id: student.id, intervention_type: type, note }); showSuccess('Intervention logged.'); await onSaved(); } catch (err) { showError(err.message); } };
-  return <div className="modal-backdrop"><form className="modal-card" onSubmit={submit}><div className="modal-header"><div><p className="eyebrow">Attributable intervention record</p><h2>{student.full_name}</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={20} /></button></div><label><span className="field-label">Intervention type</span><select className="input-field" value={type} onChange={(e) => setType(e.target.value)}><option>Parent Conference</option><option>Home Visitation</option><option>Guidance Referral</option><option>Written Notice</option><option>Other Follow-up</option></select></label><label><span className="field-label">Factual notes and outcome</span><textarea className="text-area" value={note} onChange={(e) => setNote(e.target.value)} /></label><div className="modal-actions"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary">Save intervention log</button></div></form></div>;
+  return <div className="modal-backdrop"><form className="modal-card" onSubmit={submit}><div className="modal-header"><div><p className="eyebrow">Attributable intervention record</p><h2>{student.full_name}</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={20} /><span className="control-label">Close</span></button></div><label><span className="field-label">Intervention type</span><select className="input-field" value={type} onChange={(e) => setType(e.target.value)}><option>Parent Conference</option><option>Home Visitation</option><option>Guidance Referral</option><option>Written Notice</option><option>Other Follow-up</option></select></label><label><span className="field-label">Factual notes and outcome</span><textarea className="text-area" value={note} onChange={(e) => setNote(e.target.value)} /></label><div className="modal-actions"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary">Save intervention log</button></div></form></div>;
 }

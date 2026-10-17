@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Plus, X, Trash2 } from 'lucide-react';
 import { api, auth } from '../../api/client';
-import { useToast } from '../../contexts/ToastContext';
+import { useToast } from '../../contexts/useToast';
 
 export default function AdjustmentRequestsModal({
   gradebookId,
@@ -15,6 +15,7 @@ export default function AdjustmentRequestsModal({
   const isAdminOrOfficer = ['admin', 'records_officer'].includes(userRole);
 
   const [mode, setMode] = useState('list'); // 'list' | 'create'
+  const [criteriaWeights, setCriteriaWeights] = useState(() => Object.fromEntries(components.map((c) => [c.id, c.weight])));
   const [selectedStudentId, setSelectedStudentId] = useState(students[0]?.person_id || '');
   const [selectedItemId, setSelectedItemId] = useState(() => {
     for (const c of components) {
@@ -23,7 +24,7 @@ export default function AdjustmentRequestsModal({
     return '';
   });
   const [newScore, setNewScore] = useState('');
-  const [newStatus, setNewStatus] = useState('Scored');
+  const [requestReason, setRequestReason] = useState('');
   const [isConfirmed, setIsConfirmed] = useState(false);
   const [loading, setLoading] = useState(false);
   const { showSuccess, showError } = useToast();
@@ -32,6 +33,7 @@ export default function AdjustmentRequestsModal({
   const [reviewingId, setReviewingId] = useState(null);
   const [reviewAction, setReviewAction] = useState('Approved'); // 'Approved' | 'Rejected'
   const [isReviewConfirmed, setIsReviewConfirmed] = useState(false);
+  const [reviewNote, setReviewNote] = useState('');
 
   // Collect all items across components for the dropdown
   const allItems = components.flatMap((c) =>
@@ -57,19 +59,21 @@ export default function AdjustmentRequestsModal({
       showError('Please select an assessment activity.');
       return;
     }
-    if (newStatus === 'Scored') {
-      if (newScore === '' || isNaN(Number(newScore))) {
-        showError('Please enter a valid numeric score.');
-        return;
-      }
-      const num = Number(newScore);
-      if (num < 0 || (selectedItem && num > selectedItem.max_score)) {
-        showError(`Score must be between 0 and ${selectedItem ? selectedItem.max_score : 100}.`);
-        return;
-      }
+    if (newScore === '' || !Number.isFinite(Number(newScore))) {
+      showError('Please enter a valid numeric score.');
+      return;
+    }
+    const num = Number(newScore);
+    if (num < 0 || (selectedItem && num > selectedItem.max_score)) {
+      showError(`Score must be between 0 and ${selectedItem ? selectedItem.max_score : 100}.`);
+      return;
     }
     if (!isConfirmed) {
       showError('You must confirm this action to proceed.');
+      return;
+    }
+    if (requestReason.trim().length < 8) {
+      showError('Describe the correction in at least 8 characters.');
       return;
     }
 
@@ -78,17 +82,49 @@ export default function AdjustmentRequestsModal({
       await api.post(`/gradebooks/${gradebookId}/adjustments`, {
         person_id: Number(selectedStudentId),
         assessment_item_id: Number(selectedItemId),
-        new_score: newStatus === 'Scored' ? Number(newScore) : null,
-        new_status: newStatus,
-        reason: 'Action confirmed by user.',
+        new_score: Number(newScore),
+        new_status: 'Scored',
+        reason: requestReason.trim(),
       });
       showSuccess('Grade adjustment request successfully submitted for administrative review.');
       setIsConfirmed(false);
       setNewScore('');
-      onRefresh?.();
-      setTimeout(() => {
-        setMode('list');
-      }, 1500);
+      setRequestReason('');
+      await onRefresh?.();
+      setMode('list');
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmitCriteriaRequest = async (e) => {
+    e.preventDefault();
+    const requested = components.map((component) => ({
+      component_id: component.id,
+      weight: Number(criteriaWeights[component.id]),
+    }));
+    if (requested.some((item) => !Number.isFinite(item.weight) || item.weight < 0 || item.weight > 100)
+      || Math.abs(requested.reduce((sum, item) => sum + item.weight, 0) - 100) > 0.01) {
+      showError('The requested assessment weights must total exactly 100%.');
+      return;
+    }
+    if (requestReason.trim().length < 8 || !isConfirmed) {
+      showError('Provide a reason of at least 8 characters and confirm the request.');
+      return;
+    }
+    setLoading(true);
+    try {
+      await api.post(`/gradebooks/${gradebookId}/criteria-adjustments`, {
+        components: requested,
+        reason: requestReason.trim(),
+      });
+      showSuccess('Criteria adjustment request submitted for administrative review.');
+      setIsConfirmed(false);
+      setRequestReason('');
+      await onRefresh?.();
+      setMode('list');
     } catch (err) {
       showError(err.message);
     } finally {
@@ -97,6 +133,10 @@ export default function AdjustmentRequestsModal({
   };
 
   const handleReview = async (id, status) => {
+    if (reviewNote.trim().length < 5) {
+      showError('Enter a review note of at least 5 characters.');
+      return;
+    }
     if (!isReviewConfirmed) {
       showError('You must confirm this action.');
       return;
@@ -105,10 +145,11 @@ export default function AdjustmentRequestsModal({
     try {
       await api.put(`/adjustment-requests/${id}`, {
         status,
-        note: 'Review confirmed by admin.',
+        note: reviewNote.trim(),
       });
       setReviewingId(null);
       setIsReviewConfirmed(false);
+      setReviewNote('');
       onRefresh?.();
     } catch (err) {
       showError(err.message);
@@ -143,7 +184,7 @@ export default function AdjustmentRequestsModal({
             </p>
           </div>
           <button type="button" className="btn-icon" onClick={onClose} aria-label="Close">
-            <X size={20} />
+            <X size={20} /><span className="control-label">Close</span>
           </button>
         </div>
 
@@ -168,10 +209,40 @@ export default function AdjustmentRequestsModal({
                   <Plus size={13} style={{ display: 'inline', marginRight: '3px' }} /> New Request
                 </button>
               )}
+              {!isAdminOrOfficer && (
+                <button
+                  type="button"
+                  className={`status-filter-btn${mode === 'criteria' ? ' status-filter-active status-filter-audit' : ''}`}
+                  onClick={() => setMode('criteria')}
+                >
+                  Request Criteria Change
+                </button>
+              )}
             </div>
           </div>
 
-          {mode === 'create' ? (
+          {mode === 'criteria' ? (
+            <form onSubmit={handleSubmitCriteriaRequest} className="space-y-6">
+              <p className="text-muted text-sm">Request new Written Work, Performance Task, and QA weights for this finalized class record. If approved, grades for the whole class will be recalculated; saved scores and activities stay unchanged.</p>
+              <div className="form-grid three-columns">
+                {components.map((component) => (
+                  <label key={component.id}>
+                    <span className="field-label">{component.component_type === 'Term Examinations' ? 'QA / Term Examinations' : component.name} (%)</span>
+                    <input type="number" min="0" max="100" step="1" className="input-field"
+                      value={criteriaWeights[component.id] ?? component.weight} disabled={loading}
+                      onChange={(event) => setCriteriaWeights((prev) => ({ ...prev, [component.id]: event.target.value }))} />
+                  </label>
+                ))}
+              </div>
+              <strong>Total: {components.reduce((sum, component) => sum + (Number(criteriaWeights[component.id]) || 0), 0)}%</strong>
+              <label><span className="field-label">Reason for criteria change</span><textarea className="input-field" value={requestReason} minLength={8} maxLength={2000} onChange={(event) => setRequestReason(event.target.value)} disabled={loading} required /></label>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={isConfirmed} onChange={(event) => setIsConfirmed(event.target.checked)} disabled={loading} /> I understand approval will recalculate every learner’s grade in this class record.</label>
+              <div className="action-row pt-4 border-t border-border flex justify-end gap-3">
+                <button type="button" className="btn btn-secondary" onClick={() => setMode('list')} disabled={loading}>Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={loading || !isConfirmed || requestReason.trim().length < 8}>{loading ? 'Submitting...' : 'Submit Criteria Request'}</button>
+              </div>
+            </form>
+          ) : mode === 'create' ? (
             /* CREATE REQUEST FORM */
             <form onSubmit={handleSubmitRequest} className="space-y-6">
               <div className="form-grid two-columns">
@@ -224,26 +295,9 @@ export default function AdjustmentRequestsModal({
                 )}
               </div>
 
-              <div className="form-grid two-columns">
+              <div className="form-grid">
                 <div className="form-group">
-                  <label className="field-label">New Status</label>
-                  <select
-                    className="input-field w-full"
-                    value={newStatus}
-                    onChange={(e) => setNewStatus(e.target.value)}
-                    disabled={loading}
-                  >
-                    <option value="Scored">Scored</option>
-                    <option value="Missing">Missing</option>
-                    <option value="Excused">Excused</option>
-                    <option value="Incomplete">Incomplete</option>
-                  </select>
-                </div>
-
-                <div className="form-group">
-                  <label className="field-label">
-                    New Score {selectedItem && `(0 – ${selectedItem.max_score})`}
-                  </label>
+                  <label className="field-label">New Score {selectedItem && `(0 – ${selectedItem.max_score})`}</label>
                   <input
                     type="number"
                     step="0.01"
@@ -251,12 +305,15 @@ export default function AdjustmentRequestsModal({
                     max={selectedItem?.max_score ?? 100}
                     className="input-field font-mono w-full"
                     placeholder="Enter corrected score"
-                    disabled={loading || newStatus !== 'Scored'}
+                    disabled={loading}
                     value={newScore}
                     onChange={(e) => setNewScore(e.target.value)}
                   />
+                  <p className="text-muted text-sm">Adjustments to finalized records must keep a numeric grade. To enter a non-scored status, the class record must be reopened for teacher editing.</p>
                 </div>
               </div>
+
+              <label><span className="field-label">Reason for correction</span><textarea className="input-field" value={requestReason} minLength={8} maxLength={2000} onChange={event => setRequestReason(event.target.value)} disabled={loading} required /></label>
 
               <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '15px', marginBottom: '20px' }}>
                 <input
@@ -285,7 +342,7 @@ export default function AdjustmentRequestsModal({
                   type="submit"
                   className="btn btn-primary"
                   disabled={
-                    loading || (newStatus === 'Scored' && newScore === '') || !isConfirmed
+                    loading || newScore === '' || !isConfirmed || requestReason.trim().length < 8
                   }
                 >
                   {loading ? 'Submitting...' : 'Submit Request for Approval'}
@@ -320,14 +377,15 @@ export default function AdjustmentRequestsModal({
 
                       return (
                         <tr key={req.id}>
+                          <td><strong>{req.request_type === 'criteria' ? 'Entire class' : (req.person_name || `ID: ${req.person_id}`)}</strong></td>
+                          <td><span>{req.request_type === 'criteria' ? 'Grading criteria' : (req.assessment_label || `Item #${req.assessment_item_id}`)}</span></td>
                           <td>
-                            <strong>{req.person_name || `ID: ${req.person_id}`}</strong>
-                          </td>
-                          <td>
-                            <span>{req.assessment_label || `Item #${req.assessment_item_id}`}</span>
-                          </td>
-                          <td>
-                            <div className="value-diff flex items-center gap-2">
+                            {req.request_type === 'criteria' ? (
+                              <div className="text-sm">{req.old_criteria?.map((item) => {
+                                const next = req.new_criteria?.find((entry) => entry.component_id === item.component_id);
+                                return <div key={item.component_id}>{item.name}: {item.weight}% → <strong>{next?.weight}%</strong></div>;
+                              })}</div>
+                            ) : <div className="value-diff flex items-center gap-2">
                               <span className="old-val text-muted line-through">
                                 {req.old_score != null ? req.old_score : req.old_status || '—'}
                               </span>
@@ -335,7 +393,7 @@ export default function AdjustmentRequestsModal({
                               <span className="new-val font-bold">
                                 {req.new_score != null ? req.new_score : req.new_status}
                               </span>
-                            </div>
+                            </div>}
                           </td>
                           <td>
                             <p className="reason-text text-sm mb-1">{req.reason}</p>
@@ -367,6 +425,7 @@ export default function AdjustmentRequestsModal({
                               <div className="action-row compact-actions flex-wrap gap-2 mb-2 justify-center">
                                 {reviewingId === req.id ? (
                                   <div className="review-input-group flex-col items-center gap-2 w-48 mx-auto">
+                                    <input className="input-field" aria-label="Review note" value={reviewNote} onChange={event => setReviewNote(event.target.value)} placeholder="Reason for approval or rejection" disabled={loading} />
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
                                       <input
                                         type="checkbox"
@@ -381,7 +440,7 @@ export default function AdjustmentRequestsModal({
                                         type="button"
                                         className={`btn btn-sm ${reviewAction === 'Approved' ? 'btn-success' : 'btn-danger'}`}
                                         onClick={() => handleReview(req.id, reviewAction)}
-                                        disabled={loading || !isReviewConfirmed}
+                                        disabled={loading || !isReviewConfirmed || reviewNote.trim().length < 5}
                                       >
                                         Confirm {reviewAction === 'Approved' ? 'Approve' : 'Reject'}
                                       </button>
@@ -406,7 +465,7 @@ export default function AdjustmentRequestsModal({
                                         setReviewAction('Approved');
                                       }}
                                     >
-                                      Approve →
+                                      Approve
                                     </button>
                                     <button
                                       type="button"
@@ -418,13 +477,13 @@ export default function AdjustmentRequestsModal({
                                         setReviewAction('Rejected');
                                       }}
                                     >
-                                      Reject →
+                                      Reject
                                     </button>
                                   </div>
                                 )}
                               </div>
                             )}
-                            {(!isAdminOrOfficer || true) && (
+                            {isPending && (
                               <button
                                 type="button"
                                 className="btn-link-action mx-auto block"
@@ -433,7 +492,7 @@ export default function AdjustmentRequestsModal({
                                 onClick={() => handleDeleteRequest(req.id)}
                                 disabled={loading}
                               >
-                                <Trash2 size={16} />
+                                <Trash2 size={16} /><span className="control-label">Delete</span>
                               </button>
                             )}
                           </td>

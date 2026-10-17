@@ -1,15 +1,30 @@
-import urllib.request
+"""Manual report download, never executed during import or test discovery."""
+import argparse
+import getpass
 import json
-import urllib.parse
-import os
+import urllib.request
+from pathlib import Path
 
-login_data = json.dumps({"username": "admin", "password": "admin123"}).encode('utf-8')
-req = urllib.request.Request("http://127.0.0.1:8000/api/auth/login", data=login_data, headers={'Content-Type': 'application/json'})
-token = json.loads(urllib.request.urlopen(req).read().decode())['access_token']
 
-req2 = urllib.request.Request("http://127.0.0.1:8000/api/gradebooks/103/report.xlsx?region=V&division=V&school_id=301874", headers={'Authorization': 'Bearer ' + token})
-res = urllib.request.urlopen(req2)
-with open("test_export.xlsx", "wb") as f:
-    f.write(res.read())
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base-url", required=True)
+    parser.add_argument("--username", required=True)
+    parser.add_argument("--gradebook-id", required=True, type=int)
+    parser.add_argument("--output", required=True, type=Path)
+    args = parser.parse_args()
+    login = json.dumps({"username": args.username, "password": getpass.getpass("Password: ")}).encode()
+    request = urllib.request.Request(args.base_url.rstrip("/") + "/api/auth/login", data=login, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        token = json.load(response)["access_token"]
+    request = urllib.request.Request(args.base_url.rstrip("/") + f"/api/gradebooks/{args.gradebook_id}/report.xlsx", headers={"Authorization": "Bearer " + token})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = response.read()
+    # Do not overwrite an existing workbook.
+    with args.output.open("xb") as target:
+        target.write(data)
+    print(f"Report saved: {args.output}")
 
-print(f"Exported successfully! File size: {os.path.getsize('test_export.xlsx')} bytes.")
+
+if __name__ == "__main__":
+    main()

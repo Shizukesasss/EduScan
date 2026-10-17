@@ -306,6 +306,33 @@
   font-weight: 500;
 }
 
+.deped-assessment-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid #d8e1ed;
+  background: #f8fafc;
+}
+
+.deped-assessment-tab {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border: 1px solid #cbd6e4;
+  border-radius: 6px;
+  background: #fff;
+  color: #334155;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.deped-assessment-tab span { margin-left: 4px; color: #64748b; font-weight: 500; }
+.deped-assessment-tab[aria-pressed="true"] { background: #1a3a6c; border-color: #1a3a6c; color: #fff; }
+.deped-assessment-tab[aria-pressed="true"] span { color: #e2eaf6; }
+.deped-assessment-tab:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+
 /* ── Table Scroll Container ──────────────────────────────── */
 .deped-table-scroll {
   overflow-x: auto;
@@ -359,7 +386,9 @@
   background: #2e5594;
   font-size: 12px;
   font-weight: 700;
-  min-width: 36px;
+  width: 64px;
+  min-width: 64px;
+  max-width: 64px;
   padding: 3px 2px;
 }
 
@@ -388,7 +417,7 @@
 }
 
 .deped-th-name {
-  min-width: 240px;
+  min-width: 190px;
   text-align: left;
   padding-left: 8px;
   position: sticky !important;
@@ -489,8 +518,8 @@ td.deped-cell-no    { position: sticky; left: 0; z-index: 3; }
 }
 
 .deped-cell-name {
-  min-width: 240px;
-  max-width: 280px;
+  min-width: 190px;
+  max-width: 220px;
   font-weight: 600;
   color: #111;
   padding: 3px 6px;
@@ -499,7 +528,7 @@ td.deped-cell-no    { position: sticky; left: 0; z-index: 3; }
   text-overflow: ellipsis;
 }
 
-.deped-cell-score { text-align: center; padding: 1px; min-width: 36px; }
+.deped-cell-score { text-align: center; padding: 1px; width: 64px; min-width: 64px; max-width: 64px; }
 .deped-cell-error { background: #fff0f0 !important; border-color: #e74c3c !important; }
 
 .deped-cell-computed {
@@ -546,7 +575,7 @@ td.deped-cell-no    { position: sticky; left: 0; z-index: 3; }
 /* ── Score Input ─────────────────────────────────────────── */
 .deped-score-input {
   width: 100%;
-  min-width: 30px;
+  min-width: 24px;
   border: none;
   outline: none;
   text-align: center;
@@ -618,3 +647,58 @@ td.deped-cell-no    { position: sticky; left: 0; z-index: 3; }
 }
 
 .deped-calc-btn:hover { background: #1a3a6c; color: #fff; border-color: #1a3a6c; }
+
+/* Visual refinements keep the official record and sticky cell geometry intact. */
+.deped-class-record {
+  border-color: var(--border-color);
+  border-radius: var(--radius-card);
+  box-shadow: var(--card-shadow);
+}
+.deped-header-block {
+  padding: 20px 18px 14px;
+  border-bottom: 1px solid #b9c9df;
+  overflow-x: auto;
+}
+.deped-header-title {
+  font-family: var(--font-heading);
+  font-weight: 650;
+  font-size: 1.75rem;
+  letter-spacing: -0.025em;
+  text-transform: none;
+  color: var(--primary-color);
+}
+.deped-header-subtitle { color: var(--text-secondary); font-style: normal; margin-top: 4px; }
+.deped-status-badge { border-radius: 6px; font-weight: 650; letter-spacing: 0.05em; }
+.deped-info-table, .deped-meta-table { border-color: #c9d5e4; }
+.deped-info-table th, .deped-info-table td { border-color: #c9d5e4; }
+.deped-info-table th { background: #eef3fa; color: #314d72; }
+.deped-header-input, .deped-header-select { border-radius: 5px; }
+.deped-controls { background: #f6f8fb; border-color: var(--border-color); padding: 12px; gap: 8px; flex-wrap: wrap; }
+.deped-search-box { border-color: #cfd6e0; border-radius: 8px; }
+.deped-search-input { border-color: #cfd6e0; border-radius: 8px; min-height: 32px; }
+.deped-filter-pill, .deped-sort-btn { border-radius: 6px; min-height: 30px; font-weight: 600; }
+.deped-filter-active { background: #edf3fc !important; color: var(--accent-blue) !important; border-color: #b8cbea !important; }
+.deped-learner-count { color: var(--text-secondary); }
+.deped-table-scroll { max-width: 100%; scrollbar-color: #aab5c5 #f3f5f8; }
+.deped-sheet-table { font-variant-numeric: tabular-nums; }
+.deped-sheet-table td, .deped-sheet-table th { border-color: #bdcadb; }
+.deped-th, .deped-th-comp-group { font-weight: 650; letter-spacing: 0.01em; }
+.deped-th-item { font-weight: 600; }
+.deped-score-input { font-family: 'Arial', 'Calibri', ui-sans-serif, sans-serif; font-variant-numeric: tabular-nums; }
+.deped-score-input:focus { background: #edf3fc; outline-color: var(--accent-blue); }
+.deped-header-input:focus-visible, .deped-header-select:focus-visible,
+.deped-search-input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.deped-sex-label { font-weight: 650; letter-spacing: 0.06em; }
+.deped-calc-btn { border-radius: 5px; }
+
+@media (max-width: 760px) {
+  .deped-header-block { padding: 16px 12px 12px; }
+  .deped-header-title { font-size: 1.4rem; }
+  .deped-header-top { min-width: 260px; }
+  .deped-info-table, .deped-meta-table { min-width: 700px; }
+  .deped-controls { gap: 8px; }
+  .deped-learner-count { margin-left: 0; }
+  .deped-th-name, .deped-cell-name { min-width: 170px; max-width: 200px; }
+  .deped-assessment-tabs { padding: 7px; }
+  .deped-assessment-tab { padding: 6px 8px; }
+}

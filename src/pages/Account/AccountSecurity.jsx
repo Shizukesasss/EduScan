@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { AlertCircle, KeyRound, LogOut, ShieldCheck } from 'lucide-react';
+import { KeyRound, LogOut, ShieldCheck } from 'lucide-react';
 import { api, auth } from '../../api/client';
-import { useToast } from '../../contexts/ToastContext';
+import { useToast } from '../../contexts/useToast';
 
 function destination() {
+  if (auth.role() === 'school_head') return '/dashboard/grading';
   return auth.role() === 'admin' ? '/dashboard' : auth.role() === 'teacher' ? '/teacher' : '/scanner';
 }
 

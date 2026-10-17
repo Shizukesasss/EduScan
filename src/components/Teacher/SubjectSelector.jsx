@@ -12,13 +12,12 @@ export default function SubjectSelector({ currentClass, setCurrentClass, setCurr
   }).catch(() => setClasses([])); }, [currentClass, setCurrentClass, setCurrentSchedule]);
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '16px', background: 'white', padding: '12px 24px', borderRadius: '16px', boxShadow: '0 2px 12px rgba(0,0,0,0.03)', border: '1px solid var(--border-color)' }}>
+    <div className="subject-selector">
       <BookOpen size={20} color="var(--accent-blue)" />
-      <div style={{ display: 'flex', flexDirection: 'column' }}>
-        <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Current Context</span>
+      <div className="subject-selector-content">
+        <span className="subject-selector-label">Current Context</span>
         <select 
-          className="input-field" 
-          style={{ padding: '4px 32px 4px 0', border: 'none', background: 'transparent', fontSize: '18px', fontWeight: 600, color: 'var(--primary-color)', boxShadow: 'none', cursor: 'pointer' }}
+          className="input-field subject-context-select"
           value={currentClass}
           onChange={(e) => { const selected = classes.find((item) => item.id === e.target.value); setCurrentClass(e.target.value); setCurrentSchedule?.(selected?.schedule || null); }}
         >

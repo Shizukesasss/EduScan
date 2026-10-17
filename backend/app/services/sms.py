@@ -4,7 +4,7 @@ import re
 import ipaddress
 import socket
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import httpx
@@ -23,6 +23,7 @@ DEFAULT_TEMPLATES = {
     "time_out": "EduScan: {name} left San Jose National High School at {time} on {date}. If unexpected, contact {school_contact}.",
     "tardiness": "EduScan: {name} arrived at {time} on {date} and was marked late for {class_name} (start: {class_start}). Contact {school_contact} for corrections.",
     "absence": "EduScan: No time-in was recorded for {name} by {absence_cutoff} on {date}; the learner was marked absent pending teacher review. Contact {school_contact}.",
+    "enrollment": "EduScan: School enrollment for {name} was {enrollment_action} on {date} at {time}. Contact {school_contact} for questions.",
 }
 
 
@@ -31,6 +32,8 @@ def sms_config(db: Session) -> dict:
     templates = {**DEFAULT_TEMPLATES, **stored.get("templates", {})}
     return {
         "enabled": bool(stored.get("enabled", settings.sms_gateway_enabled)),
+        "enrollment_notifications": bool(stored.get("enrollment_notifications", True)),
+        "dispatch_after": stored.get("dispatch_after"),
         "gateway_url": stored.get("gateway_url", settings.sms_gateway_url),
         "username": stored.get("username", settings.sms_gateway_username),
         "password": get_secret(db, "sms.password", settings.sms_gateway_password),
@@ -73,7 +76,7 @@ def validate_local_gateway_url(gateway_url: str) -> tuple[str, int]:
 
 
 def gateway_diagnostics(db: Session) -> dict:
-    """Test local TCP reachability without creating or sending an SMS."""
+    """Check reachability and the protected docs endpoint without sending SMS."""
     config = sms_config(db)
     result = {
         "enabled": config["enabled"],
@@ -81,6 +84,8 @@ def gateway_diagnostics(db: Session) -> dict:
         "username_configured": bool(config["username"]),
         "password_configured": bool(config["password"]),
         "reachable": False,
+        "ready": False,
+        "credentials_accepted": False,
     }
     try:
         host, port = validate_local_gateway_url(config["gateway_url"])
@@ -88,6 +93,19 @@ def gateway_diagnostics(db: Session) -> dict:
             pass
         result.update({"reachable": True, "host": host, "port": port,
                        "message": "The Android Local Server port is reachable. Send a real test SMS to verify credentials and SIM delivery."})
+        if not config["username"] or not config["password"]:
+            result["message"] = "The phone is reachable, but the API username or password is missing."
+        else:
+            response = httpx.get(config["gateway_url"].rstrip("/") + "/docs",
+                                 auth=(config["username"], config["password"]), timeout=4)
+            if response.status_code in {401, 403}:
+                result["message"] = "The phone is reachable, but it rejected the API username or password."
+            elif response.status_code == 200:
+                result["credentials_accepted"] = True
+                result["ready"] = config["enabled"]
+                result["message"] = "Phone connection and API credentials checked. Send one test SMS to verify SIM delivery." if config["enabled"] else "Phone connection and API credentials checked, but SMS dispatch is disabled."
+            else:
+                result["message"] = f"The phone port is reachable, but its protected SMS Gateway docs returned HTTP {response.status_code}. Check the Local Server URL and app version."
     except HTTPException as exc:
         result["message"] = str(exc.detail)
     except OSError as exc:
@@ -95,6 +113,8 @@ def gateway_diagnostics(db: Session) -> dict:
             result["message"] = "Windows or the current network policy blocked the connection. Check firewall rules and that this laptop may reach the phone's private address."
         else:
             result["message"] = f"The phone did not accept a connection: {exc}"
+    except httpx.HTTPError:
+        result["message"] = "The phone port is reachable, but its SMS Gateway API did not respond. Check that Local Server is online."
     return result
 
 
@@ -147,14 +167,70 @@ def queue_notice(db: Session, person: Person, event_type: str, values: dict,
     return record
 
 
+def queue_enrollment_notice(db: Session, person: Person, result: dict) -> dict:
+    """Enrollment is already committed; an SMS error must not undo it."""
+    if person.role != "Student":
+        return {"status": "skipped", "message": "Guardian SMS applies to student enrollments."}
+    if not person.guardian_phone:
+        return {"status": "skipped", "message": "No SMS queued: this student has no parent/guardian mobile number."}
+    try:
+        config = sms_config(db)
+        if not config["enrollment_notifications"]:
+            return {"status": "skipped", "message": "Enrollment SMS notifications are turned off."}
+        now = datetime.now(timezone(timedelta(hours=8)))
+        record = queue_notice(db, person, "enrollment", {
+            "date": now.strftime("%Y-%m-%d"), "time": now.strftime("%I:%M %p"),
+            "enrollment_action": "updated" if result.get("action") == "updated" else "completed",
+        }, idempotency_key=f"enrollment:{person.id}:{result['model']['version']}")
+        ready = bool(config["enabled"] and config["username"] and config["password"])
+        message = "Guardian SMS queued for delivery." if ready else "Guardian SMS queued, but delivery is paused until the Android gateway is enabled and configured."
+        return {"id": record.id, "status": record.status, "dispatch_ready": ready, "message": message}
+    except Exception:
+        db.rollback()
+        return {"status": "not_queued", "message": "Enrollment saved, but the guardian SMS could not be queued. Check the mobile number and SMS settings."}
+
+
+def hold_pending_before_activation(db: Session, activated_at: datetime) -> int:
+    records = db.scalars(select(SmsOutbox).where(
+        SmsOutbox.status.in_(["queued", "failed"]), SmsOutbox.created_at < activated_at,
+    )).all()
+    for record in records:
+        record.status = "held"
+        record.next_attempt_at = None
+        record.last_error = "Queued before SMS was enabled. Review and requeue explicitly to send."
+    return len(records)
+
+
 def send_record(db: Session, record: SmsOutbox) -> SmsOutbox:
+    if record.status not in {"queued", "failed"}:
+        return record
+    locked = db.scalar(select(SmsOutbox).where(SmsOutbox.id == record.id)
+                       .with_for_update().execution_options(populate_existing=True))
+    if locked is None:
+        return record
+    record = locked
+    if record.status not in {"queued", "failed"}:
+        db.commit()
+        return record
     config = sms_config(db)
     now = datetime.utcnow()
     if record.next_attempt_at and record.next_attempt_at > now:
+        db.commit()
         return record
     if not config["enabled"]:
         record.status = "queued"
         record.last_error = "Android SMS gateway is not enabled"
+        db.commit()
+        return record
+    cutoff = datetime.fromisoformat(config["dispatch_after"]) if config.get("dispatch_after") else None
+    if cutoff and record.created_at < cutoff and (not record.next_attempt_at or record.next_attempt_at < cutoff):
+        record.status = "held"
+        record.last_error = "Queued before SMS was enabled. Review and requeue explicitly to send."
+        db.commit()
+        return record
+    if not config["username"] or not config["password"]:
+        record.status = "queued"
+        record.last_error = "Android gateway API username and password are required"
         db.commit()
         return record
     sent_since = now - timedelta(minutes=30)
@@ -265,13 +341,13 @@ def reconcile_outbox(db: Session, limit: int = 100) -> list[SmsOutbox]:
 
 
 def requeue_record(db: Session, record: SmsOutbox) -> SmsOutbox:
-    if record.status not in {"failed", "exhausted", "cancelled"}:
-        raise HTTPException(status_code=409, detail="Only failed, exhausted, or cancelled messages can be requeued")
+    if record.status not in {"failed", "exhausted", "cancelled", "held"}:
+        raise HTTPException(status_code=409, detail="Only failed, exhausted, cancelled, or held messages can be requeued")
     record.status = "queued"
     record.attempts = 0
     record.gateway_message_id = None
     record.last_error = None
-    record.next_attempt_at = None
+    record.next_attempt_at = datetime.utcnow()
     record.sent_at = None
     record.delivered_at = None
     record.cancelled_at = None

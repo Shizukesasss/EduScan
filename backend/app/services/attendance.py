@@ -21,7 +21,7 @@ def local_now() -> datetime:
 
 
 def attendance_config(db: Session) -> dict:
-    return {"absence_cutoff": "09:00", "duplicate_cooldown_seconds": 45, "auto_close_enabled": True,
+    return {"absence_cutoff": "09:00", "duplicate_cooldown_seconds": 5, "auto_close_enabled": True,
             **get_json(db, "attendance", {})}
 
 
@@ -71,8 +71,10 @@ def applicable_schedule(db: Session, person: Person, day: date) -> ClassSchedule
         PersonnelSchedule.role == person.role, PersonnelSchedule.active.is_(True),
     ).order_by(PersonnelSchedule.start_time)).all()
     eligible = [item for item in schedules if str(day.weekday()) in item.weekdays.split(",")]
-    general = eligible
-    return (general or [None])[0]
+    assignment = (person.assignment or "").strip().casefold()
+    matching = [item for item in eligible if assignment and (item.assignment or "").strip().casefold() == assignment]
+    defaults = [item for item in eligible if not (item.assignment or "").strip()]
+    return next(iter(matching or defaults), None)
 
 
 def latest_day_reset(db: Session, day: date) -> AttendanceResetAudit | None:
@@ -82,19 +84,42 @@ def latest_day_reset(db: Session, day: date) -> AttendanceResetAudit | None:
     )
 
 
+def attendance_event_query():
+    cleared = select(AttendanceCorrection.id).where(
+        AttendanceCorrection.person_id == AttendanceEvent.person_id,
+        AttendanceCorrection.attendance_date == AttendanceEvent.event_date,
+        AttendanceCorrection.status == "No scan",
+        AttendanceCorrection.created_at >= AttendanceEvent.created_at,
+    ).exists()
+    return select(AttendanceEvent).where(~cleared)
+
+
 def raw_row(db: Session, person: Person, day: date) -> dict:
     reset = latest_day_reset(db, day)
-    event_query = select(AttendanceEvent).where(AttendanceEvent.person_id == person.id, AttendanceEvent.event_date == day)
+    event_query = attendance_event_query().where(AttendanceEvent.person_id == person.id, AttendanceEvent.event_date == day)
     if reset:
         event_query = event_query.where(AttendanceEvent.created_at > reset.created_at)
     events = db.scalars(event_query.order_by(AttendanceEvent.event_time, AttendanceEvent.created_at)).all()
-    time_in_event = next((event for event in events if event.direction == "Time In"), None)
-    time_out_event = next((event for event in reversed(events) if event.direction == "Time Out"), None)
-    absence_event = next((event for event in events if event.status == "Absent"), None)
     exception = calendar_exception(db, day)
     excused = db.scalar(select(ExcusedAbsence).where(
         ExcusedAbsence.person_id == person.id, ExcusedAbsence.event_date == day,
     ))
+    correction_query = select(AttendanceCorrection).where(
+        AttendanceCorrection.person_id == person.id,
+        AttendanceCorrection.attendance_date == day,
+    )
+    if reset:
+        correction_query = correction_query.where(AttendanceCorrection.created_at > reset.created_at)
+    correction = db.scalar(correction_query.order_by(AttendanceCorrection.created_at.desc()))
+    return _attendance_row(person, day, events, correction, reset, exception, excused)
+
+
+def _attendance_row(person: Person, day: date, events: list[AttendanceEvent],
+                    correction: AttendanceCorrection | None, reset: AttendanceResetAudit | None,
+                    exception: CalendarException | None, excused: ExcusedAbsence | None) -> dict:
+    time_in_event = next((event for event in events if event.direction == "Time In"), None)
+    time_out_event = next((event for event in reversed(events) if event.direction == "Time Out"), None)
+    absence_event = next((event for event in events if event.status == "Absent"), None)
     status = "No scan"
     source = f"Clean slate started by {reset.actor_name}" if reset else "—"
     if person.enrollment_start_date and day < person.enrollment_start_date:
@@ -103,7 +128,7 @@ def raw_row(db: Session, person: Person, day: date) -> dict:
         status, source = "Transferred Out", f"Enrollment ended {person.enrollment_end_date.isoformat()}"
     elif time_in_event:
         last_gate_event = next((event for event in reversed(events) if event.direction in {"Time In", "Time Out"}), time_in_event)
-        status = "Time Out" if last_gate_event.direction == "Time Out" else time_in_event.status
+        status = time_in_event.status
         source = last_gate_event.source
     elif excused:
         status, source = "Excused", f"Excused by {excused.actor_name}"
@@ -113,13 +138,6 @@ def raw_row(db: Session, person: Person, day: date) -> dict:
         status, source = "Weekend", "Non-instructional day"
     elif absence_event:
         status, source = "Absent", absence_event.source
-    correction_query = select(AttendanceCorrection).where(
-        AttendanceCorrection.person_id == person.id,
-        AttendanceCorrection.attendance_date == day,
-    )
-    if reset:
-        correction_query = correction_query.where(AttendanceCorrection.created_at > reset.created_at)
-    correction = db.scalar(correction_query.order_by(AttendanceCorrection.created_at.desc()))
     row = {
         "person_id": person.id,
         "external_id": person.external_id,
@@ -129,6 +147,7 @@ def raw_row(db: Session, person: Person, day: date) -> dict:
         "role": person.role,
         "grade": person.grade,
         "section": person.section,
+        "assignment": person.assignment,
         "enrollment_status": person.enrollment_status,
         "enrollment_start_date": person.enrollment_start_date,
         "enrollment_end_date": person.enrollment_end_date,
@@ -139,9 +158,12 @@ def raw_row(db: Session, person: Person, day: date) -> dict:
         "source": source,
         "correction_reason": None,
     }
-    if correction:
+    # A cleared accidental scan must not override a later genuine gate visit.
+    if correction and (correction.status != "No scan" or not events):
         row.update(time_in=correction.time_in, time_out=correction.time_out, status=correction.status,
                    source=f"Corrected by {correction.actor_name}", correction_reason=correction.reason)
+        if correction.status == "Time Out":
+            row["status"] = "Late" if time_in_event and time_in_event.status == "Late" else "Present"
     return row
 
 
@@ -173,27 +195,40 @@ def active_people(db: Session, grade: str | None = None, section: str | None = N
 
 def list_rows(db: Session, day: date, grade: str | None = None, section: str | None = None,
               students_only: bool = False) -> list[dict]:
-    return [raw_row(db, person, day) for person in active_people(db, grade, section, students_only)]
+    people = active_people(db, grade, section, students_only)
+    return rows_for_people(db, people, day)
 
 
-def record_gate_match(db: Session, person: Person, distance: float, now: datetime | None = None) -> dict:
+def rows_for_people(db: Session, people: list[Person], day: date) -> list[dict]:
+    if not people:
+        return []
+    ids = [person.id for person in people]
+    reset = latest_day_reset(db, day)
+    events_query = attendance_event_query().where(AttendanceEvent.person_id.in_(ids), AttendanceEvent.event_date == day)
+    corrections_query = select(AttendanceCorrection).where(AttendanceCorrection.person_id.in_(ids), AttendanceCorrection.attendance_date == day)
+    if reset:
+        events_query = events_query.where(AttendanceEvent.created_at > reset.created_at)
+        corrections_query = corrections_query.where(AttendanceCorrection.created_at > reset.created_at)
+    events_by_person = {person.id: [] for person in people}
+    for event in db.scalars(events_query.order_by(AttendanceEvent.event_time, AttendanceEvent.created_at)):
+        events_by_person[event.person_id].append(event)
+    corrections = {}
+    for correction in db.scalars(corrections_query.order_by(AttendanceCorrection.created_at.desc())):
+        corrections.setdefault(correction.person_id, correction)
+    exception = calendar_exception(db, day)
+    excuses = {item.person_id: item for item in db.scalars(select(ExcusedAbsence).where(
+        ExcusedAbsence.person_id.in_(ids), ExcusedAbsence.event_date == day))}
+    return [_attendance_row(person, day, events_by_person[person.id], corrections.get(person.id),
+                            reset, exception, excuses.get(person.id)) for person in people]
+
+
+def record_gate_match(db: Session, person: Person, distance: float, now: datetime | None = None,
+                      *, identity_matcher: str = 'LBPH') -> dict:
     now = now or local_now()
     day, clock = now.date(), now.timetz().replace(tzinfo=None)
     config = attendance_config(db)
     reset = latest_day_reset(db, day)
-    recent_query = select(AttendanceEvent).where(
-        AttendanceEvent.person_id == person.id,
-        AttendanceEvent.event_date == day,
-        AttendanceEvent.direction.in_(["Time In", "Time Out"]),
-    )
-    if reset:
-        recent_query = recent_query.where(AttendanceEvent.created_at > reset.created_at)
-    recent = db.scalar(recent_query.order_by(AttendanceEvent.created_at.desc()))
-    utc_now = datetime.utcnow()
-    if recent and (utc_now - recent.created_at).total_seconds() < int(config["duplicate_cooldown_seconds"]):
-        remaining = int(config["duplicate_cooldown_seconds"] - (utc_now - recent.created_at).total_seconds())
-        return {"recorded": False, "message": f"Duplicate scan ignored; try again in {max(1, remaining)} seconds"}
-    day_events_query = select(AttendanceEvent).where(
+    day_events_query = attendance_event_query().where(
         AttendanceEvent.person_id == person.id,
         AttendanceEvent.event_date == day,
         AttendanceEvent.direction.in_(["Time In", "Time Out"]),
@@ -201,6 +236,11 @@ def record_gate_match(db: Session, person: Person, distance: float, now: datetim
     if reset:
         day_events_query = day_events_query.where(AttendanceEvent.created_at > reset.created_at)
     day_events = db.scalars(day_events_query.order_by(AttendanceEvent.created_at, AttendanceEvent.event_time)).all()
+    recent = day_events[-1] if day_events else None
+    utc_now = datetime.utcnow()
+    if recent and (utc_now - recent.created_at).total_seconds() < int(config["duplicate_cooldown_seconds"]):
+        remaining = int(config["duplicate_cooldown_seconds"] - (utc_now - recent.created_at).total_seconds())
+        return {"recorded": False, "message": f"Duplicate scan ignored; try again in {max(1, remaining)} seconds"}
     last_direction = day_events[-1].direction if day_events else None
     direction = "Time Out" if last_direction == "Time In" else "Time In"
     first_arrival = direction == "Time In" and not any(item.direction == "Time In" for item in day_events)
@@ -216,7 +256,7 @@ def record_gate_match(db: Session, person: Person, distance: float, now: datetim
             status, event_type = "Late", "tardiness"
     event = AttendanceEvent(
         id=str(uuid.uuid4()), person_id=person.id, event_date=day, event_time=clock,
-        direction=direction, status=status, recognition_distance=distance, source="Gate camera / LBPH",
+        direction=direction, status=status, recognition_distance=distance, source=f"Gate camera / {identity_matcher}",
     )
     db.add(event)
     db.commit()
@@ -259,6 +299,13 @@ def close_day(db: Session, day: date, grade: str | None = None, section: str | N
         cutoff = person_absence_cutoff(db, person, day)
         if due_at is not None and due_at < cutoff:
             continue
+        # Registration alone must not backdate absence to an earlier cutoff.
+        if not person.enrollment_start_date and person.created_at:
+            registered_at = person.created_at
+            if registered_at.tzinfo is None:
+                registered_at = registered_at.replace(tzinfo=timezone.utc)
+            if registered_at > datetime.combine(day, cutoff, MANILA):
+                continue
         row = raw_row(db, person, day)
         if row["status"] != "No scan":
             continue
@@ -286,10 +333,23 @@ def save_correction(db: Session, payload, actor: User) -> AttendanceCorrection:
     person = db.get(Person, payload.person_id)
     if not person:
         raise HTTPException(status_code=404, detail="Person was not found")
+    if payload.status == "No scan" and (payload.time_in or payload.time_out):
+        raise HTTPException(status_code=422, detail="A No scan correction must clear both attendance times")
+    reason = payload.reason.strip()
+    if payload.assisted:
+        if not person.active or not payload.identity_verified:
+            raise HTTPException(status_code=422, detail="Verify the active person's school ID or official roster before assisted attendance")
+        if payload.status not in {"Present", "Late"} or not payload.time_in:
+            raise HTTPException(status_code=422, detail="Assisted attendance requires the verified arrival time and Present or Late status under the existing school rules")
+        if payload.time_out and payload.time_out < payload.time_in:
+            raise HTTPException(status_code=422, detail="Departure time cannot be before arrival time")
+        if len(reason) < 8:
+            raise HTTPException(status_code=422, detail="Document the reason for staff assistance (at least 8 characters)")
+        reason = f"Staff-assisted attendance (school ID/roster verified): {reason}"
     before = raw_row(db, person, payload.attendance_date)
     record = AttendanceCorrection(
         id=str(uuid.uuid4()), person_id=person.id, attendance_date=payload.attendance_date,
-        status=payload.status, time_in=payload.time_in, time_out=payload.time_out, reason=payload.reason.strip(),
+        status=payload.status, time_in=payload.time_in, time_out=payload.time_out, reason=reason,
         actor_user_id=actor.id, actor_name=actor.full_name, actor_role=actor.role,
         before_json=json.dumps(before, default=str),
     )

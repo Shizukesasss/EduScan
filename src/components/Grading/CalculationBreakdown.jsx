@@ -3,7 +3,7 @@ import { X } from 'lucide-react';
 export default function CalculationBreakdown({ breakdown, onClose }) {
   if (!breakdown) return null;
 
-  const isPassing = breakdown.status === 'Passed';
+  const isPassing = ['Passed', 'Passing'].includes(breakdown.status);
   const isComplete = breakdown.complete;
 
   return (
@@ -15,7 +15,7 @@ export default function CalculationBreakdown({ breakdown, onClose }) {
             <p className="modal-subtitle">{breakdown.student_name}</p>
           </div>
           <button type="button" className="btn-icon" onClick={onClose} aria-label="Close">
-            <X size={20} />
+            <X size={20} /><span className="control-label">Close</span>
           </button>
         </div>
 
@@ -74,7 +74,7 @@ export default function CalculationBreakdown({ breakdown, onClose }) {
           {/* Transmutation / Final Grade highlight */}
           <div className={`breakdown-result-box ${isPassing ? 'result-pass' : !isComplete ? 'result-incomplete' : 'result-fail'}`}>
             <div className="result-main">
-              <div className="result-label">Quarterly Reported Grade</div>
+              <div className="result-label">Term Reported Grade</div>
               <div className="result-value font-mono">
                 {breakdown.reported_grade != null ? breakdown.reported_grade : '—'}
               </div>
@@ -103,7 +103,7 @@ export default function CalculationBreakdown({ breakdown, onClose }) {
                 <strong>Initial Grade:</strong> Sum of all weighted component scores
               </li>
               <li>
-                <strong>Quarterly Grade:</strong> Converted using the official Transmutation Table
+                <strong>Term Grade:</strong> Converted using the official Transmutation Table
               </li>
             </ol>
           </div>

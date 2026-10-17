@@ -15,7 +15,7 @@ const ACTION_CONFIG = {
   ScoreEntry:          { badgeClass: 'val-badge-neutral', label: 'Score Entry' },
 };
 
-export default function AuditHistory({ audit = [], onClose, onRefresh }) {
+export default function AuditHistory({ audit = [], onClose }) {
   const [search, setSearch] = useState('');
   const [filterAction, setFilterAction] = useState('All');
 
@@ -45,7 +45,7 @@ export default function AuditHistory({ audit = [], onClose, onRefresh }) {
             </p>
           </div>
           <button type="button" className="btn-icon" onClick={onClose} aria-label="Close audit log">
-            <X size={20} />
+            <X size={20} /><span className="control-label">Close</span>
           </button>
         </div>
 

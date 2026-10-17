@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { AlertCircle, CheckCircle, ChevronDown, ChevronRight, Plus, Trash2, X } from 'lucide-react';
-import { useToast } from '../../contexts/ToastContext';
+import { CheckCircle, ChevronDown, ChevronRight, Plus, Trash2, X } from 'lucide-react';
+import { useToast } from '../../contexts/useToast';
 
 export default function AssessmentConfig({ components, onSave, onClose, disabled = false }) {
   const [compList, setCompList] = useState(() =>
@@ -107,7 +107,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
           showError(`Assessment labels under "${c.name}" cannot be empty.`);
           return;
         }
-        if (Number(item.max_score) <= 0) {
+        if (!Number.isFinite(Number(item.max_score)) || Number(item.max_score) <= 0) {
           showError(`Max score for "${item.label}" must be greater than 0.`);
           return;
         }
@@ -117,7 +117,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
       showError('Please confirm the component changes for the audit trail.');
       return;
     }
-    onSave(compList, 'Component structures and weights updated by teacher');
+    onSave(compList, 'Assessment activities and component weights updated');
   };
 
   return (
@@ -131,7 +131,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
             </p>
           </div>
           <button type="button" className="btn-icon" onClick={onClose} aria-label="Close">
-            <X size={20} />
+            <X size={20} /><span className="control-label">Close</span>
           </button>
         </div>
 
@@ -168,7 +168,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
                     className="comp-accordion-btn"
                     onClick={() => toggleExpand(cIdx)}
                   >
-                    {expanded[cIdx] ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                    {expanded[cIdx] ? <><ChevronDown size={18} /><span className="disclosure-action">Collapse</span></> : <><ChevronRight size={18} /><span className="disclosure-action">Expand</span></>}
                     <span className="comp-title-badge">{comp.name || 'Untitled Component'}</span>
                     <span className="badge badge-subtle">{comp.weight}%</span>
                     <span className="badge-count">
@@ -182,7 +182,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
                       onClick={() => removeComponent(cIdx)}
                       title="Delete this component"
                     >
-                      <Trash2 size={16} />
+                      <Trash2 size={16} /><span className="control-label">Delete</span>
                     </button>
                   )}
                 </div>
@@ -212,6 +212,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
                           <option value="Written Work">Written Work</option>
                           <option value="Performance Task">Performance Task</option>
                           <option value="Quarterly Assessment">Quarterly Assessment</option>
+                          <option value="Term Examinations">Term Examinations (ST1, ST2, TE)</option>
                         </select>
                       </label>
                       <label>
@@ -295,7 +296,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
                                       onClick={() => removeItem(cIdx, iIdx)}
                                       title="Remove activity"
                                     >
-                                      <Trash2 size={14} />
+                                      <Trash2 size={14} /><span className="control-label">Remove</span>
                                     </button>
                                   </td>
                                 )}

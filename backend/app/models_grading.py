@@ -207,11 +207,32 @@ class GradeAdjustmentRequest(Base):
     reviewed_by_name: Mapped[str | None] = mapped_column(String(180), nullable=True)
     review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    requester_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     # Relationships
     gradebook = relationship("Gradebook", foreign_keys=[gradebook_id])
     person = relationship("Person", foreign_keys=[person_id])
     assessment_item = relationship("AssessmentItem", foreign_keys=[assessment_item_id])
+
+
+class GradeCriteriaAdjustmentRequest(Base):
+    """A teacher request to change finalized gradebook component weights."""
+    __tablename__ = "grade_criteria_adjustment_requests"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gradebook_id: Mapped[int] = mapped_column(ForeignKey("gradebooks.id"), index=True)
+    old_criteria_json: Mapped[str] = mapped_column(Text)
+    new_criteria_json: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    requested_by: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    requested_by_name: Mapped[str] = mapped_column(String(180))
+    status: Mapped[str] = mapped_column(String(30), default="Pending", index=True)
+    reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_by_name: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    requester_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    gradebook = relationship("Gradebook", foreign_keys=[gradebook_id])
 
 
 class GradebookAuditEntry(Base):

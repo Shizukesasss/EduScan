@@ -44,6 +44,7 @@ class Person(Base):
     role: Mapped[str] = mapped_column(String(40), index=True)
     grade: Mapped[str | None] = mapped_column(String(20), nullable=True)
     section: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    assignment: Mapped[str | None] = mapped_column(String(180), nullable=True)
     guardian_phone: Mapped[str | None] = mapped_column(
         String(30), nullable=True)
     enrollment_status: Mapped[str] = mapped_column(
@@ -98,6 +99,7 @@ class SchoolYear(Base):
     starts_on: Mapped[date] = mapped_column(Date)
     ends_on: Mapped[date] = mapped_column(Date)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class GradingPeriod(Base):
@@ -112,6 +114,7 @@ class GradingPeriod(Base):
     starts_on: Mapped[date] = mapped_column(Date)
     ends_on: Mapped[date] = mapped_column(Date)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     school_year: Mapped[SchoolYear] = relationship()
 
 
@@ -119,8 +122,8 @@ class GradeLevel(Base):
     __tablename__ = "grade_levels"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(30), unique=True, index=True)
-    sequence: Mapped[int] = mapped_column(Integer, default=0)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class SchoolSection(Base):
@@ -135,7 +138,9 @@ class SchoolSection(Base):
         ForeignKey("users.id"), nullable=True, index=True)
     adviser_name: Mapped[str | None] = mapped_column(
         String(180), nullable=True)
+    track: Mapped[str | None] = mapped_column(String(40), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     grade_level: Mapped[GradeLevel] = relationship()
 
 
@@ -145,7 +150,29 @@ class Subject(Base):
     code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     category: Mapped[str] = mapped_column(String(20), default="JHS")
+    is_elective: Mapped[bool] = mapped_column(Boolean, default=False)
+    elective_track: Mapped[str | None] = mapped_column(String(40), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SubjectTeachingAssignment(Base):
+    """The teacher responsible for one subject in one section and school year."""
+    __tablename__ = "subject_teaching_assignments"
+    __table_args__ = (UniqueConstraint(
+        "school_year_id", "subject_id", "section_id",
+        name="uq_subject_teaching_context"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    school_year_id: Mapped[int] = mapped_column(ForeignKey("school_years.id"), index=True)
+    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"), index=True)
+    section_id: Mapped[int] = mapped_column(ForeignKey("school_sections.id"), index=True)
+    teacher_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    school_year: Mapped[SchoolYear] = relationship()
+    subject: Mapped[Subject] = relationship()
+    section: Mapped[SchoolSection] = relationship()
+    teacher: Mapped[User] = relationship()
 
 
 class CalendarException(Base):

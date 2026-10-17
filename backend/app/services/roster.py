@@ -109,7 +109,8 @@ def parse_roster(data: bytes) -> tuple[list[dict], list[dict]]:
         record["lrn"] = record.get("lrn") or None
         record["grade"] = record.get("grade") or None
         record["section"] = record.get("section") or None
-        record["assignment"] = record.get("assignment") or None
+        if "assignment" in record:
+            record["assignment"] = record["assignment"] or None
         record["guardian_phone"] = record.get("guardian_phone") or None
         record["transfer_school"] = record.get("transfer_school") or None
         accepted.append(record)

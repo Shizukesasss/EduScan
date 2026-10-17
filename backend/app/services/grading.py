@@ -7,24 +7,29 @@ and writes results back.
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from ..models import (
-    GradeLevel, GradingPeriod, Person, SchoolSection, SchoolYear, Subject, User,
+    GradeLevel, GradingPeriod, Person, SchoolSection, SchoolYear, Subject,
+    SubjectTeachingAssignment, User,
 )
 from ..models_grading import (
     AssessmentItem, Gradebook, GradebookAuditEntry, GradebookComponent,
-    GradeAdjustmentRequest, GradingPolicy, StudentScore,
+    GradeAdjustmentRequest, GradeCriteriaAdjustmentRequest, GradingPolicy, StudentScore, SCORE_STATUSES,
 )
 from .grading_engine import (
     DEFAULT_TRANSMUTATION_TABLE, apply_transmutation, build_default_transmutation_table,
     calculate_student_grade, generate_calculation_breakdown, round_value,
     validate_gradebook as engine_validate,
+    normalize_component_weights,
 )
+from .academic_context import elective_track_for_subject, grade_name_aliases, normalize_grade_name, subject_policy_category, is_senior_high
 from .settings_store import get_json
 
 # --- Legacy compatibility imports (kept for old endpoints) ---
@@ -36,6 +41,15 @@ def transmute_grade(initial_grade: float) -> int:
     Kept for backward compatibility with old class_key endpoints.
     """
     return apply_transmutation(initial_grade) or 60
+
+
+def _gradebook_for_update(db: Session, gradebook_id: int) -> Gradebook | None:
+    return db.scalar(
+        select(Gradebook)
+        .where(Gradebook.id == gradebook_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -61,16 +75,16 @@ def get_active_policy_for(
         .order_by(GradingPolicy.created_at.desc())
     ).all()
 
+    general = None
     for policy in policies:
-        grade_levels = [g.strip() for g in policy.grade_levels.split(",") if g.strip()]
-        if grade_levels and grade_level_name not in grade_levels:
+        grade_levels = [normalize_grade_name(g) for g in policy.grade_levels.split(",") if g.strip()]
+        if grade_levels and normalize_grade_name(grade_level_name) not in grade_levels:
             continue
-        if policy.subject_category != "General" and policy.subject_category != subject_category:
-            continue
-        return policy
-
-    # Fallback: any active policy for this school year
-    return policies[0] if policies else None
+        if policy.subject_category.lower() == subject_category.lower():
+            return policy
+        if policy.subject_category.lower() == "general" and general is None:
+            general = policy
+    return general
 
 
 def policy_transmutation_table(policy: GradingPolicy | None) -> list[dict] | None:
@@ -90,7 +104,7 @@ def policy_component_definitions(policy: GradingPolicy | None) -> list[dict]:
         return []
     try:
         defs = json.loads(policy.component_definitions_json)
-        return defs if isinstance(defs, list) else []
+        return normalize_component_weights(defs) if isinstance(defs, list) else []
     except (json.JSONDecodeError, TypeError):
         return []
 
@@ -109,6 +123,106 @@ def get_gradebook_by_class_key(db: Session, class_key: str) -> Gradebook | None:
     )
 
 
+def gradebook_roster_query(book: Gradebook):
+    return select(Person).where(
+        Person.role == "Student", Person.active.is_(True),
+        func.lower(func.trim(Person.grade)).in_(grade_name_aliases(book.grade_name)),
+        func.lower(func.trim(Person.section)) == book.section_name.strip().lower(),
+    ).order_by(Person.full_name, Person.external_id)
+
+
+def teacher_grading_section_ids(db: Session, user: User) -> set[int]:
+    """Sections where the teacher is adviser or has a subject assignment."""
+    adviser_ids = set(db.scalars(select(SchoolSection.id).where(
+        SchoolSection.adviser_user_id == user.id,
+        SchoolSection.active.is_(True),
+        SchoolSection.deleted_at.is_(None),
+    )).all())
+    legacy_name_ids = set(db.scalars(select(SchoolSection.id).where(
+        SchoolSection.adviser_user_id.is_(None),
+        func.lower(func.trim(SchoolSection.adviser_name)) == user.full_name.strip().casefold(),
+        SchoolSection.active.is_(True),
+        SchoolSection.deleted_at.is_(None),
+    )).all())
+    teaching_ids = set(db.scalars(select(SubjectTeachingAssignment.section_id).join(
+        SchoolSection, SchoolSection.id == SubjectTeachingAssignment.section_id,
+    ).where(
+        SubjectTeachingAssignment.teacher_user_id == user.id,
+        SubjectTeachingAssignment.active.is_(True),
+        SchoolSection.active.is_(True),
+        SchoolSection.deleted_at.is_(None),
+    )).all())
+    return adviser_ids | legacy_name_ids | teaching_ids
+
+
+def teacher_can_access_gradebook_context(
+    db: Session, user: User, school_year_id: int, section_id: int, subject_id: int,
+) -> bool:
+    """Check the exact subject/section/year; section membership alone is insufficient."""
+    teacher_subject_ids = set(db.scalars(select(SubjectTeachingAssignment.subject_id).join(
+        SchoolSection, SchoolSection.id == SubjectTeachingAssignment.section_id,
+    ).join(GradeLevel, GradeLevel.id == SchoolSection.grade_level_id).join(
+        Subject, Subject.id == SubjectTeachingAssignment.subject_id,
+    ).where(
+        SubjectTeachingAssignment.school_year_id == school_year_id,
+        SubjectTeachingAssignment.teacher_user_id == user.id,
+        SubjectTeachingAssignment.active.is_(True),
+        SchoolSection.active.is_(True), SchoolSection.deleted_at.is_(None),
+        GradeLevel.active.is_(True), GradeLevel.deleted_at.is_(None),
+        Subject.active.is_(True), Subject.deleted_at.is_(None),
+    )).all())
+    if len(teacher_subject_ids) > 1:
+        return False
+
+    assignment = db.scalar(select(SubjectTeachingAssignment).where(
+        SubjectTeachingAssignment.school_year_id == school_year_id,
+        SubjectTeachingAssignment.section_id == section_id,
+        SubjectTeachingAssignment.subject_id == subject_id,
+        SubjectTeachingAssignment.active.is_(True),
+    ))
+    if assignment:
+        return assignment.teacher_user_id == user.id
+    # Subject assignments are the source of truth for teacher gradebooks.
+    # An adviser must not gain access to every subject when no assignment exists.
+    return False
+
+
+def _validate_subject_teacher(db: Session, school_year_id: int, subject_id: int,
+                              teacher_id: int | None, exclude_gradebook_id: int | None = None) -> None:
+    if teacher_id is None:
+        return
+    query = select(Gradebook).where(
+        Gradebook.school_year_id == school_year_id,
+        Gradebook.subject_id == subject_id,
+        Gradebook.teacher_user_id.is_not(None),
+        Gradebook.teacher_user_id != teacher_id,
+    )
+    if exclude_gradebook_id is not None:
+        query = query.where(Gradebook.id != exclude_gradebook_id)
+    existing = db.scalars(query).first()
+    if existing:
+        assigned = db.get(User, existing.teacher_user_id)
+        teacher_name = assigned.full_name if assigned else existing.teacher_name or "another teacher"
+        subject = db.get(Subject, subject_id)
+        raise ValueError(
+            f"{subject.name if subject else 'This subject'} is already assigned to {teacher_name} "
+            "for this school year. Assign the same teacher to each section."
+        )
+
+
+def validate_score_value(item: AssessmentItem, score: float | None, status: str) -> float | None:
+    if status not in SCORE_STATUSES:
+        raise ValueError('Invalid assessment score status')
+    if status != 'Scored':
+        return None
+    if score is None:
+        raise ValueError(f"Score required for item '{item.label}' with status 'Scored'")
+    value = float(score)
+    if not math.isfinite(value) or not 0 <= value <= item.max_score:
+        raise ValueError(f'Score {value} out of bounds (0 - {item.max_score}) for {item.label}')
+    return value
+
+
 def get_gradebook_full(db: Session, gradebook_id: int) -> dict | None:
     """Load a gradebook with all components, items, scores, and calculations."""
     book = db.scalar(
@@ -122,12 +236,7 @@ def get_gradebook_full(db: Session, gradebook_id: int) -> dict | None:
         return None
 
     # Load students for this grade/section
-    students = db.scalars(
-        select(Person).where(
-            Person.role == "Student", Person.active.is_(True),
-            Person.grade == book.grade_name, Person.section == book.section_name,
-        ).order_by(Person.full_name, Person.external_id)
-    ).all()
+    students = db.scalars(gradebook_roster_query(book)).all()
 
     # Collect all assessment item IDs
     all_item_ids = []
@@ -157,10 +266,29 @@ def get_gradebook_full(db: Session, gradebook_id: int) -> dict | None:
             "items": comp_items,
         })
 
+    components_data = normalize_component_weights(components_data)
+
     # Load all scores for these items
     scores = db.scalars(
         select(StudentScore).where(StudentScore.assessment_item_id.in_(all_item_ids))
     ).all() if all_item_ids else []
+
+    # Assessment Setup defines capacity; only activities used by this class
+    # contribute to grades or become required for every learner.
+    roster_ids = {student.id for student in students}
+    active_item_ids = {
+        score.assessment_item_id for score in scores
+        if score.person_id in roster_ids and (score.score is not None or score.status != "Missing")
+    }
+    active_item_ids.update(item['id'] for component in components_data
+                           if component['component_type'] == 'Term Examinations' for item in component['items'])
+    items_by_component = {
+        component_id: [item for item in items if item["id"] in active_item_ids]
+        for component_id, items in items_by_component.items()
+    }
+    for component in components_data:
+        for item in component["items"]:
+            item["active"] = item["id"] in active_item_ids
 
     # Group scores by person
     scores_by_person: dict[int, list[dict]] = defaultdict(list)
@@ -180,33 +308,15 @@ def get_gradebook_full(db: Session, gradebook_id: int) -> dict | None:
     rounding_final_dp = policy.rounding_final_decimal_places if policy else 0
     rounding_method = policy.rounding_method if policy else "half_up"
 
-    # Determine active items: an item is active if at least one student has a non-empty score or explicit status.
-    active_item_ids = set()
-    for s_id, s_scores in scores_by_person.items():
-        for s in s_scores:
-            if s["score"] is not None or s["status"] != "Missing":
-                active_item_ids.add(s["item_id"])
-
     # Calculate grades for each student
     student_rows = []
     completed_grades = []
     for student in students:
         student_score_list = scores_by_person.get(student.id, [])
-        
-        filtered_items = {}
-        for comp_id, items in items_by_component.items():
-            filtered_items[comp_id] = [it for it in items if it["id"] in active_item_ids]
-            
-        filtered_components = []
-        for c in components_data:
-            c_copy = c.copy()
-            c_copy["items"] = [it for it in c_copy.get("items", []) if it["id"] in active_item_ids]
-            filtered_components.append(c_copy)
-
         calc = calculate_student_grade(
             student_scores=student_score_list,
-            components=filtered_components,
-            items_by_component=filtered_items,
+            components=components_data,
+            items_by_component=items_by_component,
             transmutation_table=trans_table,
             passing_grade=book.passing_grade,
             rounding_decimal_places=rounding_dp,
@@ -239,6 +349,7 @@ def get_gradebook_full(db: Session, gradebook_id: int) -> dict | None:
             "status": calc["status"],
             "complete": calc["complete"],
             "component_grades": calc["component_grades"],
+            "component_details": calc["component_details"],
         })
 
         if calc["reported_grade"] is not None:
@@ -266,11 +377,13 @@ def get_gradebook_full(db: Session, gradebook_id: int) -> dict | None:
         "gradebook": {
             "id": book.id,
             "school_year_name": book.school_year_name,
+            "school_head": get_json(db, "school.heads", {}).get(str(book.school_year_id), {}).get("full_name", ""),
             "quarter": book.quarter,
-            "grade_name": book.grade_name,
+            "grade_name": normalize_grade_name(book.grade_name),
             "section_name": book.section_name,
             "subject_name": book.subject_name,
             "teacher_name": book.teacher_name,
+            "grading_period_name": book.grading_period.name if book.grading_period else None,
             "class_key": book.class_key,
             "status": book.status,
             "passing_grade": book.passing_grade,
@@ -290,6 +403,12 @@ def get_gradebook_full(db: Session, gradebook_id: int) -> dict | None:
             "updated_at": book.updated_at,
         },
         "components": components_data,
+        "policy": {
+            "transmutation_table": trans_table,
+            "rounding_decimal_places": rounding_dp,
+            "rounding_final_decimal_places": rounding_final_dp,
+            "rounding_method": rounding_method,
+        },
         "students": student_rows,
         "statistics": statistics,
     }
@@ -312,7 +431,7 @@ def get_student_breakdown(
         return None
 
     policy_name = full["gradebook"].get("policy_name", "")
-    return generate_calculation_breakdown(
+    breakdown = generate_calculation_breakdown(
         student_name=student["full_name"],
         calculation_result={
             "initial_grade": student["initial_grade"],
@@ -324,6 +443,11 @@ def get_student_breakdown(
         policy_name=policy_name or "Default DepEd K-12",
         passing_grade=full["gradebook"]["passing_grade"],
     )
+    for line, detail in zip(breakdown['components'], student['component_details']):
+        line['name'] = line['component']
+        line['total_score'] = detail['total_earned'] if detail['complete'] else None
+        line['total_max'] = detail['total_possible'] if detail['complete'] else None
+    return breakdown
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +509,18 @@ def create_or_get_gradebook(
 
     if not all([sy, gp, gl, sec, subj]):
         raise ValueError("Invalid academic structure references")
+    if any(item.deleted_at is not None for item in (sy, gp, gl, sec, subj)):
+        raise ValueError("Restore the deleted academic setup item before using it for a class record")
+    if gp.school_year_id != sy.id:
+        raise ValueError("The grading period does not belong to the selected school year")
+    if sec.grade_level_id != gl.id:
+        raise ValueError("The section does not belong to the selected grade level")
+    if is_senior_high(gl.name) != (subj.category or "JHS").strip().upper().startswith("SHS"):
+        raise ValueError("The subject does not belong to the selected junior/senior high level")
+    required_track = elective_track_for_subject(subj.category, subj.is_elective, subj.elective_track)
+    if required_track and (sec.track or "").strip().casefold() != required_track.casefold():
+        scope = "track" if (subj.category or "JHS").strip().upper().startswith("SHS") else "program"
+        raise ValueError(f"This elective is available only to the {required_track} {scope}")
 
     class_key = f"{sy.name}-q{gp.quarter}-{gl.name}-{sec.name}-{subj.name}".lower().replace(" ", "-")
 
@@ -400,6 +536,24 @@ def create_or_get_gradebook(
         )
     ).first()
 
+    assignment = db.scalar(select(SubjectTeachingAssignment).where(
+        SubjectTeachingAssignment.school_year_id == school_year_id,
+        SubjectTeachingAssignment.subject_id == subject_id,
+        SubjectTeachingAssignment.section_id == section_id,
+        SubjectTeachingAssignment.active.is_(True),
+    ))
+    if user.role == "teacher" and not teacher_can_access_gradebook_context(
+        db, user, school_year_id, section_id, subject_id,
+    ):
+        raise ValueError("This subject and section are not assigned to your teacher account")
+    assigned_teacher = (db.get(User, assignment.teacher_user_id) if assignment else
+                        db.get(User, sec.adviser_user_id) if sec.adviser_user_id else
+                        (user if user.role == "teacher" else None))
+    teacher_id = assigned_teacher.id if assigned_teacher else (book.teacher_user_id if book else None)
+    if not assignment:
+        _validate_subject_teacher(db, school_year_id, subject_id, teacher_id,
+                                  exclude_gradebook_id=book.id if book else None)
+
     if book:
         # Update references if they changed (e.g. subject recreated)
         book.school_year_id = school_year_id
@@ -407,24 +561,19 @@ def create_or_get_gradebook(
         book.grade_level_id = grade_level_id
         book.section_id = section_id
         book.subject_id = subject_id
+        book.school_year_name = sy.name
+        book.quarter = gp.quarter
+        book.grade_name = gl.name
+        book.section_name = sec.name
+        book.subject_name = subj.name
 
         # Sync teacher_name / teacher_user_id from the section's assigned adviser.
         # This prevents a stale "System Administrator" name from appearing when an
         # admin first opened the page and created the record, but the class is actually
         # managed by the teacher linked as section adviser.
-        sec_for_sync = db.get(SchoolSection, section_id)
-        if sec_for_sync:
-            if sec_for_sync.adviser_user_id:
-                # Section has an explicit adviser account linked — always use that.
-                adviser = db.get(User, sec_for_sync.adviser_user_id)
-                if adviser:
-                    book.teacher_user_id = adviser.id
-                    book.teacher_name = adviser.full_name
-            elif user.role == "teacher":
-                # No explicit adviser link; use the currently logged-in teacher.
-                book.teacher_user_id = user.id
-                book.teacher_name = user.full_name
-            # If admin opened it and no adviser is assigned, leave as-is to avoid noise.
+        if assigned_teacher:
+            book.teacher_user_id = assigned_teacher.id
+            book.teacher_name = assigned_teacher.full_name
         db.commit()
         return book
 
@@ -432,7 +581,10 @@ def create_or_get_gradebook(
     if grading_policy_id:
         policy = db.get(GradingPolicy, grading_policy_id)
     if not policy:
-        policy = get_active_policy_for(db, sy.name, gl.name)
+        if not is_senior_high(gl.name):
+            from .template_policies import ensure_template_policies
+            ensure_template_policies(db, sy.name, user)
+        policy = get_active_policy_for(db, sy.name, gl.name, subject_policy_category(subj.name, subj.category))
 
     class_key = f"{sy.name}-q{gp.quarter}-{gl.name}-{sec.name}-{subj.name}".lower().replace(" ", "-")
 
@@ -443,19 +595,32 @@ def create_or_get_gradebook(
         section_id=section_id,
         subject_id=subject_id,
         grading_policy_id=policy.id if policy else None,
-        teacher_user_id=user.id if user.role == "teacher" else None,
+        teacher_user_id=assigned_teacher.id if assigned_teacher else None,
         school_year_name=sy.name,
         quarter=gp.quarter,
         grade_name=gl.name,
         section_name=sec.name,
         subject_name=subj.name,
-        teacher_name=user.full_name,
+        teacher_name=assigned_teacher.full_name if assigned_teacher else "",
         class_key=class_key,
         status="Draft",
         passing_grade=policy.passing_grade if policy else 75,
     )
     db.add(book)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(select(Gradebook).where(
+            Gradebook.school_year_id == school_year_id,
+            Gradebook.grading_period_id == grading_period_id,
+            Gradebook.grade_level_id == grade_level_id,
+            Gradebook.section_id == section_id,
+            Gradebook.subject_id == subject_id,
+        ))
+        if existing:
+            return existing
+        raise
 
     comp_defs = policy_component_definitions(policy)
     if comp_defs:
@@ -463,18 +628,20 @@ def create_or_get_gradebook(
             comp = GradebookComponent(
                 gradebook_id=book.id,
                 name=cdef.get("name", f"Component {seq + 1}"),
-                component_type=cdef.get("component_type", "Written Work"),
+                component_type=cdef.get("component_type", "Quarterly Assessment" if "Quarterly" in cdef.get("name", "") else "Performance Task" if "Performance" in cdef.get("name", "") else "Written Work"),
                 weight=float(cdef.get("weight", 0.0)),
                 sequence=seq,
                 description=cdef.get("description", ""),
             )
             db.add(comp)
             db.flush()
-            item_count = 1 if "Quarterly Assessment" in comp.name else 5
+            item_count = max(1, min(100, int(cdef.get("max_items", 1 if "Quarterly Assessment" in comp.name else 5))))
+            if comp.component_type == 'Term Examinations':
+                item_count = 3
             for i in range(item_count):
                 item = AssessmentItem(
                     component_id=comp.id,
-                    label=f"{comp.name} {i + 1}" if item_count > 1 else comp.name,
+                    label=('ST1', 'ST2', 'TE')[i] if comp.component_type == 'Term Examinations' else f"{comp.name} {i + 1}" if item_count > 1 else comp.name,
                     max_score=20.0 if "Written" in comp.name else 50.0,
                     sequence=i,
                 )
@@ -520,7 +687,7 @@ def update_gradebook_components(
     components_payload: list[dict],
     reason: str,
 ) -> Gradebook:
-    book = db.get(Gradebook, gradebook_id)
+    book = _gradebook_for_update(db, gradebook_id)
     if not book:
         raise ValueError("Gradebook not found")
     if book.status in {"Finalized", "Locked"}:
@@ -531,6 +698,44 @@ def update_gradebook_components(
         raise ValueError(f"Component weights must total exactly 100% (currently {total_weight:.2f}%)")
 
     existing_comps = {c.id: c for c in book.components}
+    seen_components = set()
+    seen_items = set()
+    retained_items = set()
+    all_items = {item.id: item for component in book.components for item in component.items}
+    # Validate the whole request before deleting or altering any saved activity.
+    for component in components_payload:
+        comp_id = component.get('id')
+        if comp_id and (comp_id not in existing_comps or comp_id in seen_components):
+            raise ValueError('Assessment components must belong to this class record and cannot be repeated')
+        if comp_id:
+            seen_components.add(comp_id)
+        weight = float(component.get('weight', 0))
+        if not math.isfinite(weight) or not 0 <= weight <= 100 or not component.get('name', '').strip():
+            raise ValueError('Components require a name and a weight between 0 and 100')
+        if not component.get('items'):
+            raise ValueError('Each component must contain at least one assessment item')
+        if component.get('component_type') == 'Term Examinations' and (
+            len(component['items']) != 3 or {item.get('label') for item in component['items']} != {'ST1', 'ST2', 'TE'}
+        ):
+            raise ValueError('Term Examinations requires exactly ST1, ST2, and TE; their scores may be saved as drafts.')
+        for item in component['items']:
+            item_id = item.get('id')
+            max_score = float(item['max_score'])
+            if not item.get('label', '').strip() or not math.isfinite(max_score) or max_score <= 0:
+                raise ValueError('Assessments require a label and a positive maximum score')
+            if item_id:
+                if item_id not in all_items or all_items[item_id].component_id != comp_id or item_id in seen_items:
+                    raise ValueError('Assessment items must belong to their component and cannot be repeated')
+                seen_items.add(item_id)
+                retained_items.add(item_id)
+                highest = db.scalar(select(func.max(StudentScore.score)).where(
+                    StudentScore.assessment_item_id == item_id, StudentScore.status == 'Scored'))
+                if highest is not None and highest > max_score:
+                    raise ValueError(f"Cannot lower the maximum for '{item['label']}' below a saved score ({highest})")
+    removed_ids = set(all_items) - retained_items
+    if removed_ids and db.scalar(select(StudentScore.id).where(
+        StudentScore.assessment_item_id.in_(removed_ids), StudentScore.status != 'Missing').limit(1)):
+        raise ValueError('Cannot remove an assessment with recorded scores or statuses. Clear its entries before removing it.')
     kept_comp_ids = {c.get("id") for c in components_payload if c.get("id")}
 
     # Delete removed components first
@@ -616,7 +821,7 @@ def save_gradebook_scores(
     scores_dict: dict[str, list[dict]],
     reason: str,
 ) -> dict:
-    book = db.get(Gradebook, gradebook_id)
+    book = _gradebook_for_update(db, gradebook_id)
     if not book:
         raise ValueError("Gradebook not found")
     if book.status in {"Finalized", "Locked"}:
@@ -635,29 +840,39 @@ def save_gradebook_scores(
         )
     ).all() if item_map else []
     existing_map = {(s.person_id, s.assessment_item_id): s for s in existing_scores}
+    roster_ids = {person.id for person in db.scalars(gradebook_roster_query(book)).all()}
+    seen_scores = set()
+    for person_id_str, entries in scores_dict.items():
+        person_id = int(person_id_str)
+        if person_id not in roster_ids:
+            raise ValueError("Scores can only be saved for active students in this gradebook's class")
+        for entry in entries:
+            item_id = entry.get('assessment_item_id')
+            if item_id not in item_map:
+                raise ValueError('The assessment item does not belong to this gradebook')
+            if (person_id, item_id) in seen_scores:
+                raise ValueError('A learner cannot have duplicate entries for the same assessment')
+            seen_scores.add((person_id, item_id))
+            validate_score_value(item_map[item_id], entry.get('score'), entry.get('status', 'Scored'))
 
     updated_count = 0
     for person_id_str, entry_list in scores_dict.items():
         person_id = int(person_id_str)
+        if person_id not in roster_ids:
+            raise ValueError("Scores can only be saved for active students in this gradebook's class")
         person = db.get(Person, person_id)
         person_name = person.full_name if person else None
 
         for entry in entry_list:
             item_id = entry.get("assessment_item_id")
             if item_id not in item_map:
-                continue
+                raise ValueError("The assessment item does not belong to this gradebook")
             item = item_map[item_id]
             raw_score = entry.get("score")
             status = entry.get("status", "Scored")
             entry_reason = entry.get("reason")
 
-            numeric_score = None
-            if status == "Scored":
-                if raw_score is None:
-                    raise ValueError(f"Score required for item '{item.label}' with status 'Scored'")
-                numeric_score = float(raw_score)
-                if numeric_score < 0 or numeric_score > item.max_score:
-                    raise ValueError(f"Score {numeric_score} out of bounds (0 - {item.max_score}) for {item.label}")
+            numeric_score = validate_score_value(item, raw_score, status)
 
             key = (person_id, item_id)
             if key in existing_map:
@@ -710,7 +925,7 @@ def save_gradebook_scores(
 
 
 def submit_gradebook(db: Session, gradebook_id: int, user: User, reason: str) -> Gradebook:
-    book = db.get(Gradebook, gradebook_id)
+    book = _gradebook_for_update(db, gradebook_id)
     if not book:
         raise ValueError("Gradebook not found")
     if book.status != "Draft":
@@ -725,13 +940,17 @@ def submit_gradebook(db: Session, gradebook_id: int, user: User, reason: str) ->
 
 
 def finalize_gradebook(db: Session, gradebook_id: int, user: User, reason: str) -> Gradebook:
-    book = db.get(Gradebook, gradebook_id)
+    book = _gradebook_for_update(db, gradebook_id)
     if not book:
         raise ValueError("Gradebook not found")
     if book.status in {"Finalized", "Locked"}:
         return book
 
     full = get_gradebook_full(db, gradebook_id)
+    if not full or not full["students"]:
+        raise ValueError("Cannot finalize a class record without active students")
+    if not full["components"] or abs(sum(component["weight"] for component in full["components"]) - 100.0) > 0.01:
+        raise ValueError("Component weights must total 100% before finalizing")
     if full and full["statistics"]["incomplete"] > 0:
         inc = full["statistics"]["incomplete"]
         raise ValueError(f"{inc} learner(s) still have missing or incomplete scores")
@@ -747,7 +966,7 @@ def finalize_gradebook(db: Session, gradebook_id: int, user: User, reason: str) 
 
 
 def lock_gradebook(db: Session, gradebook_id: int, user: User, reason: str) -> Gradebook:
-    book = db.get(Gradebook, gradebook_id)
+    book = _gradebook_for_update(db, gradebook_id)
     if not book:
         raise ValueError("Gradebook not found")
     if book.status != "Finalized":
@@ -762,7 +981,7 @@ def lock_gradebook(db: Session, gradebook_id: int, user: User, reason: str) -> G
 
 
 def reopen_gradebook(db: Session, gradebook_id: int, user: User, reason: str) -> Gradebook:
-    book = db.get(Gradebook, gradebook_id)
+    book = _gradebook_for_update(db, gradebook_id)
     if not book:
         raise ValueError("Gradebook not found")
     if book.status not in {"Finalized", "Submitted", "Locked"}:
@@ -790,12 +1009,23 @@ def create_adjustment_request(
     new_status: str,
     reason: str,
 ) -> GradeAdjustmentRequest:
-    book = db.get(Gradebook, gradebook_id)
+    book = _gradebook_for_update(db, gradebook_id)
     if not book:
         raise ValueError("Gradebook not found")
+    if user.role != 'teacher':
+        raise ValueError('Only teachers can request grade adjustments')
+    if book.status not in {'Finalized', 'Locked'}:
+        raise ValueError('Grade adjustments are available for finalized or locked class records')
     item = db.get(AssessmentItem, assessment_item_id)
-    if not item:
-        raise ValueError("Assessment item not found")
+    if not item or item.component.gradebook_id != gradebook_id:
+        raise ValueError('The assessment item does not belong to this gradebook')
+    if person_id not in {person.id for person in db.scalars(gradebook_roster_query(book)).all()}:
+        raise ValueError('The learner does not belong to this class record')
+    if len(reason.strip()) < 8:
+        raise ValueError('Provide a specific reason of at least 8 characters for the adjustment')
+    new_score = validate_score_value(item, new_score, new_status)
+    if new_status != 'Scored' or new_score is None:
+        raise ValueError('A finalized class-record adjustment must include a numeric scored grade')
 
     score_rec = db.scalar(
         select(StudentScore).where(
@@ -835,6 +1065,110 @@ def create_adjustment_request(
     return req
 
 
+def create_criteria_adjustment_request(
+    db: Session,
+    gradebook_id: int,
+    user: User,
+    components: list[dict],
+    reason: str,
+) -> GradeCriteriaAdjustmentRequest:
+    book = _gradebook_for_update(db, gradebook_id)
+    if not book:
+        raise ValueError("Gradebook not found")
+    if user.role != "teacher":
+        raise ValueError("Only teachers can request criteria adjustments")
+    if book.status not in {"Finalized", "Locked"}:
+        raise ValueError("Criteria adjustment requests are available for finalized or locked class records")
+    if len(reason.strip()) < 8:
+        raise ValueError("Provide a specific reason of at least 8 characters for the criteria adjustment")
+
+    current = {component.id: component for component in book.components}
+    if not current or len(components) != len(current):
+        raise ValueError("A criteria request must include every existing assessment component")
+    requested = {}
+    for entry in components:
+        component_id = entry.get("component_id")
+        weight = float(entry.get("weight", -1))
+        if component_id not in current or component_id in requested or not math.isfinite(weight) or not 0 <= weight <= 100:
+            raise ValueError("Criteria requests must contain valid weights for the existing components only")
+        requested[component_id] = weight
+    if set(requested) != set(current) or abs(sum(requested.values()) - 100.0) > 0.01:
+        raise ValueError("Requested assessment weights must include all components and total exactly 100%")
+    old = [{"component_id": item.id, "name": item.name, "weight": item.weight} for item in book.components]
+    new = [{"component_id": item.id, "name": item.name, "weight": requested[item.id]} for item in book.components]
+    if all(math.isclose(current[component_id].weight, requested[component_id], abs_tol=0.001) for component_id in current):
+        raise ValueError("The requested criteria are unchanged")
+
+    req = GradeCriteriaAdjustmentRequest(
+        gradebook_id=book.id,
+        old_criteria_json=json.dumps(old),
+        new_criteria_json=json.dumps(new),
+        reason=reason.strip(),
+        requested_by=user.id,
+        requested_by_name=user.full_name,
+    )
+    db.add(req)
+    add_gradebook_audit(db, book.id, "CriteriaAdjustmentRequested", user,
+                        reason=reason.strip(), component_name="Assessment weights",
+                        old_value=json.dumps(old), new_value=json.dumps(new))
+    db.commit()
+    return req
+
+
+def review_criteria_adjustment_request(
+    db: Session,
+    request_id: int,
+    user: User,
+    status: str,
+    note: str,
+) -> GradeCriteriaAdjustmentRequest:
+    req = db.scalar(select(GradeCriteriaAdjustmentRequest).where(
+        GradeCriteriaAdjustmentRequest.id == request_id).with_for_update())
+    if not req:
+        raise ValueError("Criteria adjustment request not found")
+    book = _gradebook_for_update(db, req.gradebook_id)
+    if not book:
+        raise ValueError("Gradebook not found")
+    if req.status != "Pending":
+        raise ValueError(f"Request is already {req.status}")
+    requester = db.get(User, req.requested_by)
+    if not requester or requester.role != "teacher":
+        raise ValueError("Only teacher criteria requests can be reviewed")
+    if status not in {"Approved", "Rejected"} or len(note.strip()) < 5:
+        raise ValueError("Select Approve or Reject and enter a review note of at least 5 characters")
+
+    old = json.loads(req.old_criteria_json)
+    new = json.loads(req.new_criteria_json)
+    if status == "Approved":
+        if book.status not in {"Finalized", "Locked"}:
+            raise ValueError("Only a finalized or locked class record can receive an approved criteria adjustment")
+        current = {component.id: component for component in book.components}
+        if set(current) != {entry["component_id"] for entry in old} or set(current) != {entry["component_id"] for entry in new}:
+            raise ValueError("The assessment structure changed after this request. Reject it and submit a new request.")
+        if any(not math.isclose(current[entry["component_id"]].weight, entry["weight"], abs_tol=0.001) for entry in old):
+            raise ValueError("Assessment weights changed after this request. Reject it and submit a new request.")
+        new_weights = [float(entry["weight"]) for entry in new]
+        if any(not math.isfinite(weight) or not 0 <= weight <= 100 for weight in new_weights) or abs(sum(new_weights) - 100.0) > 0.01:
+            raise ValueError("Requested assessment weights must total exactly 100%")
+
+    req.status = status
+    req.reviewed_by = user.id
+    req.reviewed_by_name = user.full_name
+    req.reviewed_at = datetime.utcnow()
+    req.review_note = note.strip()
+    req.requester_seen_at = None
+    if status == "Approved":
+        for entry in new:
+            current[entry["component_id"]].weight = entry["weight"]
+        book.updated_at = datetime.utcnow()
+    add_gradebook_audit(db, book.id,
+                        "CriteriaAdjustmentApproved" if status == "Approved" else "CriteriaAdjustmentRejected",
+                        user, reason=note.strip(), component_name="Assessment weights",
+                        old_value=req.old_criteria_json, new_value=req.new_criteria_json)
+    db.commit()
+    return req
+
+
 def review_adjustment_request(
     db: Session,
     request_id: int,
@@ -845,14 +1179,47 @@ def review_adjustment_request(
     req = db.get(GradeAdjustmentRequest, request_id)
     if not req:
         raise ValueError("Adjustment request not found")
+    book = _gradebook_for_update(db, req.gradebook_id)
+    if not book:
+        raise ValueError("Gradebook not found")
+    req = db.scalar(
+        select(GradeAdjustmentRequest)
+        .where(GradeAdjustmentRequest.id == request_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not req:
+        raise ValueError("Adjustment request not found")
     if req.status != "Pending":
         raise ValueError(f"Request is already {req.status}")
+    requester = db.get(User, req.requested_by)
+    if not requester or requester.role != 'teacher':
+        raise ValueError('Only teacher adjustment requests can be reviewed')
+    if status not in {'Approved', 'Rejected'} or len(note.strip()) < 5:
+        raise ValueError('Select Approve or Reject and enter a review note of at least 5 characters')
+    score_rec = db.scalar(select(StudentScore).where(
+        StudentScore.person_id == req.person_id,
+        StudentScore.assessment_item_id == req.assessment_item_id))
+    if status == 'Approved':
+        item = db.get(AssessmentItem, req.assessment_item_id)
+        if book.status not in {'Finalized', 'Locked'}:
+            raise ValueError('Only a finalized or locked class record can receive an approved adjustment')
+        if not item or item.component.gradebook_id != book.id:
+            raise ValueError('The assessment item does not belong to this gradebook')
+        if req.person_id not in {person.id for person in db.scalars(gradebook_roster_query(book)).all()}:
+            raise ValueError('The learner does not belong to this class record')
+        req.new_score = validate_score_value(item, req.new_score, req.new_status)
+        if req.new_status != 'Scored' or req.new_score is None:
+            raise ValueError('An approved adjustment must leave a numeric scored grade on a finalized class record')
+        if (score_rec.score if score_rec else None, score_rec.status if score_rec else 'Missing') != (req.old_score, req.old_status):
+            raise ValueError('This score changed after the request was submitted. Reject it and submit a new request for the current score.')
 
     req.status = status
     req.reviewed_by = user.id
     req.reviewed_by_name = user.full_name
     req.reviewed_at = datetime.utcnow()
     req.review_note = note.strip()
+    req.requester_seen_at = None
 
     if status == "Approved":
         score_rec = db.scalar(
@@ -887,6 +1254,10 @@ def review_adjustment_request(
             old_value=f"{req.old_status}:{req.old_score}",
             new_value=f"{req.new_status}:{req.new_score}",
         )
+        book.updated_at = datetime.utcnow()
+    else:
+        add_gradebook_audit(db, req.gradebook_id, 'AdjustmentRejected', user, reason=note.strip(),
+                           person_id=req.person_id, assessment_item_id=req.assessment_item_id)
 
     db.commit()
     return req
@@ -896,9 +1267,24 @@ def delete_adjustment_request(db: Session, request_id: int, user: User) -> bool:
     req = db.get(GradeAdjustmentRequest, request_id)
     if not req:
         raise ValueError("Adjustment request not found")
+    if req.status != 'Pending':
+        raise ValueError('Reviewed adjustment requests must be retained for the audit history')
     if user.role not in {"admin", "records_officer"} and req.requested_by != user.id:
         raise ValueError("You don't have permission to delete this request")
     
+    db.delete(req)
+    db.commit()
+    return True
+
+
+def delete_criteria_adjustment_request(db: Session, request_id: int, user: User) -> bool:
+    req = db.get(GradeCriteriaAdjustmentRequest, request_id)
+    if not req:
+        raise ValueError("Criteria adjustment request not found")
+    if req.status != "Pending":
+        raise ValueError("Reviewed adjustment requests must be retained for the audit history")
+    if user.role not in {"admin", "records_officer"} and req.requested_by != user.id:
+        raise ValueError("You don't have permission to delete this request")
     db.delete(req)
     db.commit()
     return True
@@ -931,7 +1317,7 @@ def gradebook_summary(db: Session, class_key: str) -> dict:
     rows = []
     for person in people:
         component_results: dict[str, dict] = {}
-        completed = True
+        completed = bool(weighted)
         initial = 0.0
         manual_score = score_map.get((person.id, manual.id)) if manual else None
         if manual_score and manual_score.status == "Scored":

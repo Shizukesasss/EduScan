@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 import io
 import os
+import uuid
 import zipfile
 from datetime import date
 from pathlib import Path
@@ -18,6 +19,7 @@ from sqlalchemy.orm import Session
 from ..config import EXPORT_DIR, TEMPLATE_DIR, settings
 from ..models import Person
 from .attendance import active_people, is_instructional_day, raw_row
+from .export_files import new_report_path
 
 
 DEFAULT_TEMPLATE = TEMPLATE_DIR / "School Form 2 (SF2) Daily Attendance Report of Learners.xlsx"
@@ -292,7 +294,7 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
         members["[Content_Types].xml"] = _ensure_png_content_type(members["[Content_Types].xml"])
 
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-    output = EXPORT_DIR / f"SF2-{year}-{month:02d}-Grade-{grade}-{section}.xlsx"
+    output = new_report_path(EXPORT_DIR, f"SF2-{year}-{month:02d}-Grade-{grade}-{section}.xlsx")
     temporary = output.with_suffix(".tmp.xlsx")
     with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, data in members.items():
@@ -303,7 +305,7 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
 
 
 def generate_temporary_log(db: Session, day: date, grade: str | None = None,
-                           section: str | None = None) -> Path:
+                           section: str | None = None, *, snapshot: bool = False) -> Path:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Section Attendance" if grade and section else "All-School Attendance"
@@ -333,6 +335,12 @@ def generate_temporary_log(db: Session, day: date, grade: str | None = None,
         for cell in sheet[column][1:]:
             cell.number_format = "hh:mm AM/PM"
     suffix = f"-Grade-{grade}-{section}" if grade and section else "-All-School"
-    output = EXPORT_DIR / f"temporary-attendance-{day.isoformat()}{suffix}.xlsx"
-    workbook.save(output)
+    filename = f"temporary-attendance-{day.isoformat()}{suffix}.xlsx"
+    output = new_report_path(EXPORT_DIR, filename) if snapshot else EXPORT_DIR / filename
+    temporary = output.with_name(f'.{output.stem}-{uuid.uuid4().hex}.tmp.xlsx')
+    try:
+        workbook.save(temporary)
+        os.replace(temporary, output)
+    finally:
+        temporary.unlink(missing_ok=True)
     return output

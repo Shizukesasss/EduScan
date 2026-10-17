@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Camera, Clock3, FileSpreadsheet, MessageSquareText, ShieldCheck, UserRoundCheck } from 'lucide-react';
+import { Camera, Clock3, FileSpreadsheet, MessageSquareText, ShieldCheck, UserRoundCheck } from 'lucide-react';
 import { api, displayTime, localDate } from '../../api/client';
-import { useToast } from '../../contexts/ToastContext';
+import { useToast } from '../../contexts/useToast';
 
 export default function Dashboard() {
   const [data, setData] = useState({ rows: [], events: [], sms: {} });
   const [health, setHealth] = useState(null);
   const { showError } = useToast();
-  const load = useCallback(async () => { try { const [dashboard, status] = await Promise.all([api.get(`/dashboard?date=${localDate()}`), api.get('/health')]); setData(dashboard); setHealth(status); } catch (err) { showError(err.message); } }, [showError]);
+  const load = useCallback(() => Promise.all([api.get(`/dashboard?date=${localDate()}`), api.get('/health')])
+    .then(([dashboard, status]) => { setData(dashboard); setHealth(status); })
+    .catch((err) => showError(err.message)), [showError]);
   useEffect(() => { load(); const timer = window.setInterval(load, 15000); return () => clearInterval(timer); }, [load]);
   const learners = data.rows.filter((row) => row.role === 'Student');
   const personnel = data.rows.filter((row) => row.role !== 'Student');

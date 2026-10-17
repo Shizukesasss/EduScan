@@ -24,92 +24,57 @@ export default function Login() {
   };
 
   return (
-    <div style={{
-      display: 'flex',
-      height: '100vh',
-      width: '100vw',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--bg-color)',
-      padding: '24px'
-    }}>
-      <div className="card animate-fade-in" style={{
-        display: 'flex',
-        width: '100%',
-        maxWidth: '900px',
-        padding: 0,
-        overflow: 'hidden',
-        minHeight: '500px'
-      }}>
+    <div className="login-shell">
+      <div className="card animate-fade-in login-card">
 
         {/* Left Side: Branding / Visual */}
-        <div style={{
-          flex: 1,
-          background: 'linear-gradient(135deg, var(--accent-light), #d0ebff)',
-          padding: '40px',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'center',
-          alignItems: 'flex-start',
-          position: 'relative'
-        }}>
+        <div className="login-brand-panel">
           <img
             src="/logo.png"
             alt="San Jose National High School Logo"
-            style={{
-              width: '120px',
-              height: '120px',
-              objectFit: 'contain',
-              marginBottom: '24px'
-            }}
+            className="login-logo"
           />
-          <h1 style={{ fontSize: '42px', letterSpacing: '-1px', marginBottom: '16px' }}>EduScan.</h1>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '18px', lineHeight: 1.4, maxWidth: '300px' }}>
+          <h1>EduScan.</h1>
+          <p className="login-brand-description">
             Automated Biometric Attendance & Grade Management System.
           </p>
-          <div style={{ marginTop: 'auto' }}>
+          <div className="login-school">
             <span className="tag tag-blue">San Jose National High School</span>
           </div>
         </div>
 
         {/* Right Side: Login Form */}
-        <div style={{
-          flex: 1,
-          padding: '64px 40px',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'center'
-        }}>
-          <h2 style={{ fontSize: '28px', marginBottom: '8px' }}>Welcome back</h2>
-          <p style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>Please enter your administrative credentials.</p>
+        <div className="login-form-panel">
+          <h2>Welcome back</h2>
+          <p className="login-intro">Please enter your administrative credentials.</p>
           
-          <div style={{ background: '#f8fafc', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '16px', marginBottom: '32px', fontSize: '13px', color: 'var(--text-secondary)' }}>
+          <div className="login-access-note">
             Account access is assigned by the school administrator. Temporary credentials must be changed before attendance, grading, or scanner functions become available.
           </div>
 
-          <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          <form onSubmit={handleLogin} className="login-form">
             {error && (
-              <div style={{ padding: '12px', background: '#ffe3e3', color: 'var(--danger)', borderRadius: '8px', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div className="login-error">
                 <AlertCircle size={16} /> {error}
               </div>
             )}
             <div>
-              <label style={{ display: 'block', fontSize: '14px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)' }}>Username</label>
-              <div style={{ position: 'relative' }}>
-                <User size={18} style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
-                <input type="text" placeholder="Enter your username" className="input-field" style={{ paddingLeft: '44px' }} value={username} onChange={(e) => setUsername(e.target.value)} required />
+              <label>Username</label>
+              <div className="login-input-wrap">
+                <User size={18} />
+                <input type="text" placeholder="Enter your username" className="input-field" value={username} onChange={(e) => setUsername(e.target.value)} required />
               </div>
             </div>
 
             <div>
-              <label style={{ display: 'block', fontSize: '14px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)' }}>Password</label>
-              <div style={{ position: 'relative' }}>
-                <Lock size={18} style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
-                <input type="password" placeholder="••••••••" className="input-field" style={{ paddingLeft: '44px' }} value={password} onChange={(e) => setPassword(e.target.value)} required />
+              <label>Password</label>
+              <div className="login-input-wrap">
+                <Lock size={18} />
+                <input type="password" placeholder="••••••••" className="input-field" value={password} onChange={(e) => setPassword(e.target.value)} required />
               </div>
             </div>
 
-            <button type="submit" className="btn-primary" disabled={busy} style={{ marginTop: '8px', padding: '14px' }}>
+            <button type="submit" className="btn-primary" disabled={busy}>
               {busy ? 'Signing in…' : 'Login to EduScan'}
             </button>
           </form>

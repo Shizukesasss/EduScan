@@ -191,6 +191,16 @@ class GradeAdjustmentCreate(BaseModel):
         return value
 
 
+class GradeCriteriaWeight(BaseModel):
+    component_id: int = Field(gt=0)
+    weight: float = Field(ge=0, le=100, allow_inf_nan=False)
+
+
+class GradeCriteriaAdjustmentCreate(BaseModel):
+    components: list[GradeCriteriaWeight] = Field(min_length=1, max_length=20)
+    reason: str = Field(min_length=8, max_length=2000)
+
+
 class GradeAdjustmentReview(BaseModel):
     status: str
     note: str = Field(min_length=5, max_length=2000)
@@ -201,6 +211,10 @@ class GradeAdjustmentReview(BaseModel):
         if value not in {"Approved", "Rejected"}:
             raise ValueError("Adjustment review status must be Approved or Rejected")
         return value
+
+
+class GradeAdjustmentNotificationsRead(BaseModel):
+    request_ids: list[int] = Field(min_length=1, max_length=100)
 
 
 # ---------------------------------------------------------------------------

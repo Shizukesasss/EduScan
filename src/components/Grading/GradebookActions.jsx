@@ -1,20 +1,6 @@
 import React, { useState } from 'react';
-import {
-  Save,
-  Sliders,
-  Send,
-  CheckCircle2,
-  Lock,
-  Unlock,
-  Download,
-  FileText,
-  History,
-  ShieldAlert,
-  ClipboardCheck,
-  Loader2,
-} from 'lucide-react';
 import { auth } from '../../api/client';
-import { useToast } from '../../contexts/ToastContext';
+import { useToast } from '../../contexts/useToast';
 
 export default function GradebookActions({
   gradebook,
@@ -22,7 +8,6 @@ export default function GradebookActions({
   isSaving = false,
   onSaveDraft,
   onOpenConfig,
-  onSubmit,
   onFinalize,
   onLock,
   onReopen,
@@ -37,7 +22,7 @@ export default function GradebookActions({
 }) {
   const userRole = auth.role();
   const canEdit = userRole === 'teacher';
-  const isAdminOrOfficer = ['admin', 'records_officer'].includes(userRole);
+  const isRecordsOfficer = userRole === 'records_officer';
 
   const status = gradebook?.status || 'Draft';
   const isDraft = status === 'Draft';
@@ -45,29 +30,40 @@ export default function GradebookActions({
   const isFinalized = status === 'Finalized';
   const isLocked = status === 'Locked';
 
-  const [activeDialog, setActiveDialog] = useState(null); // 'submit' | 'finalize' | 'lock' | 'reopen'
+  const [activeDialog, setActiveDialog] = useState(null); // 'finalize' | 'lock' | 'reopen'
   const [isConfirmed, setIsConfirmed] = useState(false);
+  const [actionReason, setActionReason] = useState('');
+  const [acting, setActing] = useState(false);
   const { showError } = useToast();
 
   const openActionDialog = (type) => {
     setActiveDialog(type);
     setIsConfirmed(false);
+    setActionReason('');
   };
 
   const handleConfirmAction = async () => {
+    if (acting || disabled || isSaving) return;
     if (!isConfirmed) {
       showError('You must confirm this action to proceed.');
       return;
     }
 
+    if (activeDialog === 'reopen' && actionReason.trim().length < 8) {
+      showError('Enter a specific reason of at least 8 characters to reopen this class record.');
+      return;
+    }
+    setActing(true);
     try {
-      const defaultReason = "Action confirmed by user.";
+      const defaultReason = actionReason.trim() || (activeDialog === 'finalize' ? 'Term scores reviewed and finalized' : 'Finalized term class record archived');
       if (activeDialog === 'finalize') await onFinalize?.(defaultReason);
       else if (activeDialog === 'lock') await onLock?.(defaultReason);
       else if (activeDialog === 'reopen') await onReopen?.(defaultReason);
       setActiveDialog(null);
     } catch (err) {
       showError(err.message || 'Action failed');
+    } finally {
+      setActing(false);
     }
   };
 
@@ -85,23 +81,23 @@ export default function GradebookActions({
                 openActionDialog('finalize');
               }}
               disabled={disabled || isSaving}
-              title="Finalize grades (computes official quarterly ratings)"
+              title="Finalize grades (computes official term ratings)"
             >
               <span className="font-bold">FINALIZE</span>
             </button>
           )}
 
           {/* Editing Actions */}
-          {isDraft && canEdit && (
+          {(isDraft || isSubmitted) && canEdit && (
             <>
               <button
                 type="button"
                 className={`btn ${isDirty ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={onSaveDraft}
+                onClick={() => onSaveDraft?.()}
                 disabled={disabled || isSaving}
                 title={isDirty ? 'Save pending changes to database' : 'All changes saved'}
               >
-                <span>{isSaving ? 'Saving...' : 'Save Draft'}</span>
+                <span>{isSaving ? 'Saving...' : isSubmitted ? 'Save Scores' : 'Save Draft'}</span>
               </button>
 
               <button
@@ -117,7 +113,7 @@ export default function GradebookActions({
           )}
 
           {/* Admin Workflow */}
-          {isAdminOrOfficer && isFinalized && (
+          {isRecordsOfficer && isFinalized && (
             <button
               type="button"
               className="btn btn-secondary"
@@ -129,7 +125,7 @@ export default function GradebookActions({
             </button>
           )}
 
-          {isAdminOrOfficer && (isSubmitted || isFinalized || isLocked) && (
+          {isRecordsOfficer && (isSubmitted || isFinalized || isLocked) && (
             <button
               type="button"
               className="btn btn-warning"
@@ -141,11 +137,12 @@ export default function GradebookActions({
             </button>
           )}
 
-          {(isFinalized || isLocked) && !isAdminOrOfficer && (
+          {(isFinalized || isLocked) && canEdit && (
             <button
               type="button"
               className="btn btn-secondary text-primary"
               onClick={onOpenAdjustments}
+              disabled={disabled || isSaving}
               title="Request post-finalization grade adjustments"
             >
               <span>Grade Adjustments</span>
@@ -155,20 +152,21 @@ export default function GradebookActions({
         </div>
 
         <div className="flex flex-wrap gap-2 items-center secondary-action-group">
-          <button type="button" className="btn btn-secondary" onClick={onToggleValidation} title="Run pre-flight validation checklist">
+          <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onToggleValidation} title="Run pre-flight validation checklist">
             <span>Validation</span>
           </button>
           <button 
             type="button" 
             className="btn btn-secondary" 
             onClick={onExportXlsx} 
-            disabled={!isFinalized && !isLocked}
+            disabled={disabled || isSaving || (!isFinalized && !isLocked)}
             title={(!isFinalized && !isLocked) ? "Gradebook must be Finalized before exporting" : "Download Excel spreadsheet (XLSX)"}
           >
             <span>Export XLSX</span>
           </button>
 
-          <button type="button" className="btn btn-secondary" onClick={onOpenAudit} title="View full audit log of all changes">
+          {!canEdit && <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onPrintReport} title="Open printable class record">Print</button>}
+          <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onOpenAudit} title="View full audit log of all changes">
             <span>Audit Log</span>
           </button>
         </div>
@@ -189,12 +187,19 @@ export default function GradebookActions({
             <div className="modal-body">
               <p className="text-muted text-sm mb-3">
                 {activeDialog === 'finalize' &&
-                  'Finalizing permanently calculates official quarterly ratings. Direct score edits will be locked. All learners must have complete scores.'}
+                  'Finalizing permanently calculates official term ratings. Direct score edits will be locked. All learners must have complete scores.'}
                 {activeDialog === 'lock' &&
-                  'Locking archives this gradebook. No further adjustments can be made without explicit reopening.'}
+                  'Locking archives this gradebook. Further corrections require a teacher adjustment request and approval.'}
                 {activeDialog === 'reopen' &&
                   'Reopening reverts the gradebook to Draft status. An explicit, auditable reason is required.'}
               </p>
+
+              {activeDialog === 'reopen' && (
+                <label>
+                  <span className="field-label">Reason for reopening</span>
+                  <textarea className="input-field" value={actionReason} onChange={event => setActionReason(event.target.value)} minLength={8} maxLength={1000} disabled={acting || isSaving} placeholder="Describe the correction needed in this class record" />
+                </label>
+              )}
 
               <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '15px' }}>
                 <input
@@ -215,6 +220,7 @@ export default function GradebookActions({
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => setActiveDialog(null)}
+                disabled={acting || isSaving}
               >
                 Cancel
               </button>
@@ -227,7 +233,7 @@ export default function GradebookActions({
                       : 'btn-primary'
                   }`}
                 onClick={handleConfirmAction}
-                disabled={!isConfirmed}
+                disabled={!isConfirmed || acting || isSaving || disabled || (activeDialog === 'reopen' && actionReason.trim().length < 8)}
               >
                 Confirm {activeDialog.charAt(0).toUpperCase() + activeDialog.slice(1)}
               </button>

@@ -101,6 +101,7 @@ def round_value(
 def calculate_component_percentage(
     scores: list[dict],
     items: list[dict],
+    component_type: str = '',
 ) -> dict:
     """Calculate the percentage score for a single assessment component.
 
@@ -155,6 +156,14 @@ def calculate_component_percentage(
     # Percentage is computed from the graded items only
     percentage = (total_earned / total_possible) * 100.0
 
+    if component_type == 'Term Examinations':
+        portions = {'ST1': 30, 'ST2': 30, 'TE': 40}
+        labels = [item['label'] for item in items]
+        complete = complete and len(labels) == 3 and set(labels) == set(portions)
+        percentage = sum(float(score_map[item['id']]['score']) / float(item['max_score']) * portions.get(item['label'], 0)
+                         for item in items if item['id'] in score_map and score_map[item['id']].get('status') == 'Scored'
+                         and score_map[item['id']].get('score') is not None)
+
     return {
         "total_earned": total_earned,
         "total_possible": total_possible,
@@ -174,15 +183,7 @@ def calculate_weighted_grade(
     rounding_decimal_places: int = 2,
     rounding_method: str = "half_up",
 ) -> dict:
-    """Calculate the initial grade from component percentages and weights.
-
-    Partial grading is supported: components that have at least one scored
-    item (percentage is not None) contribute to the initial grade.  The
-    weights of active components are re-normalised to always sum to 100%
-    so that a gradebook with 2 out of 3 components partially filled still
-    yields a meaningful grade.  When ALL items in ALL components are scored
-    the normalisation factor is 1 and the result is identical to the original
-    full-completion formula.
+    """Calculate a grade only when every required component is complete.
 
     Args:
         component_results: list of {
@@ -209,16 +210,16 @@ def calculate_weighted_grade(
     all_complete = True
     component_grades = []
 
-    # Separate components with a computed percentage from empty ones
-    active_results = [r for r in component_results if r.get("percentage") is not None]
-    inactive_results = [r for r in component_results if r.get("percentage") is None]
+    component_results = normalize_component_weights(component_results)
+    if not math.isclose(sum(float(result.get("weight", 0)) for result in component_results), 100.0, abs_tol=0.01):
+        all_complete = False
 
     # Check overall completeness
     for result in component_results:
         if result.get("percentage") is None or not result.get("complete", False):
             all_complete = False
 
-    if not active_results:
+    if not any(r.get("percentage") is not None for r in component_results):
         # Nothing scored at all
         for result in component_results:
             component_grades.append({
@@ -233,20 +234,11 @@ def calculate_weighted_grade(
             "component_grades": component_grades,
         }
 
-    # Re-normalise weights: active components' weights sum → their proportion of 100%
-    total_active_weight = sum(float(r.get("weight", 0)) for r in active_results)
-    total_all_weight = sum(float(r.get("weight", 0)) for r in component_results)
-    # Only re-normalise when some components are inactive
-    need_normalise = len(inactive_results) > 0 and total_active_weight > 0
-    normalisation_factor = (total_all_weight / total_active_weight) if need_normalise else 1.0
-
-    initial_grade = 0.0
-    active_set = {id(r) for r in active_results}
+    initial_grade = Decimal("0")
 
     for result in component_results:
         pct = result.get("percentage")
         weight = float(result.get("weight", 0))
-        effective_weight = weight * normalisation_factor if id(result) in active_set else weight
 
         if pct is None:
             component_grades.append({
@@ -257,7 +249,7 @@ def calculate_weighted_grade(
             })
             continue
 
-        weighted = pct * (effective_weight / 100.0)
+        weighted = Decimal(str(pct)) * Decimal(str(weight)) / Decimal("100")
         initial_grade += weighted
         component_grades.append({
             "name": result.get("name", ""),
@@ -267,10 +259,18 @@ def calculate_weighted_grade(
         })
 
     return {
-        "initial_grade": round_value(initial_grade, rounding_decimal_places, rounding_method),
+        "initial_grade": round_value(initial_grade, rounding_decimal_places, rounding_method) if all_complete else None,
         "complete": all_complete,
         "component_grades": component_grades,
     }
+
+
+def normalize_component_weights(components: list[dict]) -> list[dict]:
+    """Read legacy fractional weights as percentages without rewriting data."""
+    weights = [float(component.get("weight", 0)) for component in components]
+    fractional = bool(weights) and all(0 <= weight <= 1 for weight in weights) and math.isclose(sum(weights), 1.0, abs_tol=1e-6)
+    return [{**component, "weight": weight * 100 if fractional else weight}
+            for component, weight in zip(components, weights)]
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +280,7 @@ def calculate_weighted_grade(
 def apply_transmutation(
     initial_grade: float,
     transmutation_table: list[dict] | None = None,
+    use_lower_bounds: bool = False,
 ) -> int | None:
     """Apply the transmutation/reporting rule to convert an initial grade.
 
@@ -300,6 +301,9 @@ def apply_transmutation(
     grade = max(0.0, min(100.0, float(initial_grade)))
 
     if transmutation_table:
+        if use_lower_bounds:
+            return next((int(entry['value']) for entry in sorted(transmutation_table, key=lambda row: float(row['min']), reverse=True)
+                         if grade >= float(entry['min'])), None)
         # Use the table: find the range that contains the grade
         for entry in transmutation_table:
             if float(entry["min"]) <= grade <= float(entry["max"]):
@@ -381,7 +385,7 @@ def calculate_student_grade(
              "status": score_by_item.get(item["id"], {}).get("status", "Missing")}
             for item in comp_items
         ]
-        pct_result = calculate_component_percentage(comp_scores, comp_items)
+        pct_result = calculate_component_percentage(comp_scores, comp_items, comp.get('component_type', ''))
         component_results.append({
             "name": comp.get("name", ""),
             "weight": comp.get("weight", 0),
@@ -400,7 +404,9 @@ def calculate_student_grade(
     initial_grade = weighted["initial_grade"]
     reported_grade = None
     if initial_grade is not None:
-        reported_grade = apply_transmutation(initial_grade, transmutation_table)
+        template_exams = any(component.get('component_type') == 'Term Examinations' for component in components)
+        raw_initial = sum(Decimal(str(result['percentage'])) * Decimal(str(result['weight'])) / 100 for result in component_results) if template_exams else initial_grade
+        reported_grade = apply_transmutation(float(raw_initial), transmutation_table, use_lower_bounds=template_exams)
 
     status = determine_grade_status(reported_grade, passing_grade, weighted["complete"])
 

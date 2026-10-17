@@ -30,25 +30,32 @@ async function request(path, options = {}) {
   let response;
   try {
     response = await fetch(`${API_BASE}${path}`, { ...options, headers });
-  } catch {
+  } catch (error) {
+    if (error.name === 'TimeoutError') throw new Error('EduScan backend took too long to respond. Check the API connection and try again.');
+    if (error.name === 'AbortError') throw new Error('EduScan request was cancelled.');
     throw new Error('EduScan backend is not reachable. Start the API server and try again.');
   }
   if (response.status === 401) auth.clear();
   if (!response.ok) {
     let detail = `Request failed (${response.status})`;
+    let details;
     try {
       const payload = await response.json();
+      details = payload.detail;
       detail = typeof payload.detail === 'string' ? payload.detail : payload.detail?.message || JSON.stringify(payload.detail);
     } catch { /* preserve status message */ }
-    throw new Error(detail);
+    const error = new Error(detail);
+    error.code = details?.code;
+    error.details = details;
+    throw error;
   }
   if (response.status === 204) return null;
   return response.headers.get('content-type')?.includes('application/json') ? response.json() : response;
 }
 
 export const api = {
-  get: (path) => request(path),
-  post: (path, body) => request(path, { method: 'POST', body: body instanceof FormData ? body : JSON.stringify(body) }),
+  get: (path, options = {}) => request(path, options),
+  post: (path, body, options = {}) => request(path, { ...options, method: 'POST', body: body instanceof FormData ? body : JSON.stringify(body) }),
   put: (path, body) => request(path, { method: 'PUT', body: body instanceof FormData ? body : JSON.stringify(body) }),
   patch: (path, body) => request(path, { method: 'PATCH', body: JSON.stringify(body) }),
   delete: (path, body) => request(path, { method: 'DELETE', body: body === undefined ? undefined : JSON.stringify(body) }),
@@ -79,12 +86,15 @@ export const api = {
   },
 };
 
-export function captureVideoFrame(video, quality = 0.9) {
+export const enrollmentCapture = { frames: 20, interval: 220, quality: 0.92, maxDimension: 960 };
+
+export function captureVideoFrame(video, quality = 0.9, maxDimension = 0) {
   if (!video?.videoWidth) throw new Error('Camera is not ready');
   const canvas = document.createElement('canvas');
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  canvas.getContext('2d').drawImage(video, 0, 0);
+  const scale = maxDimension > 0 ? Math.min(1, maxDimension / Math.max(video.videoWidth, video.videoHeight)) : 1;
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
+  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
   return new Promise((resolve, reject) => canvas.toBlob(
     (blob) => blob ? resolve(blob) : reject(new Error('Camera frame could not be captured')),
     'image/jpeg', quality,

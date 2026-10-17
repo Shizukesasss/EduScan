@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Clock3, Pencil, Save, Trash2 } from 'lucide-react';
 import { api } from '../../api/client';
-import { useToast } from '../../contexts/ToastContext';
+import { useToast } from '../../contexts/useToast';
 
 const blank = { id: null, role: 'Faculty', assignment: '', weekdays: '0,1,2,3,4', start_time: '07:30', end_time: '16:30', late_grace_minutes: 15, absence_cutoff: '09:00', active: true };
 

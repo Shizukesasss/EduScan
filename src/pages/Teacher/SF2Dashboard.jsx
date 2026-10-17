@@ -6,7 +6,7 @@ import SectionAttendance from '../../components/Teacher/SectionAttendance';
 import SF2ReportGenerator from '../../components/Teacher/SF2ReportGenerator';
 import StudentProfileModal from '../../components/Teacher/StudentProfileModal';
 import { api, localDate } from '../../api/client';
-import { useToast } from '../../contexts/ToastContext';
+import { useToast } from '../../contexts/useToast';
 
 export default function SF2Dashboard() {
   const [activeTab, setActiveTab] = useState('attendance');
@@ -33,10 +33,10 @@ export default function SF2Dashboard() {
     }));
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
+    <div className="page-stack teacher-class-workspace">
       
       {/* Top Header & Analytics */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+      <div className="teacher-workspace-toolbar">
         <SubjectSelector currentClass={currentClass} setCurrentClass={setCurrentClass} setCurrentSchedule={setCurrentSchedule} />
         <button onClick={() => setActiveTab('reports')} className="btn-primary"><FileSpreadsheet size={18} /> Generate monthly SF2</button>
       </div>
@@ -44,7 +44,7 @@ export default function SF2Dashboard() {
       <AdviserAnalyticsWidget students={students} />
 
       {/* Module Tabs */}
-      <div style={{ display: 'flex', gap: '8px', borderBottom: '2px solid var(--border-color)', paddingBottom: '16px' }}>
+      <div className="teacher-workspace-tabs">
         <button 
           onClick={() => setActiveTab('attendance')}
           style={{ padding: '8px 16px', background: activeTab === 'attendance' ? 'var(--primary-color)' : 'transparent', color: activeTab === 'attendance' ? 'white' : 'var(--text-secondary)', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, transition: 'all 0.2s' }}

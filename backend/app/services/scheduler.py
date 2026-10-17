@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -10,8 +11,11 @@ from ..models import BackupRun
 from .attendance import MANILA, attendance_config, close_due_attendance, is_instructional_day
 from .backup import rotate_scheduled_backups, run_managed_backup
 from .settings_store import get_json, get_secret
-from .sf2 import generate_temporary_log
+from .gate_exports import retry_gate_exports, update_gate_export
 from .sms import dispatch_outbox
+
+
+logger = logging.getLogger(__name__)
 
 
 class AttendanceScheduler:
@@ -40,29 +44,31 @@ class AttendanceScheduler:
                 return {"closed": False, "reason": "disabled"}
             if not is_instructional_day(db, day):
                 return {"closed": False, "reason": "non-instructional"}
-            created = close_due_attendance(db, day, current.timetz().replace(tzinfo=None))
+            try:
+                created = close_due_attendance(db, day, current.timetz().replace(tzinfo=None))
+            except Exception:
+                # Some attendance rows may already be committed before a later failure.
+                db.rollback()
+                update_gate_export(day)
+                raise
             if created:
-                generate_temporary_log(db, day)
+                update_gate_export(day)
                 dispatch_outbox()
             return {"closed": bool(created), "created": created,
                     "reason": "closed due schedules" if created else "no due unclosed schedules"}
 
     def _run(self) -> None:
         while not self._stop.wait(30):
-            try:
-                self.run_once()
-            except Exception:
-                # The next interval retries; operational failures remain visible in API/outbox logs.
-                pass
-            try:
-                # Due retries continue even when daily closing has already run.
-                dispatch_outbox()
-            except Exception:
-                pass
-            try:
-                self.run_scheduled_backup()
-            except Exception:
-                continue
+            for name, operation in (
+                ("Attendance export retry", retry_gate_exports),
+                ("Automatic attendance closing", self.run_once),
+                ("SMS outbox dispatch", dispatch_outbox),
+                ("Scheduled backup", self.run_scheduled_backup),
+            ):
+                try:
+                    operation()
+                except Exception:
+                    logger.exception('%s failed; the scheduler will continue on the next interval', name)
 
     def run_scheduled_backup(self, now: datetime | None = None) -> dict:
         current = now or datetime.now(MANILA)

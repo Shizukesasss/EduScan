@@ -7,7 +7,7 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 USER_ROLES = {"admin", "teacher", "scanner",
-              "records_officer", "privacy_officer", "ict"}
+              "records_officer", "privacy_officer", "ict", "school_head"}
 
 
 def strong_password(value: str) -> str:
@@ -43,6 +43,20 @@ class UserPublic(BaseModel):
     locked_until: datetime | None = None
     last_login_at: datetime | None = None
     model_config = ConfigDict(from_attributes=True)
+
+
+class SchoolHeadPayload(BaseModel):
+    school_year_id: int = Field(gt=0)
+    full_name: str = Field(min_length=3, max_length=160)
+    title: str = Field(default="Principal", min_length=2, max_length=100)
+
+    @field_validator("full_name", "title")
+    @classmethod
+    def strip_school_head(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 2:
+            raise ValueError("Enter the school head's name and title")
+        return value
 
 
 class UserCreate(BaseModel):
@@ -103,6 +117,7 @@ class PersonCreate(BaseModel):
     role: str
     grade: str | None = None
     section: str | None = None
+    assignment: str | None = Field(default=None, max_length=180)
     guardian_phone: str | None = None
     enrollment_status: str = "Regular"
     enrollment_start_date: date | None = None
@@ -238,6 +253,8 @@ class AttendanceCorrectionPayload(BaseModel):
     time_in: time | None = None
     time_out: time | None = None
     reason: str = Field(min_length=8, max_length=1000)
+    assisted: bool = False
+    identity_verified: bool = False
 
 
 class AttendanceResetPayload(BaseModel):
@@ -270,6 +287,11 @@ class RecognitionResult(BaseModel):
     distance: float | None = None
     quality_score: float | None = None
     attendance_event: dict | None = None
+    liveness_verified: bool = False
+    identity_similarity: float | None = None
+    presentation_verified: bool | None = None
+    presentation_score: float | None = None
+    review_id: str | None = None
 
 
 class BiometricChangeReason(BaseModel):
@@ -292,6 +314,8 @@ class SmsSettingsPayload(BaseModel):
     time_out_template: str
     tardiness_template: str
     absence_template: str
+    enrollment_notifications: bool = True
+    enrollment_template: str = "EduScan: School enrollment for {name} was {enrollment_action} on {date} at {time}. Contact {school_contact} for questions."
     max_messages_per_30_minutes: int = Field(default=50, ge=1, le=500)
 
 
@@ -475,7 +499,6 @@ class GradingPeriodPayload(BaseModel):
 class GradeLevelPayload(BaseModel):
     id: int | None = None
     name: str = Field(min_length=1, max_length=30)
-    sequence: int = Field(default=0, ge=0, le=100)
     active: bool = True
 
 
@@ -485,7 +508,15 @@ class SectionPayload(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     adviser_user_id: int | None = None
     adviser_name: str | None = Field(default=None, max_length=180)
+    track: str | None = Field(default=None, max_length=40)
     active: bool = True
+
+    @field_validator("adviser_user_id", mode="before")
+    @classmethod
+    def empty_adviser_id_is_unassigned(cls, value):
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class SubjectPayload(BaseModel):
@@ -493,7 +524,16 @@ class SubjectPayload(BaseModel):
     code: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=2, max_length=120)
     category: str = Field(default="JHS", max_length=20)
+    is_elective: bool = False
+    elective_track: str | None = Field(default=None, max_length=40)
     active: bool = True
+
+
+class SubjectTeachingAssignmentPayload(BaseModel):
+    school_year_id: int
+    subject_id: int
+    teacher_user_id: int
+    section_ids: list[int] = Field(default_factory=list, max_length=200)
 
 
 class InterventionPayload(BaseModel):

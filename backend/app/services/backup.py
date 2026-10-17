@@ -122,6 +122,56 @@ def _mysql_dump(temporary_dir: Path) -> bytes:
     return target.read_bytes()
 
 
+def find_postgres_program(program: str) -> Path:
+    executable = f"{program}.exe" if os.name == "nt" else program
+    configured = os.getenv("EDUSCAN_POSTGRES_BIN", "").strip()
+    candidates = [Path(configured) / executable] if configured else []
+    located = shutil.which(executable)
+    if located:
+        candidates.append(Path(located))
+    if os.name == "nt":
+        root = Path(os.getenv("ProgramFiles", "C:/Program Files")) / "PostgreSQL"
+        candidates.extend(sorted(root.glob(f"*/bin/{executable}"),
+                                 key=lambda path: tuple(int(n) for n in path.parents[1].name.split(".") if n.isdigit()),
+                                 reverse=True))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    raise HTTPException(status_code=409, detail=f"{executable} was not found. Install PostgreSQL client tools or set EDUSCAN_POSTGRES_BIN to their bin folder.")
+
+
+def postgres_environment() -> dict[str, str]:
+    url = engine.url
+    if not url.username or not url.database:
+        raise HTTPException(status_code=409, detail="DATABASE_URL must include a PostgreSQL username and database name")
+    # Credentials stay out of process arguments and tool error messages.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
+    env.update(PGHOST=url.host or "127.0.0.1", PGPORT=str(url.port or 5432),
+               PGUSER=url.username, PGPASSWORD=url.password or "", PGDATABASE=url.database,
+               PGCONNECT_TIMEOUT="15", PGSSLMODE=str(url.query.get("sslmode", "prefer")))
+    for option in ("sslrootcert", "sslcert", "sslkey"):
+        if option in url.query:
+            env[f"PG{option.upper()}"] = str(url.query[option])
+    return env
+
+
+def run_postgres_tool(program: str, arguments: list[str]) -> None:
+    try:
+        result = subprocess.run([str(find_postgres_program(program)), "--no-password", *arguments],
+                                env=postgres_environment(), capture_output=True, timeout=600, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(status_code=500, detail=f"PostgreSQL {program} could not complete; the operation was stopped") from exc
+    if result.returncode:
+        # libpq diagnostics can contain connection details; do not return them to clients.
+        raise HTTPException(status_code=500, detail=f"PostgreSQL {program} failed. Check server connectivity, client version, and database permissions.")
+
+
+def _postgres_dump(temporary_dir: Path) -> bytes:
+    target = temporary_dir / "postgres.dump"
+    run_postgres_tool("pg_dump", ["--format=custom", "--schema=public", "--no-owner", "--no-acl", f"--file={target}"])
+    return target.read_bytes()
+
+
 def _database_snapshot(temporary_dir: Path) -> tuple[str, bytes, str]:
     backend = database_backend()
     if backend == "sqlite":
@@ -136,6 +186,8 @@ def _database_snapshot(temporary_dir: Path) -> tuple[str, bytes, str]:
         return "eduscan.db", snapshot.read_bytes(), backend
     if backend == "mysql":
         return "mysql.sql", _mysql_dump(temporary_dir), backend
+    if backend == "postgresql":
+        return "postgres.dump", _postgres_dump(temporary_dir), backend
     raise HTTPException(status_code=409, detail=f"Secure backup is not implemented for database backend: {backend}")
 
 
@@ -239,10 +291,15 @@ def stage_secure_restore(data: bytes, passphrase: str) -> dict:
                 raise ValueError("unsafe archive path")
             manifest = json.loads(archive.read("manifest.json"))
             backup_backend = manifest.get("database_backend", "sqlite")
-            database_name = "mysql.sql" if backup_backend == "mysql" else "eduscan.db"
+            database_name = {"mysql": "mysql.sql", "postgresql": "postgres.dump", "sqlite": "eduscan.db"}.get(backup_backend)
+            if database_name is None:
+                raise ValueError("unsupported database backend")
             required = {database_name, ".encryption_key"}
             if not required.issubset(manifest.get("files", {})):
                 raise ValueError("database or encryption key is missing")
+            if any(name not in names or name.startswith(("/", "\\")) or ":" in name or ".." in Path(name.replace("\\", "/")).parts
+                   for name in manifest["files"]):
+                raise ValueError("unsafe or missing manifest file")
             extracted = {name: archive.read(name) for name in manifest["files"]}
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Backup archive validation failed: {exc}") from exc
@@ -265,13 +322,13 @@ def stage_secure_restore(data: bytes, passphrase: str) -> dict:
         json.dumps({"staged_at": datetime.utcnow().isoformat() + "Z", "manifest": manifest}, indent=2),
         encoding="utf-8",
     )
-    mysql_restore = backup_backend == "mysql"
+    offline_restore = backup_backend in {"mysql", "postgresql"}
     return {
         "staged": True,
         "file_count": len(extracted),
-        "restart_required": not mysql_restore,
-        "offline_restore_required": mysql_restore,
-        "apply_command": ".\\scripts\\apply-mysql-restore.ps1" if mysql_restore else None,
+        "restart_required": not offline_restore,
+        "offline_restore_required": offline_restore,
+        "apply_command": {"mysql": ".\\scripts\\apply-mysql-restore.ps1", "postgresql": ".\\scripts\\apply-postgres-restore.ps1"}.get(backup_backend),
         "created_at": manifest.get("created_at"),
         "database_backend": backup_backend,
     }
