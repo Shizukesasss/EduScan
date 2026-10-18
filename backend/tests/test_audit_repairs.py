@@ -213,6 +213,23 @@ class AuditRepairsTest(unittest.TestCase):
         self.assertEqual(commit.call_count, 1)
         self.assertFalse(sample.exists()); self.assertFalse(model.exists())
 
+    def test_disposal_reports_file_cleanup_failure(self):
+        person, sample, model = self.enrolled_person()
+        with patch.object(biometric_service, '_unlink_files'):
+            result = dispose_person_records(self.db, person, self.admin, 'Authorized test disposal', 'Test authorization', person.external_id)
+        self.assertEqual(result['file_cleanup_pending'], 2)
+        self.assertEqual(result['removed_counts']['face_samples'], 1)
+        self.assertTrue(sample.exists())
+
+    def test_disposal_removes_relocated_face_samples(self):
+        person, sample, model = self.enrolled_person()
+        record = self.db.get(BiometricSample, 'sample')
+        record.encrypted_path = r'Z:\old-computer\sample.enc'
+        self.db.commit()
+        result = dispose_person_records(self.db, person, self.admin, 'Authorized test disposal', 'Test authorization', person.external_id)
+        self.assertFalse(sample.exists())
+        self.assertEqual(result['file_cleanup_pending'], 0)
+
     def test_startup_preserves_inactive_model_records_and_files(self):
         import app.main as main
         person, sample, model_path = self.enrolled_person()

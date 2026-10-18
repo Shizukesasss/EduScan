@@ -5,6 +5,7 @@ from datetime import date, datetime, time
 import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from .services.enrollment import enrollment_error
 
 USER_ROLES = {"admin", "teacher", "scanner",
               "records_officer", "privacy_officer", "ict", "school_head"}
@@ -107,7 +108,7 @@ class PasswordChangePayload(BaseModel):
 
 
 class PersonCreate(BaseModel):
-    external_id: str = Field(min_length=2, max_length=80)
+    external_id: str = Field(default="", max_length=80, validate_default=True)
     lrn: str | None = Field(default=None, max_length=20)
     surname: str = Field(default="", max_length=80)
     first_name: str = Field(min_length=1, max_length=80)
@@ -120,6 +121,7 @@ class PersonCreate(BaseModel):
     assignment: str | None = Field(default=None, max_length=180)
     guardian_phone: str | None = None
     enrollment_status: str = "Regular"
+    enrollment_note: str | None = Field(default=None, max_length=1000)
     enrollment_start_date: date | None = None
     enrollment_end_date: date | None = None
     transfer_school: str | None = Field(default=None, max_length=180)
@@ -128,10 +130,20 @@ class PersonCreate(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def clean_na_values(cls, values: dict) -> dict:
+        values = dict(values)
         for k, v in values.items():
             if isinstance(v, str) and v.strip().upper() in {"N/A", "NA", "NONE", "-"}:
                 values[k] = "" if k in {"surname", "first_name"} else None
+        if not values.get("external_id") and values.get("role") == "Student":
+            values["external_id"] = values.get("lrn") or ""
         return values
+
+    @field_validator("external_id")
+    @classmethod
+    def required_identifier(cls, value: str) -> str:
+        if len(value.strip()) < 2:
+            raise ValueError("An LRN for students or employee ID for staff is required")
+        return value.strip()
 
     @field_validator("sex")
     @classmethod
@@ -149,14 +161,13 @@ class PersonCreate(BaseModel):
                 f"Role must be one of: {', '.join(sorted(allowed))}")
         return value
 
-    @field_validator("enrollment_status")
-    @classmethod
-    def valid_enrollment_status(cls, value: str) -> str:
-        allowed = {"Regular", "Transferred In", "Transferred Out"}
-        if value not in allowed:
-            raise ValueError(
-                f"Enrollment status must be one of: {', '.join(sorted(allowed))}")
-        return value
+    @model_validator(mode="after")
+    def valid_enrollment_status(self):
+        error = enrollment_error(self.role, self.enrollment_status, self.enrollment_start_date,
+                                 self.enrollment_end_date, self.enrollment_note)
+        if error:
+            raise ValueError(error)
+        return self
 
 
 class PersonPublic(PersonCreate):
@@ -299,9 +310,10 @@ class BiometricChangeReason(BaseModel):
 
 
 class RecordDisposalPayload(BaseModel):
-    reason: str = Field(min_length=12, max_length=2000)
-    authorization_reference: str = Field(min_length=5, max_length=300)
+    reason: str = Field(default="Administrator-confirmed full school-record disposal", min_length=12, max_length=2000)
+    authorization_reference: str = Field(default="Administrator checkbox and identifier confirmation", min_length=5, max_length=300)
     confirmation: str = Field(min_length=1, max_length=80)
+    confirmed: bool = False
 
 
 class SmsSettingsPayload(BaseModel):

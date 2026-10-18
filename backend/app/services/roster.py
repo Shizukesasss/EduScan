@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Person, RosterImportAudit, User
+from .enrollment import enrollment_error
 
 
 HEADER_ALIASES = {
@@ -23,10 +24,11 @@ HEADER_ALIASES = {
     "grade": {"grade", "grade level"},
     "section": {"section"},
     "assignment": {"assignment", "office", "department"},
-    "guardian_phone": {"guardian phone", "parent phone", "mobile number", "contact number"},
-    "enrollment_status": {"enrollment status", "learner status", "movement status"},
-    "enrollment_start_date": {"enrollment start", "enrollment start date", "transfer in date"},
-    "enrollment_end_date": {"enrollment end", "enrollment end date", "transfer out date"},
+    "guardian_phone": {"guardian phone", "parent phone", "mobile number", "contact number", "phone number"},
+    "enrollment_status": {"enrollment status", "learner status", "movement status", "employment status"},
+    "enrollment_note": {"enrollment note", "departure reason", "status note"},
+    "enrollment_start_date": {"enrollment start", "enrollment start date", "transfer in date", "appointment date", "service start date"},
+    "enrollment_end_date": {"enrollment end", "enrollment end date", "transfer out date", "last day enrolled", "last day on duty"},
     "transfer_school": {"transfer school", "previous school", "receiving school"},
 }
 
@@ -99,8 +101,10 @@ def parse_roster(data: bytes) -> tuple[list[dict], list[dict]]:
         if record["role"] not in {"Student", "Faculty", "Non-teaching Personnel"}: problems.append("invalid role")
         if record["role"] == "Student" and (not record.get("grade") or not record.get("section")):
             problems.append("student grade and section are required")
-        if status not in {"Regular", "Transferred In", "Transferred Out"}:
-            problems.append("enrollment status must be Regular, Transferred In, or Transferred Out")
+        lifecycle_error = enrollment_error(record["role"], status, record.get("enrollment_start_date"),
+                                           record.get("enrollment_end_date"), record.get("enrollment_note"))
+        if lifecycle_error:
+            problems.append(lifecycle_error)
         if record.get("enrollment_start_date") and record.get("enrollment_end_date") and record["enrollment_start_date"] > record["enrollment_end_date"]:
             problems.append("enrollment start date cannot be after enrollment end date")
         if problems:

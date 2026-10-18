@@ -7,6 +7,8 @@ import {
 import { api, auth } from '../../api/client';
 import { availableOptionId, isJuniorHighGrade, isSeniorHighGrade } from '../../services/academicContext';
 import { useToast } from '../../contexts/useToast';
+import BiometricConsent from '../../components/Scanner/BiometricConsent';
+import EnrollmentFields from '../../components/Scanner/EnrollmentFields';
 
 const tabs = [
   ['people', 'People & records'],
@@ -18,7 +20,7 @@ const tabs = [
 const emptyPerson = {
   external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Female', role: 'Student',
   grade: '', section: '', guardian_phone: '',
-  enrollment_status: 'Regular', enrollment_start_date: '', enrollment_end_date: '',
+  enrollment_status: 'Regular', enrollment_note: '', enrollment_start_date: '', enrollment_end_date: '',
   transfer_school: '', biometric_consent: false,
 };
 const emptyUser = { username: '', password: '', role: 'teacher', full_name: '', active: true };
@@ -176,12 +178,12 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
   const [form, setForm] = useState(emptyPerson);
   const [editing, setEditing] = useState(null);
   const [disposal, setDisposal] = useState(null);
-  const patch = (field, value) => setForm((c) => ({ ...c, [field]: value }));
+  const patch = (field, value) => setForm((c) => ({ ...c, [field]: value, ...(field === 'role' && value !== c.role ? { enrollment_status: value === 'Student' ? 'Regular' : 'Appointed', enrollment_end_date: '' } : {}) }));
   const edit  = (item) => { setEditing(item.id); setForm(Object.fromEntries(Object.keys(emptyPerson).map((k) => [k, item[k] ?? emptyPerson[k]]))); };
   const save  = async (event) => {
     event.preventDefault();
     try {
-      const payload = { ...form, lrn: form.lrn || null, middle_name: form.middle_name || null, name_extension: form.name_extension || null, grade: form.grade || null, section: form.section || null, guardian_phone: form.guardian_phone || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null };
+      const payload = { ...form, external_id: form.role === 'Student' && !editing ? form.lrn : form.external_id, lrn: form.role === 'Student' ? form.lrn || null : null, middle_name: form.middle_name || null, name_extension: form.name_extension || null, grade: form.grade || null, section: form.section || null, guardian_phone: form.guardian_phone || null, enrollment_note: form.enrollment_note || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null };
       if (editing) await api.patch(`/persons/${editing}`, payload); else await api.post('/persons', payload);
       success(editing ? 'School record updated.' : 'School record created.'); setEditing(null); setForm(emptyPerson); await reload();
     } catch (err) { fail(err); }
@@ -193,45 +195,59 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
         <div className="section-heading"><div><p className="eyebrow">Students, faculty, and personnel</p><h2>{editing ? 'Edit school record' : 'Add school record'}</h2></div><Users size={24} /></div>
         <form onSubmit={save}>
           <div className="form-grid three-columns">
-            <Field label="School / employee ID" value={form.external_id} onChange={(v) => patch('external_id', v)} required />
-            <Field label="LRN (students)" value={form.lrn} onChange={(v) => patch('lrn', v)} />
+            {form.role === 'Student'
+              ? <Field label="LRN" value={form.lrn} onChange={(v) => patch('lrn', v)} required />
+              : <Field label="Employee ID" value={form.external_id} onChange={(v) => patch('external_id', v)} required />}
             <Field label="Surname" value={form.surname} onChange={(v) => patch('surname', v)} required />
             <Field label="First name" value={form.first_name} onChange={(v) => patch('first_name', v)} required />
             <Field label="Middle name" value={form.middle_name} onChange={(v) => patch('middle_name', v)} />
             <Field label="Extension (e.g. Jr.)" value={form.name_extension} onChange={(v) => patch('name_extension', v)} />
             <SelectField label="Sex for SF2" value={form.sex} onChange={(v) => patch('sex', v)} options={['Female', 'Male']} />
             <SelectField label="Role" value={form.role} onChange={(v) => patch('role', v)} options={['Student', 'Faculty', 'Non-teaching Personnel']} />
-            <Field label="Guardian phone" value={form.guardian_phone} onChange={(v) => patch('guardian_phone', v)} />
+            <Field label={form.role === 'Student' ? 'Guardian phone' : 'Phone number'} value={form.guardian_phone} onChange={(v) => patch('guardian_phone', v)} />
             {form.role === 'Student' && (
               <>
                 <SelectField label="Grade level" value={form.grade} onChange={(v) => { patch('grade', v); patch('section', ''); }} options={['', ...orderedOptions(structure.grade_levels).map((g) => g.name)]} />
                 <SelectField label="Section" value={form.section} onChange={(v) => patch('section', v)} options={['', ...orderedOptions(structure.sections.filter(s => s.grade_level_id === structure.grade_levels.find(g => g.name === form.grade)?.id), (s) => s.name).map((s) => s.name)]} />
               </>
             )}
-            {form.role === 'Student' && <SelectField label="Enrollment / movement" value={form.enrollment_status} onChange={(v) => patch('enrollment_status', v)} options={['Regular', 'Transferred In', 'Transferred Out']} />}
-            {form.role === 'Student' && <Field label="Enrollment / transfer-in date" type="date" value={form.enrollment_start_date} onChange={(v) => patch('enrollment_start_date', v)} />}
-            {form.role === 'Student' && <Field label="Transfer-out date" type="date" value={form.enrollment_end_date} onChange={(v) => patch('enrollment_end_date', v)} />}
-            {form.role === 'Student' && form.enrollment_status !== 'Regular' && <Field label={form.enrollment_status === 'Transferred In' ? 'Previous school' : 'Receiving school'} value={form.transfer_school} onChange={(v) => patch('transfer_school', v)} />}
-            <label className="checkbox-field"><input type="checkbox" checked={form.biometric_consent} onChange={(e) => patch('biometric_consent', e.target.checked)} /><span>Authorized biometric enrollment consent is documented</span></label>
+            <EnrollmentFields form={form} onChange={patch} />
+            <BiometricConsent checked={form.biometric_consent} onChange={(value) => patch('biometric_consent', value)} />
           </div>
           <div className="modal-actions">{editing && <button type="button" className="btn-secondary" onClick={() => { setEditing(null); setForm(emptyPerson); }}>Cancel</button>}<button className="btn-primary"><Save size={16} /> {editing ? 'Save changes' : 'Create record'}</button></div>
         </form>
       </section>
       <section className="card-static">
         <h2>School records</h2>
-        <p className="section-copy">Student ID and LRN are unique. Deactivation preserves history, while full disposal removes linked records under a documented authority.</p>
-        <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>ID / LRN</th><th>Role / placement</th><th>Movement</th><th>Face samples</th><th>Status</th><th /></tr></thead><tbody>{people.map((item) => <tr key={item.id}><td><strong>{item.full_name}</strong>{item.possible_duplicate && <span className="table-subline duplicate-warning">Possible duplicate name—verify IDs</span>}</td><td>{item.external_id}<span className="table-subline">{item.lrn || 'No LRN'}</span></td><td>{item.role}<span className="table-subline">{item.grade ? `Grade ${item.grade} — ${item.section}` : '—'}</span></td><td>{item.role === 'Student' ? item.enrollment_status : '—'}{item.transfer_school && <span className="table-subline">{item.transfer_school}</span>}</td><td>{item.sample_count}</td><td><span className={`tag ${item.active ? 'tag-success' : 'tag-gray'}`}>{item.active ? 'Active' : 'Inactive'}</span></td><td><details className="action-menu table-action-menu"><summary><ChevronDown size={15} /> Manage</summary><div className="action-menu-panel"><button onClick={() => edit(item)}><Pencil size={14} /> Edit record</button><button onClick={() => setActive(item)}>{item.active ? 'Deactivate record' : 'Reactivate record'}</button><button className="danger-link" onClick={() => setDisposal(item)}><Trash2 size={14} /> Full disposal</button></div></details></td></tr>)}</tbody></table></div>
+        <p className="section-copy">Students use an LRN; teaching and non-teaching staff use an employee ID. Deactivation preserves history and blocks recognition. Full disposal permanently removes the person, face enrollment, and linked records.</p>
+        <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>ID / LRN</th><th>Role / placement</th><th>Movement</th><th>Status</th><th /></tr></thead><tbody>{people.map((item) => <tr key={item.id}><td><strong>{item.full_name}</strong>{item.possible_duplicate && <span className="table-subline duplicate-warning">Possible duplicate name—verify IDs</span>}</td><td>{item.role === 'Student' ? item.lrn || 'LRN not recorded' : item.external_id}<span className="table-subline">{item.role === 'Student' ? 'LRN' : 'Employee ID'}</span></td><td>{item.role}<span className="table-subline">{item.grade ? `Grade ${item.grade} — ${item.section}` : '—'}</span></td><td>{item.enrollment_status}{item.transfer_school && <span className="table-subline">{item.transfer_school}</span>}{item.enrollment_end_date && <span className="table-subline">Last day: {item.enrollment_end_date}</span>}{item.enrollment_note && <span className="table-subline">{item.enrollment_note}</span>}</td><td><span className={`tag ${item.active ? 'tag-success' : 'tag-gray'}`}>{item.active ? 'Active' : 'Inactive'}</span></td><td><details className="action-menu table-action-menu"><summary><ChevronDown size={15} /> Manage</summary><div className="action-menu-panel"><button onClick={() => edit(item)}><Pencil size={14} /> Edit record</button><button onClick={() => setActive(item)}>{item.active ? 'Deactivate record' : 'Reactivate record'}</button><button className="danger-link" onClick={() => setDisposal(item)}><Trash2 size={14} /> Full disposal</button></div></details></td></tr>)}</tbody></table></div>
       </section>
       <section className="card-static"><h2>Record-disposal audit</h2><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Completed</th><th>Anonymous reference</th><th>Authority</th><th>Reason</th><th>Removed</th><th>Actor</th></tr></thead><tbody>{disposals.length === 0 && <tr><td colSpan="6" className="empty-cell">No full record disposal has been performed.</td></tr>}{disposals.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.disposal_reference}</td><td>{item.authorization_reference}</td><td>{item.reason}</td><td>{Object.entries(item.removed_counts).map(([k, v]) => `${k}: ${v}`).join(', ')}</td><td>{item.actor_name}</td></tr>)}</tbody></table></div></section>
-      {disposal && <DisposalModal person={disposal} onClose={() => setDisposal(null)} onDone={async () => { setDisposal(null); success('The selected person and all linked school records were securely disposed.'); await reload(); }} fail={fail} />}
+      {disposal && <DisposalModal person={disposal} onClose={() => setDisposal(null)} onDone={async (result) => { setDisposal(null); if (result.file_cleanup_pending) fail(new Error('The record and recognition enrollment were removed, but some encrypted files could not be deleted. Contact the administrator to complete file cleanup.')); else success('The selected person, face enrollment, and linked school records were disposed.'); await reload(); }} fail={fail} />}
     </div>
   );
 }
 
 function DisposalModal({ person, onClose, onDone, fail }) {
-  const [reason, setReason] = useState(''); const [reference, setReference] = useState(''); const [confirmation, setConfirmation] = useState('');
-  const submit = async (event) => { event.preventDefault(); try { await api.delete(`/admin/persons/${person.id}/records`, { reason, authorization_reference: reference, confirmation }); await onDone(); } catch (err) { fail(err); } };
-  return <div className="modal-backdrop"><form className="modal-card" onSubmit={submit}><div className="modal-header"><div><p className="eyebrow">Irreversible authorized disposal</p><h2>Delete all records for {person.full_name}</h2></div><ShieldAlert color="#dc2626" /></div><div className="notice notice-danger">This removes the identity record plus linked face samples/model membership, gate events, corrections, grades, SMS, excuses, and intervention records. Export or back up first when the approved retention schedule requires it.</div><div className="form-grid"><Field label="Documented reason" value={reason} onChange={setReason} required /><Field label="Authorization / disposition reference" value={reference} onChange={setReference} required /><Field label={`Type the school ID ${person.external_id}`} value={confirmation} onChange={setConfirmation} required /></div><div className="modal-actions"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-danger"><Trash2 size={16} /> Permanently dispose records</button></div></form></div>;
+  const [confirmed, setConfirmed] = useState(false);
+  const [confirmation, setConfirmation] = useState('');
+  const [saving, setSaving] = useState(false);
+  const identifier = person.role === 'Student' ? person.lrn || person.external_id : person.external_id;
+  const identifierLabel = person.role === 'Student' && person.lrn ? 'LRN' : 'school / employee ID';
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!confirmed || confirmation !== identifier || saving) return;
+    setSaving(true);
+    try { const result = await api.delete(`/admin/persons/${person.id}/records`, { confirmed, confirmation }); await onDone(result); }
+    catch (err) { fail(err); setSaving(false); }
+  };
+  return <div className="modal-backdrop"><form className="modal-card" role="dialog" aria-modal="true" aria-labelledby="disposal-title" onSubmit={submit}>
+    <div className="modal-header"><div><p className="eyebrow">Permanent disposal</p><h2 id="disposal-title">Delete all records for {person.full_name}</h2></div><ShieldAlert color="#dc2626" /></div>
+    <div className="notice notice-danger">This permanently removes this person's school record, saved face samples and model membership, attendance, grades, SMS, and other linked records. This cannot be undone here. Deactivate the record instead if the person has left and their history must be kept.</div>
+    <label className="checkbox-field"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} required /><span>I am authorized to permanently dispose of these records and understand that the face enrollment and linked records will be deleted.</span></label>
+    <Field label={`Type the ${identifierLabel}: ${identifier}`} value={confirmation} onChange={setConfirmation} required />
+    <div className="modal-actions"><button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>Cancel</button><button className="btn-danger" disabled={saving || !confirmed || confirmation !== identifier}><Trash2 size={16} /> {saving ? 'Disposing records...' : 'Permanently dispose records'}</button></div>
+  </form></div>;
 }
 
 // ─── Account Manager ────────────────────────────────────────────────────────

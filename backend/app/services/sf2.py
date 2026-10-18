@@ -20,6 +20,7 @@ from ..config import EXPORT_DIR, TEMPLATE_DIR, settings
 from ..models import Person
 from .attendance import active_people, is_instructional_day, raw_row
 from .export_files import new_report_path
+from .enrollment import enrollment_remark
 
 
 DEFAULT_TEMPLATE = TEMPLATE_DIR / "School Form 2 (SF2) Daily Attendance Report of Learners.xlsx"
@@ -208,7 +209,7 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
         raise HTTPException(status_code=422, detail="This month has more than 25 weekdays; the official SF2 template cannot hold every day")
     first_day = date(year, month, 1)
     last_day = date(year, month, calendar.monthrange(year, month)[1])
-    students = [person for person in active_people(db, grade, section, students_only=True)
+    students = [person for person in active_people(db, grade, section, students_only=True, include_departed=True)
                 if (not person.enrollment_start_date or person.enrollment_start_date <= last_day)
                 and (not person.enrollment_end_date or person.enrollment_end_date >= first_day)]
     males = sorted((person for person in students if person.sex == "Male"), key=lambda person: person.full_name.casefold())
@@ -251,14 +252,9 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
     for group, row_numbers in ((males, MALE_ROWS), (females, FEMALE_ROWS)):
         for person, row_number in zip(group, row_numbers):
             _set_text(_cell(worksheet, row_number, 2), person.full_name.upper())
-            if person.enrollment_status == "Transferred In":
-                detail = person.transfer_school or "previous school not recorded"
-                effective = person.enrollment_start_date.isoformat() if person.enrollment_start_date else "date not recorded"
-                _set_text(_cell(worksheet, row_number, 31), f"TRANSFERRED IN: {detail} ({effective})")
-            elif person.enrollment_status == "Transferred Out":
-                detail = person.transfer_school or "receiving school not recorded"
-                effective = person.enrollment_end_date.isoformat() if person.enrollment_end_date else "date not recorded"
-                _set_text(_cell(worksheet, row_number, 31), f"TRANSFERRED OUT: {detail} ({effective})")
+            remark = enrollment_remark(person, last_day)
+            if remark:
+                _set_text(_cell(worksheet, row_number, 31), remark)
             absent_count = 0
             late_count = 0
             for index, day in enumerate(days):
@@ -312,7 +308,7 @@ def generate_temporary_log(db: Session, day: date, grade: str | None = None,
     sheet.append(["Date", "Student / Employee ID", "LRN", "Name", "Sex", "Role", "Grade", "Section",
                   "Enrollment Status", "Enrollment Start", "Enrollment End", "Transfer School",
                   "Time In", "Time Out", "Status", "Source"])
-    people = active_people(db, grade, section, students_only=bool(grade or section))
+    people = active_people(db, grade, section, students_only=bool(grade or section), include_departed=True)
     for row in [raw_row(db, person, day) for person in people]:
         sheet.append([day, row["external_id"], row["lrn"], row["full_name"], row["sex"], row["role"],
                       row["grade"], row["section"], row["enrollment_status"], row["enrollment_start_date"],

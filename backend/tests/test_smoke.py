@@ -281,6 +281,7 @@ class EduScanSmokeTest(unittest.TestCase):
             "0016_grade_adjustment_notifications",
             "0017_subject_teaching_assignments_and_electives",
             "0018_grade_criteria_adjustment_requests",
+            "0019_enrollment_departure_notes",
         ])
         inspector = inspect(legacy_engine)
         self.assertTrue(inspector.has_table("attendance_reset_audits"))
@@ -398,7 +399,7 @@ class EduScanSmokeTest(unittest.TestCase):
 
         disposed = self.client.request("DELETE", f"/api/admin/persons/{person_id}/records", headers=self.headers, json={
             "reason": "Approved end-of-retention disposal request", "authorization_reference": "AUTH-DISPOSE-001",
-            "confirmation": "EXTENDED-001",
+            "confirmation": "999999999981", "confirmed": True,
         })
         self.assertEqual(disposed.status_code, 200, disposed.text)
         with SessionLocal() as db:
@@ -486,13 +487,13 @@ class EduScanSmokeTest(unittest.TestCase):
         for item in people:
             disposed = self.client.request("DELETE", f"/api/admin/persons/{item['id']}/records", headers=self.headers,
                                            json={"reason": "Test cleanup after multi-face verification",
-                                                 "authorization_reference": "TEST-CLEANUP-001", "confirmation": item["external_id"]})
+                                                 "authorization_reference": "TEST-CLEANUP-001", "confirmation": item["external_id"], "confirmed": True})
             self.assertEqual(disposed.status_code, 200, disposed.text)
         for external_id in ("ROSTER-001", "ROSTER-002"):
             item = next(row for row in self.client.get("/api/admin/persons", headers=self.headers).json() if row["external_id"] == external_id)
             self.client.request("DELETE", f"/api/admin/persons/{item['id']}/records", headers=self.headers,
                                 json={"reason": "Test cleanup after roster verification",
-                                      "authorization_reference": "TEST-CLEANUP-002", "confirmation": external_id})
+                                      "authorization_reference": "TEST-CLEANUP-002", "confirmation": external_id, "confirmed": True})
 
     def test_reporting_scope_transfer_deduplication_and_clean_slate(self) -> None:
         from openpyxl import load_workbook

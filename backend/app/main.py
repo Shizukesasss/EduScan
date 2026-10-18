@@ -146,7 +146,7 @@ def person_json(person: Person, db: Session, include_private: bool = True) -> di
         "sex": person.sex, "role": person.role, "grade": person.grade, "section": person.section,
         "assignment": person.assignment,
         "guardian_phone": person.guardian_phone if include_private else None,
-        "enrollment_status": person.enrollment_status, "enrollment_start_date": person.enrollment_start_date,
+        "enrollment_status": person.enrollment_status, "enrollment_note": person.enrollment_note, "enrollment_start_date": person.enrollment_start_date,
         "enrollment_end_date": person.enrollment_end_date, "transfer_school": person.transfer_school,
         "biometric_consent": person.biometric_consent, "active": person.active,
         "sample_count": count, "enrolled": count >= settings.min_samples,
@@ -655,6 +655,8 @@ def set_person_active(person_id: int, active: bool = Form(...), db: Session = De
 @app.delete("/api/admin/persons/{person_id}/records")
 def dispose_person(person_id: int, payload: RecordDisposalPayload, db: Session = Depends(get_db),
                    user: User = Depends(require_roles("admin"))) -> dict:
+    if not payload.confirmed:
+        raise HTTPException(status_code=422, detail="Confirm that you understand full disposal permanently removes all linked records")
     person = db.get(Person, person_id)
     if not person:
         raise HTTPException(status_code=404, detail="Person was not found")

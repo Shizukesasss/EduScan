@@ -329,7 +329,7 @@ class AttendanceSyncTest(unittest.TestCase):
         self.assertEqual(student_rows[self.day]["status"], "Late")
         self.assertEqual(student_rows[reset_date]["source"], "New gate")
         self.assertEqual(student_rows[self.day + timedelta(days=2)]["status"], "Present")
-        self.assertEqual(student_rows[ends]["status"], "Transferred Out")
+        self.assertEqual(student_rows[ends]["status"], "Enrollment Ended")
 
     def test_range_filters_and_identity_deduplication_are_preserved(self):
         duplicate = Person(external_id="student", full_name="ZZ Duplicate identity", role="Student", sex="Male", grade="10", section="Rizal")

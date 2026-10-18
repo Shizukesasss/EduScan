@@ -5,11 +5,12 @@ import uuid
 from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, or_
 from sqlalchemy.orm import Session
 
 from ..models import AttendanceCorrection, AttendanceEvent, AttendanceResetAudit, CalendarException, ClassSchedule, ExcusedAbsence, Person, PersonnelSchedule, User
 from .settings_store import get_json
+from .enrollment import enrollment_block, DEPARTURE_STATUSES
 from .sms import queue_notice
 
 
@@ -122,10 +123,9 @@ def _attendance_row(person: Person, day: date, events: list[AttendanceEvent],
     absence_event = next((event for event in events if event.status == "Absent"), None)
     status = "No scan"
     source = f"Clean slate started by {reset.actor_name}" if reset else "—"
-    if person.enrollment_start_date and day < person.enrollment_start_date:
-        status, source = "Not Enrolled", f"Enrollment starts {person.enrollment_start_date.isoformat()}"
-    elif person.enrollment_end_date and day > person.enrollment_end_date:
-        status, source = "Transferred Out", f"Enrollment ended {person.enrollment_end_date.isoformat()}"
+    blocked = enrollment_block(person, day)
+    if blocked:
+        status, source = blocked, f"Enrollment / service period: {person.enrollment_start_date or 'start not recorded'} to {person.enrollment_end_date or 'end not recorded'}"
     elif time_in_event:
         last_gate_event = next((event for event in reversed(events) if event.direction in {"Time In", "Time Out"}), time_in_event)
         status = time_in_event.status
@@ -149,6 +149,7 @@ def _attendance_row(person: Person, day: date, events: list[AttendanceEvent],
         "section": person.section,
         "assignment": person.assignment,
         "enrollment_status": person.enrollment_status,
+        "enrollment_note": person.enrollment_note,
         "enrollment_start_date": person.enrollment_start_date,
         "enrollment_end_date": person.enrollment_end_date,
         "transfer_school": person.transfer_school,
@@ -159,7 +160,7 @@ def _attendance_row(person: Person, day: date, events: list[AttendanceEvent],
         "correction_reason": None,
     }
     # A cleared accidental scan must not override a later genuine gate visit.
-    if correction and (correction.status != "No scan" or not events):
+    if correction and not blocked and (correction.status != "No scan" or not events):
         row.update(time_in=correction.time_in, time_out=correction.time_out, status=correction.status,
                    source=f"Corrected by {correction.actor_name}", correction_reason=correction.reason)
         if correction.status == "Time Out":
@@ -173,8 +174,11 @@ def _identity_key(person: Person) -> str:
 
 
 def active_people(db: Session, grade: str | None = None, section: str | None = None,
-                  students_only: bool = False) -> list[Person]:
-    query = select(Person).where(Person.active.is_(True))
+                  students_only: bool = False, include_departed: bool = False) -> list[Person]:
+    eligible = Person.active.is_(True)
+    if include_departed:
+        eligible = or_(eligible, Person.enrollment_status.in_(DEPARTURE_STATUSES), Person.enrollment_end_date.is_not(None))
+    query = select(Person).where(eligible)
     if students_only:
         query = query.where(Person.role == "Student")
     if grade:
@@ -195,7 +199,7 @@ def active_people(db: Session, grade: str | None = None, section: str | None = N
 
 def list_rows(db: Session, day: date, grade: str | None = None, section: str | None = None,
               students_only: bool = False) -> list[dict]:
-    people = active_people(db, grade, section, students_only)
+    people = active_people(db, grade, section, students_only, include_departed=True)
     return rows_for_people(db, people, day)
 
 
@@ -226,6 +230,9 @@ def record_gate_match(db: Session, person: Person, distance: float, now: datetim
                       *, identity_matcher: str = 'LBPH') -> dict:
     now = now or local_now()
     day, clock = now.date(), now.timetz().replace(tzinfo=None)
+    blocked = enrollment_block(person, day)
+    if not person.active or blocked:
+        return {"recorded": False, "status": blocked or "Inactive", "message": f"No attendance recorded: {blocked or 'Inactive school record'}"}
     config = attendance_config(db)
     reset = latest_day_reset(db, day)
     day_events_query = attendance_event_query().where(
@@ -333,6 +340,8 @@ def save_correction(db: Session, payload, actor: User) -> AttendanceCorrection:
     person = db.get(Person, payload.person_id)
     if not person:
         raise HTTPException(status_code=404, detail="Person was not found")
+    if enrollment_block(person, payload.attendance_date) and payload.status != "No scan":
+        raise HTTPException(status_code=422, detail="Attendance must be within the enrolled / duty period; correct the school-record dates first")
     if payload.status == "No scan" and (payload.time_in or payload.time_out):
         raise HTTPException(status_code=422, detail="A No scan correction must clear both attendance times")
     reason = payload.reason.strip()

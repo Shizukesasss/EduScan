@@ -519,7 +519,7 @@ def attendance_range_rows(db: Session, starts_on: date, ends_on: date, role: str
                           person_id: int | None = None) -> list[dict]:
     if ends_on < starts_on or (ends_on - starts_on).days > 366:
         raise HTTPException(status_code=422, detail="Attendance report range must be between 1 and 367 days")
-    people = active_people(db, grade, section, students_only=bool(grade or section))
+    people = active_people(db, grade, section, students_only=bool(grade or section), include_departed=True)
     if role:
         people = [item for item in people if item.role == role]
     if person_id:

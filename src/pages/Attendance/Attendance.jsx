@@ -5,7 +5,7 @@ import { useToast } from '../../contexts/useToast';
 
 const statusColor = {
   Present: 'var(--success)', Late: '#b45309', Absent: 'var(--danger)', 'No scan': 'var(--text-muted)',
-  'Time Out': 'var(--success)', Excused: '#2563eb', 'Not Enrolled': 'var(--text-muted)', 'Transferred Out': '#7c3aed',
+  'Time Out': 'var(--success)', Excused: '#2563eb', 'Not Enrolled': 'var(--text-muted)', 'Transferred Out': '#7c3aed', 'Dropped Out': '#7c3aed', Withdrawn: '#7c3aed', Graduated: '#7c3aed', Resigned: '#7c3aed', Retired: '#7c3aed', 'Contract Ended': '#7c3aed', Other: '#7c3aed', 'Enrollment Ended': 'var(--text-muted)', 'Service Ended': 'var(--text-muted)', 'Not Started': 'var(--text-muted)',
 };
 
 export default function Attendance() {

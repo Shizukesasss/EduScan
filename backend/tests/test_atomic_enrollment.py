@@ -15,6 +15,70 @@ from app.models import AttendanceEvent, BiometricAuditEvent, GradeLevel, Person,
 
 
 class AtomicEnrollmentTest(unittest.TestCase):
+    def test_student_can_register_with_only_lrn_and_keep_legacy_id_on_edit(self):
+        payload = {**self.payload, 'lrn': '123456789012'}
+        payload.pop('external_id')
+        response = self.client.post('/api/persons', json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['external_id'], payload['lrn'])
+        self.assertEqual(response.json()['lrn'], payload['lrn'])
+        self.assertEqual(self.client.post('/api/persons', json=payload).status_code, 409)
+        update = {**self.payload, 'external_id': self.fixture.first.external_id, 'lrn': '234567890123'}
+        response = self.client.patch(f'/api/persons/{self.fixture.first.id}', json=update)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['external_id'], self.fixture.first.external_id)
+
+    def test_staff_requires_employee_id_and_preserves_phone(self):
+        for role in ('Faculty', 'Non-teaching Personnel'):
+            payload = {**self.payload, 'role': role, 'external_id': f'EMP-{role}', 'guardian_phone': '+639123456789'}
+            response = self.client.post('/api/persons', json=payload)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()['guardian_phone'], payload['guardian_phone'])
+            payload.pop('external_id')
+            self.assertEqual(self.client.post('/api/persons', json=payload).status_code, 422)
+
+    def _dispose_role(self, role):
+        self.fixture.first.role = role
+        self.fixture.first.lrn = '123456789012' if role == 'Student' else None
+        self.db.commit()
+        self.fixture.enroll(self.fixture.first, helpers.face_set())
+        self.fixture.enroll(self.fixture.second, helpers.face_set(horizontal=True))
+        samples, _ = self.service._identity_gallery(self.db)
+        deleted_id = self.fixture.first.id
+        deleted_paths = [Path(sample.encrypted_path) for sample in samples if sample.person_id == deleted_id]
+        other_paths = [Path(sample.encrypted_path) for sample in samples if sample.person_id != deleted_id]
+        identifier = self.fixture.first.lrn or self.fixture.first.external_id
+        with patch('app.services.disposal.biometric_service', self.service):
+            response = self.client.request('DELETE', f'/api/admin/persons/{deleted_id}/records',
+                                           json={'confirmed': True, 'confirmation': identifier})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['removed_counts']['face_samples'], 15)
+        self.assertEqual(response.json()['file_cleanup_pending'], 0)
+        self.assertIsNone(self.db.get(Person, deleted_id))
+        self.assertTrue(all(not path.exists() for path in deleted_paths))
+        self.assertTrue(all(path.exists() for path in other_paths))
+        self.assertFalse(any(key[1] == deleted_id for key in self.service._identity_cache))
+        remaining, _ = self.service._identity_gallery(self.db)
+        self.assertEqual({sample.person_id for sample in remaining}, {self.fixture.second.id})
+
+    def test_dispose_student_removes_face_files_and_identity(self):
+        self._dispose_role('Student')
+
+    def test_dispose_teacher_removes_face_files_and_identity(self):
+        self._dispose_role('Faculty')
+
+    def test_dispose_non_teaching_staff_removes_face_files_and_identity(self):
+        self._dispose_role('Non-teaching Personnel')
+
+    def test_disposal_requires_checkbox_identifier_and_admin(self):
+        url = f'/api/admin/persons/{self.fixture.first.id}/records'
+        for payload in ({'confirmation': self.fixture.first.external_id}, {'confirmed': False, 'confirmation': self.fixture.first.external_id},
+                        {'confirmed': True, 'confirmation': 'WRONG-ID'}):
+            self.assertEqual(self.client.request('DELETE', url, json=payload).status_code, 422)
+            self.assertIsNotNone(self.db.get(Person, self.fixture.first.id))
+        self.fixture.admin.role = 'teacher'
+        self.assertEqual(self.client.request('DELETE', url, json={'confirmed': True, 'confirmation': self.fixture.first.external_id}).status_code, 403)
+
     def setUp(self):
         self.fixture = helpers.DuplicateEnrollmentTest()
         self.fixture.setUp()

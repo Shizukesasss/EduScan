@@ -89,7 +89,11 @@ export default function BiometricEnrollmentManager({ onModelChanged }) {
     {creating && <StudentRegistrationModal onClose={() => setCreating(false)} onSaved={(result) => changed(result.assisted_registration ? 'School record saved for staff-assisted attendance. No face samples were captured.' : 'Facial enrollment created and recorded in the audit log.')} />}
     {editing && <StudentRegistrationModal person={editing} onClose={() => setEditing(null)} onSaved={() => changed('Facial enrollment saved for the existing identity, LBPH trained, and the change audited.')} />}
     {viewing && <EnrollmentDetails enrollment={viewing} onClose={() => setViewing(null)} />}
-    {deleting && <DeleteEnrollmentModal enrollment={deleting} onClose={() => setDeleting(null)} onDeleted={(result) => changed(`${result.removed_samples} encrypted samples and ${result.removed_model_records} obsolete model record(s) securely deleted; the non-biometric audit history was retained.`)} />}
+    {deleting && <DeleteEnrollmentModal enrollment={deleting} onClose={() => setDeleting(null)} onDeleted={async (result) => {
+      if (result.file_cleanup_pending) {
+        setDeleting(null); showError('Recognition enrollment was removed, but encrypted file cleanup is incomplete. Contact the administrator.'); await load(); onModelChanged?.();
+      } else await changed(`${result.removed_samples} encrypted samples and ${result.removed_model_records} obsolete model record(s) securely deleted; the non-biometric audit history was retained.`);
+    }} />}
   </div>;
 }
 

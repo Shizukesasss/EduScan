@@ -49,6 +49,7 @@ class Person(Base):
         String(30), nullable=True)
     enrollment_status: Mapped[str] = mapped_column(
         String(30), default="Regular")
+    enrollment_note: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     enrollment_start_date: Mapped[date |
                                   None] = mapped_column(Date, nullable=True)
     enrollment_end_date: Mapped[date |

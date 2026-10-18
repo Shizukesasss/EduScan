@@ -1,3 +1,5 @@
+import BiometricConsent from './BiometricConsent';
+import EnrollmentFields from './EnrollmentFields';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Camera, ScanFace, CheckCircle, Database, AlertTriangle } from 'lucide-react';
 import { api, captureVideoFrame, enrollmentCapture } from '../../api/client';
@@ -25,7 +27,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
   const [academicLoading, setAcademicLoading] = useState(!isExistingPerson);
   const [academicError, setAcademicError] = useState('');
   const [gradeLevelId, setGradeLevelId] = useState('');
-  const [form, setForm] = useState({ external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Male', role: 'Student', grade: '', section: '', assignment: '', guardian_phone: '', biometric_consent: false });
+  const [form, setForm] = useState({ external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Male', role: 'Student', grade: '', section: '', assignment: '', guardian_phone: '', biometric_consent: false, enrollment_status: 'Regular', enrollment_note: '', enrollment_start_date: '', enrollment_end_date: '', transfer_school: '' });
   const [changeReason, setChangeReason] = useState('');
 
   useEffect(() => () => {
@@ -54,7 +56,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
     .sort((a, b) => a.name.localeCompare(b.name)), [academicStructure.sections, gradeLevelId]);
   const missingStudentPlacement = !isExistingPerson && form.role === 'Student'
     && (!form.grade || !form.section || !availableSections.some((section) => section.name === form.section));
-  const patch = (field, value) => setForm((current) => ({ ...current, [field]: value }));
+  const patch = (field, value) => setForm((current) => ({ ...current, [field]: value, ...(field === 'role' && value !== current.role ? { enrollment_status: value === 'Student' ? 'Regular' : 'Appointed', enrollment_end_date: '' } : {}) }));
 
   const startCamera = async () => {
     const generation = cameraGeneration.current;
@@ -88,13 +90,15 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
 
   const saveAndTrain = async () => {
     if (!assistedRegistration && !(isExistingPerson ? person.biometric_consent : form.biometric_consent)) return showError('Confirm the documented consent/authorization before biometric enrollment.');
+    if (!isExistingPerson && form.role === 'Student' && !form.lrn.trim()) return showError('Enter the student LRN.');
+    if (!isExistingPerson && form.role !== 'Student' && !form.external_id.trim()) return showError('Enter the employee ID.');
     if (missingStudentPlacement) return showError('Choose an active grade and section from the school records before enrolling this student.');
     if (isReplacement && changeReason.trim().length < 8) return showError('Enter a specific re-enrollment reason of at least 8 characters.');
     if (!assistedRegistration && frames.length < targetFrames) return showError(`Capture all ${targetFrames} camera frames first.`);
     setSaving(true);
     setEnrollmentError(null);
     try {
-      const payload = { ...form, lrn: form.lrn || null, guardian_phone: form.guardian_phone || null, grade: form.role === 'Student' ? form.grade : null, section: form.role === 'Student' ? form.section : null, assignment: form.role === 'Student' ? null : form.assignment || null };
+      const payload = { ...form, external_id: form.role === 'Student' ? form.lrn : form.external_id, lrn: form.role === 'Student' ? form.lrn || null : null, guardian_phone: form.guardian_phone || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null, enrollment_note: form.enrollment_note || null, grade: form.role === 'Student' ? form.grade : null, section: form.role === 'Student' ? form.section : null, assignment: form.role === 'Student' ? null : form.assignment || null };
       if (assistedRegistration) {
         const id = personId || (await api.post('/persons', payload)).id;
         setPersonId(id);
@@ -144,8 +148,9 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
           <div className="notice notice-warning"><AlertTriangle size={18} /><span>{isReplacement ? 'The current encrypted samples will be securely replaced after the new dataset passes quality checks. The audit history remains.' : 'This face enrollment will use the existing school record. Capture this person’s own face after confirming their documented consent.'}</span></div>
           {isReplacement && <label><span className="field-label">Required re-enrollment reason</span><textarea className="text-area" placeholder="Example: Appearance changed and recognition accuracy was verified as poor" value={changeReason} onChange={(event) => setChangeReason(event.target.value)} /></label>}
         </div> : <div className="form-grid two-columns enrollment-fields">
-          <label><span className="field-label">School ID / employee ID</span><input className="input-field" value={form.external_id} onChange={(e) => patch('external_id', e.target.value)} required /></label>
-          <label><span className="field-label">LRN (students)</span><input className="input-field" value={form.lrn} onChange={(e) => patch('lrn', e.target.value)} /></label>
+          {form.role === 'Student'
+            ? <label><span className="field-label">LRN</span><input className="input-field" value={form.lrn} onChange={(e) => patch('lrn', e.target.value)} required /></label>
+            : <label><span className="field-label">Employee ID</span><input className="input-field" value={form.external_id} onChange={(e) => patch('external_id', e.target.value)} required /></label>}
           <label><span className="field-label">Last name</span><input className="input-field" value={form.surname} onChange={(e) => patch('surname', e.target.value)} required /></label>
           <label><span className="field-label">First name</span><input className="input-field" value={form.first_name} onChange={(e) => patch('first_name', e.target.value)} required /></label>
           <label><span className="field-label">Middle name</span><input className="input-field" value={form.middle_name} onChange={(e) => patch('middle_name', e.target.value)} /></label>
@@ -162,8 +167,9 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
             {academicError && <div className="notice notice-danger full-field" role="alert"><AlertTriangle size={18} /><span>Could not load grade and section records: {academicError}</span></div>}
             {!academicLoading && !academicError && sortedGrades.length === 0 && <div className="notice notice-warning full-field" role="status">Add an active grade level and section in Administration before enrolling a student.</div>}
           </>
-            : <label className="full-field"><span className="field-label">Office / assignment</span><input className="input-field" value={form.assignment} onChange={(e) => patch('assignment', e.target.value)} /></label>}
-          <label className="checkbox-field full-field"><input type="checkbox" checked={form.biometric_consent} onChange={(e) => patch('biometric_consent', e.target.checked)} /><span>I confirm the school has documented the applicable consent/authorization and provided the privacy notice for this person.</span></label>
+            : <><label className="full-field"><span className="field-label">Office / assignment</span><input className="input-field" value={form.assignment} onChange={(e) => patch('assignment', e.target.value)} /></label><label className="full-field"><span className="field-label">Phone number</span><input className="input-field" placeholder="+639XXXXXXXXX" value={form.guardian_phone} onChange={(e) => patch('guardian_phone', e.target.value)} /></label></>}
+          <EnrollmentFields form={form} onChange={patch} />
+          <BiometricConsent checked={form.biometric_consent} onChange={(value) => patch('biometric_consent', value)} />
         </div>}
         <div className="enrollment-camera">
           {assistedRegistration ? <div className="notice notice-blue"><div><strong>Camera-free registration</strong><p>For anyone who cannot complete face capture or blinking, including people with facial differences. Save their school record here, then use Attendance → Assist to verify their school ID or roster and record an attended visit. No face samples, medical details, or attendance are saved by this option.</p></div></div> : <>

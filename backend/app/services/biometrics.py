@@ -449,7 +449,7 @@ class BiometricService:
         if not samples:
             raise HTTPException(status_code=404, detail="This person does not have a facial enrollment")
         before = self.enrollment_snapshot(db, person)
-        old_paths = [Path(sample.encrypted_path) for sample in samples]
+        old_paths = [self._sample_path(sample) for sample in samples]
         obsolete_model_paths: list[Path] = []
         model = None
         try:
@@ -464,8 +464,9 @@ class BiometricService:
             self._audit(db, person, actor, "deleted", reason, before, after,
                         model["version"] if model else None)
             obsolete_model_paths = self._stage_inactive_model_purge(db)
-            yield {"deleted": True, "removed_samples": before["sample_count"],
-                   "removed_model_records": len(obsolete_model_paths), "enrollment": after, "model": model}
+            result = {"deleted": True, "removed_samples": before["sample_count"],
+                      "removed_model_records": len(obsolete_model_paths), "enrollment": after, "model": model}
+            yield result
         except Exception:
             db.rollback()
             if model:
@@ -475,15 +476,23 @@ class BiometricService:
                 self._model_path = None
             raise
         self._unlink_files(old_paths + obsolete_model_paths)
+        with self._identity_lock:
+            self._identity_cache = {key: feature for key, feature in self._identity_cache.items() if key[1] != person.id}
+        result["file_cleanup_pending"] = sum(path.exists() for path in old_paths + obsolete_model_paths)
         try:
             (BIOMETRIC_DIR / f"person_{person.id}").rmdir()
         except OSError:
             pass
 
-    def _load_sample_image(self, sample: BiometricSample) -> np.ndarray:
+    @staticmethod
+    def _sample_path(sample: BiometricSample) -> Path:
         path = Path(sample.encrypted_path)
         if not path.is_file():
             path = BIOMETRIC_DIR / f"person_{sample.person_id}" / PureWindowsPath(sample.encrypted_path).name
+        return path
+
+    def _load_sample_image(self, sample: BiometricSample) -> np.ndarray:
+        path = self._sample_path(sample)
         encrypted = path.read_bytes()
         raw = self.fernet.decrypt(encrypted)
         if hashlib.sha256(raw).hexdigest() != sample.sha256:

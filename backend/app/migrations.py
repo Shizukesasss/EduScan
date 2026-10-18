@@ -29,6 +29,7 @@ MIGRATIONS = (
     ("0016_grade_adjustment_notifications", "Track when teachers have seen adjustment decisions"),
     ("0017_subject_teaching_assignments_and_electives", "Separate advisers from subject teachers and record elective tracks"),
     ("0018_grade_criteria_adjustment_requests", "Allow teachers to request audited grading-weight changes after finalization"),
+    ("0019_enrollment_departure_notes", "Add optional lifecycle notes without changing existing records"),
 )
 
 
@@ -61,7 +62,9 @@ def run_migrations(engine: Engine) -> list[str]:
         for version, description in MIGRATIONS:
             if version in applied:
                 continue
-            if version == "0001_initial_versioned_schema":
+            if version == "0019_enrollment_departure_notes":
+                _add_column_if_missing(connection, "persons", "enrollment_note", "VARCHAR(1000) NULL")
+            elif version == "0001_initial_versioned_schema":
                 Base.metadata.create_all(bind=connection)
             elif version in {"0002_attendance_reporting_controls", "0003_attendance_reporting_schema_repair"}:
                 Base.metadata.create_all(bind=connection)
