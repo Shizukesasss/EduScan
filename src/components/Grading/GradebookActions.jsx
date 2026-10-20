@@ -16,6 +16,7 @@ export default function GradebookActions({
   adjustmentCount = 0,
   onToggleValidation,
   onExportXlsx,
+  onExportAllTerms,
   onPrintReport,
   disabled = false,
   onValidateFinalize,
@@ -23,6 +24,7 @@ export default function GradebookActions({
   const userRole = auth.role();
   const canEdit = userRole === 'teacher';
   const isRecordsOfficer = userRole === 'records_officer';
+  const canReopen = isRecordsOfficer;
 
   const status = gradebook?.status || 'Draft';
   const isDraft = status === 'Draft';
@@ -125,7 +127,7 @@ export default function GradebookActions({
             </button>
           )}
 
-          {isRecordsOfficer && (isSubmitted || isFinalized || isLocked) && (
+          {canReopen && (isSubmitted || isFinalized || isLocked) && (
             <button
               type="button"
               className="btn btn-warning"
@@ -133,7 +135,7 @@ export default function GradebookActions({
               disabled={disabled}
               title="Reopen gradebook with mandatory justification"
             >
-              <span>Reopen Gradebook</span>
+              <span>RE-OPEN GRADEBOOK</span>
             </button>
           )}
 
@@ -155,17 +157,26 @@ export default function GradebookActions({
           <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onToggleValidation} title="Run pre-flight validation checklist">
             <span>Validation</span>
           </button>
-          <button 
+          {userRole !== 'admin' && <button
             type="button" 
             className="btn btn-secondary" 
-            onClick={onExportXlsx} 
+            onClick={() => onExportXlsx?.()}
             disabled={disabled || isSaving || (!isFinalized && !isLocked)}
             title={(!isFinalized && !isLocked) ? "Gradebook must be Finalized before exporting" : "Download Excel spreadsheet (XLSX)"}
           >
             <span>Export XLSX</span>
-          </button>
+          </button>}
+          {isRecordsOfficer && <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onExportAllTerms}
+            disabled={disabled || isSaving || (!isFinalized && !isLocked)}
+            title="Export Terms 1, 2, and 3 in one workbook. All three must be complete and finalized or locked."
+          >
+            <span>Export All 3 Terms XLSX</span>
+          </button>}
 
-          {!canEdit && <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onPrintReport} title="Open printable class record">Print</button>}
+          {!canEdit && userRole !== 'admin' && <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onPrintReport} title="Open printable class record">Print</button>}
           <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onOpenAudit} title="View full audit log of all changes">
             <span>Audit Log</span>
           </button>

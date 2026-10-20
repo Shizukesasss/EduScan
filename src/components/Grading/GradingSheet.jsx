@@ -263,9 +263,9 @@ export default function GradingSheet({
               <th>GRADE &amp; SECTION:</th>
               <td>
                 <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                  {selectors.grade || `Grade ${gradebook?.grade_name}`}
-                  <span>-</span>
-                  {selectors.section || gradebook?.section_name}
+                  {selectors.grade || (gradebook?.grade_name ? `Grade ${gradebook.grade_name}` : '')}
+                  {(selectors.grade || gradebook?.grade_name) && (selectors.section || gradebook?.section_name) ? <span>-</span> : null}
+                  {selectors.section || gradebook?.section_name || (!(selectors.grade || gradebook?.grade_name) ? '-' : '')}
                 </div>
               </td>
               <th>TEACHER:</th>
@@ -492,7 +492,7 @@ export default function GradingSheet({
                                       className={`deped-score-input${hasError ? ' deped-input-error' : ''}`}
                                       disabled={disabled}
                                       value={currentVal}
-                                      placeholder=""
+                                      placeholder="Score"
                                       onChange={e => onScoreChange?.(student.person_id, item.id, e.target.value)}
                                       aria-label={`${student.full_name} — ${item.label}`}
                                       onContextMenu={event => openScoreStatus(event, student, item, currentVal, currentStatus)}
@@ -561,7 +561,7 @@ export default function GradingSheet({
             <label><span className="field-label">Status</span><select autoFocus className="input-field" value={scoreCell.status} disabled={disabled} onChange={event => setScoreCell({ ...scoreCell, status: event.target.value })}>
               {['Scored', 'Missing', 'Absent', 'Excused', 'Incomplete', 'Not Applicable'].map(status => <option key={status}>{status}</option>)}
             </select></label>
-            {scoreCell.status === 'Scored' && <label><span className="field-label">Score (0–{scoreCell.item.max_score})</span><input className="input-field" type="number" step="any" min="0" max={scoreCell.item.max_score} value={scoreCell.value} disabled={disabled} onChange={event => setScoreCell({ ...scoreCell, value: event.target.value })} required /></label>}
+            {scoreCell.status === 'Scored' && <label><span className="field-label">Score (0–{scoreCell.item.max_score})</span><input placeholder="Enter a score" className="input-field" type="number" step="any" min="0" max={scoreCell.item.max_score} value={scoreCell.value} disabled={disabled} onChange={event => setScoreCell({ ...scoreCell, value: event.target.value })} required /></label>}
             <div className="modal-actions"><button className="btn-secondary" type="button" onClick={() => setScoreCell(null)}>Cancel</button><button className="btn-primary" type="submit" disabled={disabled}>Apply to draft</button></div>
           </form>
         </div>

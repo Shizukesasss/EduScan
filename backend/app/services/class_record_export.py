@@ -65,6 +65,10 @@ def assessment_groups(full, kind):
 
 def fill_term(full, kind, sheet_name, changes, cached, males, females, table):
     groups = assessment_groups(full, kind)
+    if full['policy']['rounding_method'] != 'half_up' or full['policy']['rounding_decimal_places'] != 2:
+        raise HTTPException(409, 'The fixed workbook cannot represent this saved rounding policy.')
+    if groups.get('exam', {}).get('component_type') != 'Term Examinations':
+        raise HTTPException(409, 'The fixed workbook uses ST1/ST2/TE proportions; use the saved gradebook calculation instead.')
     layout = ({'ww_cognitive': (6, 5, 10), 'ww_affective': (14, 5, 10),
                'pt_cognitive': (22, 3, 10), 'pt_affective': (28, 3, 10),
                'pt_behavioral': (34, 3, 30), 'exam': (40, 3, 30)} if kind == 'gmrc' else

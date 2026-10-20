@@ -1,5 +1,6 @@
 import BiometricConsent from './BiometricConsent';
 import EnrollmentFields from './EnrollmentFields';
+import PhoneNumberField from './PhoneNumberField';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Camera, ScanFace, CheckCircle, Database, AlertTriangle } from 'lucide-react';
 import { api, captureVideoFrame, enrollmentCapture } from '../../api/client';
@@ -8,6 +9,8 @@ import { normalizeGradeName } from '../../services/academicContext';
 import { buildEnrollmentFeedback } from '../../services/enrollmentFeedback';
 
 const targetFrames = enrollmentCapture.frames;
+const personNamePattern = "[\\p{L}\\p{M} '’.-]+";
+const isValidPersonName = (value) => /^[\p{L}\p{M} '’.-]+$/u.test(value.trim());
 
 export default function StudentRegistrationModal({ onClose, onSaved, person = null }) {
   const isExistingPerson = Boolean(person?.person_id);
@@ -89,6 +92,11 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
   };
 
   const saveAndTrain = async () => {
+    if (!isExistingPerson && (!isValidPersonName(form.surname) || !isValidPersonName(form.first_name)
+      || (form.middle_name && !isValidPersonName(form.middle_name))
+      || (form.name_extension && !isValidPersonName(form.name_extension)))) {
+      return showError('Enter names using letters and common name punctuation only. Numbers and other symbols are not allowed.');
+    }
     if (!assistedRegistration && !(isExistingPerson ? person.biometric_consent : form.biometric_consent)) return showError('Confirm the documented consent/authorization before biometric enrollment.');
     if (!isExistingPerson && form.role === 'Student' && !form.lrn.trim()) return showError('Enter the student LRN.');
     if (!isExistingPerson && form.role !== 'Student' && !form.external_id.trim()) return showError('Enter the employee ID.');
@@ -149,25 +157,25 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
           {isReplacement && <label><span className="field-label">Required re-enrollment reason</span><textarea className="text-area" placeholder="Example: Appearance changed and recognition accuracy was verified as poor" value={changeReason} onChange={(event) => setChangeReason(event.target.value)} /></label>}
         </div> : <div className="form-grid two-columns enrollment-fields">
           {form.role === 'Student'
-            ? <label><span className="field-label">LRN</span><input className="input-field" value={form.lrn} onChange={(e) => patch('lrn', e.target.value)} required /></label>
-            : <label><span className="field-label">Employee ID</span><input className="input-field" value={form.external_id} onChange={(e) => patch('external_id', e.target.value)} required /></label>}
-          <label><span className="field-label">Last name</span><input className="input-field" value={form.surname} onChange={(e) => patch('surname', e.target.value)} required /></label>
-          <label><span className="field-label">First name</span><input className="input-field" value={form.first_name} onChange={(e) => patch('first_name', e.target.value)} required /></label>
-          <label><span className="field-label">Middle name</span><input className="input-field" value={form.middle_name} onChange={(e) => patch('middle_name', e.target.value)} /></label>
-          <label><span className="field-label">Extension (e.g., Jr.)</span><input className="input-field" value={form.name_extension} onChange={(e) => patch('name_extension', e.target.value)} /></label>
+            ? <label><span className="field-label">LRN</span><input placeholder="e.g. 123456789012" className="input-field" value={form.lrn} onChange={(e) => patch('lrn', e.target.value)} required /></label>
+            : <label><span className="field-label">Employee ID</span><input placeholder="e.g. EMP-001" className="input-field" value={form.external_id} onChange={(e) => patch('external_id', e.target.value)} required /></label>}
+          <label><span className="field-label">Role</span><select className="input-field" value={form.role} onChange={(e) => patch('role', e.target.value)}><option>Student</option><option>Faculty</option><option>Non-teaching Personnel</option></select></label>
+          <label><span className="field-label">Last name</span><input placeholder="e.g. Dela Cruz" className="input-field" pattern={personNamePattern} title="Use letters and common name punctuation only." value={form.surname} onChange={(e) => patch('surname', e.target.value)} required /></label>
+          <label><span className="field-label">First name</span><input placeholder="e.g. Juan" className="input-field" pattern={personNamePattern} title="Use letters and common name punctuation only." value={form.first_name} onChange={(e) => patch('first_name', e.target.value)} required /></label>
+          <label><span className="field-label">Middle name</span><input placeholder="Middle name, if applicable" className="input-field" pattern={personNamePattern} title="Use letters and common name punctuation only." value={form.middle_name} onChange={(e) => patch('middle_name', e.target.value)} /></label>
+          <label><span className="field-label">Extension (e.g., Jr.)</span><input placeholder="e.g. Jr. (leave blank if none)" className="input-field" pattern={personNamePattern} title="Use letters and common name punctuation only." value={form.name_extension} onChange={(e) => patch('name_extension', e.target.value)} /></label>
           <label><span className="field-label">Sex for official roster</span><select className="input-field" value={form.sex} onChange={(e) => patch('sex', e.target.value)}><option>Male</option><option>Female</option></select></label>
-          <label><span className="field-label">Personnel group</span><select className="input-field" value={form.role} onChange={(e) => patch('role', e.target.value)}><option>Student</option><option>Faculty</option><option>Non-teaching Personnel</option></select></label>
           {form.role === 'Student' ? <><label><span className="field-label">Grade</span><select className="input-field" value={gradeLevelId} disabled={academicLoading || Boolean(academicError)} onChange={(e) => {
             const value = e.target.value;
             const grade = sortedGrades.find((item) => item.id === Number(value));
             setGradeLevelId(value);
             patch('grade', grade?.name || '');
             patch('section', '');
-          }} required><option value="">{academicLoading ? 'Loading grades…' : 'Select a grade'}</option>{sortedGrades.map((grade) => <option key={grade.id} value={grade.id}>Grade {normalizeGradeName(grade.name)}</option>)}</select></label><label><span className="field-label">Section</span><select className="input-field" value={form.section} disabled={!gradeLevelId || academicLoading || Boolean(academicError)} onChange={(e) => patch('section', e.target.value)} required><option value="">Select a section</option>{availableSections.map((section) => <option key={section.id} value={section.name}>{section.name}</option>)}</select></label><label className="full-field"><span className="field-label">Parent/guardian mobile number</span><input className="input-field" placeholder="+639XXXXXXXXX" value={form.guardian_phone} onChange={(e) => patch('guardian_phone', e.target.value)} /></label>
+          }} required><option value="">{academicLoading ? 'Loading grades…' : 'Select a grade'}</option>{sortedGrades.map((grade) => <option key={grade.id} value={grade.id}>Grade {normalizeGradeName(grade.name)}</option>)}</select></label><label><span className="field-label">Section</span><select className="input-field" value={form.section} disabled={!gradeLevelId || academicLoading || Boolean(academicError)} onChange={(e) => patch('section', e.target.value)} required><option value="">Select a section</option>{availableSections.map((section) => <option key={section.id} value={section.name}>{section.name}</option>)}</select></label><PhoneNumberField label="Parent/guardian mobile number" value={form.guardian_phone} onChange={value => patch('guardian_phone', value)} />
             {academicError && <div className="notice notice-danger full-field" role="alert"><AlertTriangle size={18} /><span>Could not load grade and section records: {academicError}</span></div>}
             {!academicLoading && !academicError && sortedGrades.length === 0 && <div className="notice notice-warning full-field" role="status">Add an active grade level and section in Administration before enrolling a student.</div>}
           </>
-            : <><label className="full-field"><span className="field-label">Office / assignment</span><input className="input-field" value={form.assignment} onChange={(e) => patch('assignment', e.target.value)} /></label><label className="full-field"><span className="field-label">Phone number</span><input className="input-field" placeholder="+639XXXXXXXXX" value={form.guardian_phone} onChange={(e) => patch('guardian_phone', e.target.value)} /></label></>}
+            : <><label className="full-field"><span className="field-label">Office / assignment</span><input placeholder="e.g. Science department (blank for role default)" className="input-field" value={form.assignment} onChange={(e) => patch('assignment', e.target.value)} /></label><PhoneNumberField label="Phone number" value={form.guardian_phone} onChange={value => patch('guardian_phone', value)} /></>}
           <EnrollmentFields form={form} onChange={patch} />
           <BiometricConsent checked={form.biometric_consent} onChange={(value) => patch('biometric_consent', value)} />
         </div>}

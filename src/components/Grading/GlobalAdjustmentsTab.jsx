@@ -58,7 +58,7 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
       <div className="card-header border-b border-border pb-4 mb-0">
         <div>
           <h2 className="text-xl font-bold">Teacher Grade Adjustment Requests</h2>
-          <p className="text-sm text-secondary">Review and approve or reject corrections requested by teachers. Approved changes are applied to the teacher’s class record.</p>
+          <p className="text-sm text-secondary">Review teacher requests to correct grades or grading criteria. Approved changes are applied to the class record.</p>
         </div>
       </div>
       

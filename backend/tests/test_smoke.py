@@ -48,6 +48,7 @@ class EduScanSmokeTest(unittest.TestCase):
         })
         assert changed.status_code == 200, changed.text
         teacher = next(item for item in cls.client.get("/api/admin/users", headers=cls.headers).json() if item["username"] == "teacher")
+        cls.teacher_account = teacher
         structure = cls.client.get("/api/admin/academic-structure", headers=cls.headers).json()
         section = next(item for item in structure["sections"] if item["name"] == "Rizal")
         assigned = cls.client.post("/api/admin/sections", headers=cls.headers,
@@ -158,7 +159,7 @@ class EduScanSmokeTest(unittest.TestCase):
         person_id = person.json()["id"]
 
         schedule = self.client.post("/api/schedules", headers=self.headers, json={
-            "grade": "10", "section": "Rizal", "subject": "Mathematics", "teacher_name": "Teacher Account",
+            "grade": "10", "section": "Rizal", "subject": "Mathematics", "teacher_name": self.teacher_account["full_name"], "teacher_user_id": self.teacher_account["id"],
             "weekdays": "0,1,2,3,4", "start_time": "07:30", "end_time": "08:30",
             "late_grace_minutes": 15, "active": True,
         })
@@ -282,6 +283,7 @@ class EduScanSmokeTest(unittest.TestCase):
             "0017_subject_teaching_assignments_and_electives",
             "0018_grade_criteria_adjustment_requests",
             "0019_enrollment_departure_notes",
+            "0020_admin_schedules_and_report_roles",
         ])
         inspector = inspect(legacy_engine)
         self.assertTrue(inspector.has_table("attendance_reset_audits"))
@@ -610,8 +612,8 @@ class EduScanSmokeTest(unittest.TestCase):
             "/api/attendance/temporary-log?date=2026-08-24&grade=11-T&section=Advisory",
             headers=teacher_headers,
         )
-        self.assertEqual(scoped.status_code, 200, scoped.text)
-        self.assertEqual(self.client.get("/api/attendance/temporary-log?date=2026-08-24", headers=teacher_headers).status_code, 422)
+        self.assertEqual(scoped.status_code, 403, scoped.text)
+        self.assertEqual(self.client.get("/api/attendance/temporary-log?date=2026-08-24", headers=teacher_headers).status_code, 403)
         self.assertEqual(self.client.get(
             "/api/attendance/temporary-log?date=2026-08-24&grade=10&section=Rizal",
             headers=teacher_headers,
@@ -640,9 +642,15 @@ class EduScanSmokeTest(unittest.TestCase):
             restarted = record_gate_match(db, learner, 19.0, datetime(2026, 8, 24, 7, 20, tzinfo=MANILA))
             self.assertEqual(restarted["direction"], "Time In")
 
+        from app.services.attendance import close_day
+        from app.services.sf2 import _school_days
+        with SessionLocal() as db:
+            for reporting_day in _school_days(db, 2026, 8):
+                close_day(db, reporting_day, grade="11-T", section="Advisory")
+
         sf2 = self.client.get(
             "/api/sf2/export?year=2026&month=8&grade=11-T&section=Advisory&school_id=SJNHS&school_year=2026-2027",
-            headers=teacher_headers,
+            headers=self.headers,
         )
         self.assertEqual(sf2.status_code, 200, sf2.text)
         sf2_book = load_workbook(io.BytesIO(sf2.content), read_only=True, data_only=True)

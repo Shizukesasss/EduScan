@@ -10,6 +10,20 @@ test('updated examinations use ST1/ST2/TE weights and require all three', () => 
   assert.equal(calculateComponentPercentage(scores.slice(2), items, 'Term Examinations').complete, false);
 });
 
+test('partial QA uses only scored exam portions without treating blanks as zero', () => {
+  const items = ['ST1', 'ST2', 'TE'].map((label, id) => ({ id, label, max_score: 50 }));
+  for (const item of items) {
+    const result = calculateComponentPercentage([{ itemId: item.id, score: 44, status: 'Scored' }], items, 'Term Examinations');
+    assert.equal(result.totalPossible, 50);
+    assert.ok(Math.abs(result.percentage - 88) < 1e-10);
+    assert.equal(roundGradeValue(result.percentage * 0.3), 26.4);
+    assert.equal(result.complete, false);
+  }
+  const scores = [{ itemId: 0, score: 50, status: 'Scored' }, { itemId: 2, score: 0, status: 'Scored' }];
+  assert.equal(calculateComponentPercentage(scores, items, 'Term Examinations').percentage, 3000 / 70);
+  assert.equal(calculateComponentPercentage([], items, 'Term Examinations').percentage, null);
+});
+
 test('updated workbook conversion uses the unrounded initial grade at a boundary', () => {
   const items = ['ST1', 'ST2', 'TE'].map((label, id) => ({ id, label, max_score: 100 }));
   const components = [{ id: 1, name: 'Exam', component_type: 'Term Examinations', weight: 100, items }];

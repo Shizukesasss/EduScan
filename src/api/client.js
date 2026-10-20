@@ -1,5 +1,19 @@
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000/api';
 
+function readableValidationErrors(errors) {
+  return errors.map(({ loc = [], msg = 'Check this field.', type }) => {
+    const field = loc.at(-1);
+    const passwordField = field === 'password' || field === 'new_password';
+    if (passwordField) {
+      if (type === 'missing') return field === 'password' ? 'Enter a temporary password.' : 'Enter a new password.';
+      if (/at least 12 characters/i.test(msg)) return 'Use at least 12 characters.';
+      if (/uppercase and lowercase/i.test(msg)) return 'Include at least one capital letter and one small letter.';
+      if (/number and a symbol/i.test(msg)) return 'Include at least one number and one symbol, such as ! or #.';
+    }
+    return msg.replace(/^Value error,\s*/i, '');
+  }).filter(Boolean).join(' ');
+}
+
 export const auth = {
   token: () => localStorage.getItem('eduscan.token'),
   role: () => localStorage.getItem('userRole'),
@@ -42,7 +56,9 @@ async function request(path, options = {}) {
     try {
       const payload = await response.json();
       details = payload.detail;
-      detail = typeof payload.detail === 'string' ? payload.detail : payload.detail?.message || JSON.stringify(payload.detail);
+      detail = typeof payload.detail === 'string' ? payload.detail
+        : Array.isArray(payload.detail) ? readableValidationErrors(payload.detail)
+          : payload.detail?.message || 'Check the information you entered and try again.';
     } catch { /* preserve status message */ }
     const error = new Error(detail);
     error.code = details?.code;

@@ -50,6 +50,23 @@ class TestRoundValue(unittest.TestCase):
 
 class TestComponentPercentage(unittest.TestCase):
 
+    def test_partial_exams_normalize_only_scored_portions(self):
+        items = [dict(id=index, label=label, max_score=50)
+                 for index, label in enumerate(('ST1', 'ST2', 'TE'))]
+        for item in items:
+            result = calculate_component_percentage(
+                [dict(item_id=item['id'], score=44, status='Scored')], items, 'Term Examinations')
+            self.assertEqual(result['total_possible'], 50)
+            self.assertAlmostEqual(result['percentage'], 88)
+            self.assertEqual(round_value(result['percentage'] * 0.3), 26.4)
+            self.assertFalse(result['complete'])
+        scores = [dict(item_id=0, score=50, status='Scored'), dict(item_id=2, score=0, status='Scored')]
+        result = calculate_component_percentage(scores, items, 'Term Examinations')
+        self.assertAlmostEqual(result['percentage'], 3000 / 70)
+        self.assertFalse(result['complete'])
+        scores.insert(1, dict(item_id=1, score=25, status='Scored'))
+        self.assertEqual(calculate_component_percentage(scores, items, 'Term Examinations')['percentage'], 45)
+
     def test_same_max_scores(self):
         items = [{"id": 1, "max_score": 20}, {"id": 2, "max_score": 20}]
         scores = [

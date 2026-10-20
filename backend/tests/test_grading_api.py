@@ -5,7 +5,10 @@ import os
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+
+from openpyxl import load_workbook
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
@@ -76,6 +79,56 @@ class GradingApiTest(unittest.TestCase):
         from app.database import engine
         engine.dispose()
         TEST_DIR.cleanup()
+
+    def assert_exports_match_gradebook(self, gb_id):
+        snapshot = self.client.get(f'/api/gradebooks/{gb_id}', headers=self.teacher_headers).json()
+        for headers in (self.teacher_headers, self.other_teacher_headers, self.admin_headers):
+            self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx?all_terms=true', headers=headers).status_code, 403)
+        self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}', headers=self.admin_headers).json(), snapshot)
+        for role, headers in (('teacher', self.teacher_headers), ('records officer', self.records_headers)):
+            with self.subTest(export_role=role):
+                exported = self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx', headers=headers,
+                                           params={'region': 'V', 'division': 'V', 'school_id': '301874'})
+                self.assertEqual(exported.status_code, 200, exported.text if exported.status_code != 200 else '')
+                formulas = load_workbook(BytesIO(exported.content))
+                values = load_workbook(BytesIO(exported.content), data_only=True)
+                try:
+                    term_name = f"Term {snapshot['gradebook']['quarter']}"
+                    sheet = values[term_name]
+                    headings = {cell.value: cell.column for cell in sheet[10]}
+                    for heading in ('INITIAL GRADE', 'TERM GRADE'):
+                        self.assertEqual(formulas[term_name].cell(12, headings[heading]).data_type, 'f')
+                    metadata = snapshot['gradebook']
+                    for cell, key in (('E15', 'school_year_name'), ('E23', 'teacher_name'), ('E24', 'subject_name'), ('E25', 'grade_name'), ('E26', 'section_name')):
+                        self.assertEqual(values['INPUT DATA'][cell].value, metadata[key])
+                    self.assertEqual(values['INPUT DATA']['E13'].value, '301874')
+                    self.assertEqual(values['INPUT DATA']['E10'].value, 'V')
+                    self.assertEqual(values['INPUT DATA']['E11'].value, 'V')
+                    self.assertEqual(values['INPUT DATA']['E16'].value or '', metadata['school_head'] or '')
+                    by_identifier = {student['lrn'] or student['external_id']: student for student in snapshot['students']}
+                    for row in range(12, 12 + len(by_identifier)):
+                        student = by_identifier[sheet.cell(row, 3).value]
+                        self.assertEqual(sheet.cell(row, headings['INITIAL GRADE']).value, student['initial_grade'])
+                        self.assertEqual(sheet.cell(row, headings['TERM GRADE']).value, student['reported_grade'])
+                        column = 5
+                        for component, detail, result in zip(snapshot['components'], student['component_details'], student['component_grades']):
+                            self.assertEqual(formulas[term_name].cell(9, column).value, component['name'])
+                            items = [item for item in component['items'] if item['active']]
+                            for item in items:
+                                self.assertEqual(sheet.cell(11, column).value, item['max_score'])
+                                self.assertEqual(sheet.cell(row, column).value, student['scores'][str(item['id'])])
+                                column += 1
+                            self.assertEqual(sheet.cell(11, column + 2).value, component['weight'] / 100)
+                            for offset, expected in enumerate((detail['total_earned'], result['percentage'], result['weighted_score'])):
+                                self.assertAlmostEqual(sheet.cell(row, column + offset).value, expected, places=10)
+                            column += 3
+                finally:
+                    formulas.close()
+                    values.close()
+        self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx', headers=self.other_teacher_headers).status_code, 403)
+        self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx', headers=self.admin_headers).status_code, 403)
+        self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}', headers=self.teacher_headers).json(), snapshot)
+
 
     def test_01_grading_policies_list_seeded(self) -> None:
         resp = self.client.get("/api/grading-policies", headers=self.admin_headers)
@@ -251,6 +304,15 @@ class GradingApiTest(unittest.TestCase):
                                                          for person_id in (s1_id, s2_id)},
                                               'change_reason': 'Leave one assessment column unfinished'})
         self.assertEqual(cleared_column.status_code, 200, cleared_column.text)
+        unused_column = self.client.get(f'/api/gradebooks/{gb_id}', headers=self.teacher_headers).json()
+        self.assertEqual(unused_column['statistics']['incomplete'], 1)
+        self.assertTrue(next(student for student in unused_column['students'] if student['person_id'] == s1_id)['complete'])
+        self.assertFalse(next(student for student in unused_column['students'] if student['person_id'] == s2_id)['complete'])
+        # A column unused by the whole class is excluded; once used, every learner needs it.
+        used_column = self.client.put(f'/api/gradebooks/{gb_id}/scores', headers=self.teacher_headers,
+                                      json={'scores': {str(s2_id): [{'assessment_item_id': q2_id, 'score': 20.0, 'status': 'Scored'}]},
+                                            'change_reason': 'Use Quiz 2 for one learner while another is missing it'})
+        self.assertEqual(used_column.status_code, 200, used_column.text)
         unfinished = self.client.get(f'/api/gradebooks/{gb_id}', headers=self.teacher_headers).json()
         self.assertEqual(unfinished['statistics']['incomplete'], 2)
         self.assertTrue(all(student['reported_grade'] is None for student in unfinished['students']))
@@ -316,6 +378,8 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(fin_ok.status_code, 200)
         self.assertEqual(fin_ok.json()["status"], "Finalized")
 
+        self.assert_exports_match_gradebook(gb_id)
+
         # Editing scores while finalized must fail
         edit_blocked = self.client.put(f"/api/gradebooks/{gb_id}/scores", headers=self.teacher_headers, json={
             "scores": {str(s1_id): [{"assessment_item_id": q1_id, "score": 10.0, "status": "Scored"}]},
@@ -331,11 +395,24 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(lock_resp.json()["status"], "Locked")
 
         # 12. Reopen with reason
+        denied_reopen = self.client.post(f"/api/gradebooks/{gb_id}/reopen", headers=self.admin_headers, json={
+            "reason": "Correcting student score following parent conference",
+        })
+        self.assertEqual(denied_reopen.status_code, 403, denied_reopen.text)
         reopen_resp = self.client.post(f"/api/gradebooks/{gb_id}/reopen", headers=self.records_headers, json={
             "reason": "Correcting student score following parent conference",
         })
         self.assertEqual(reopen_resp.status_code, 200)
         self.assertEqual(reopen_resp.json()["status"], "Draft")
+        reopened = self.client.get(f"/api/gradebooks/{gb_id}", headers=self.teacher_headers).json()
+        self.assertEqual(reopened['gradebook']['status'], 'Draft')
+        reopened_student = next(student for student in reopened['students'] if student['person_id'] == s1_id)
+        self.assertEqual(reopened_student['scores'][str(q1_id)], 20.0)
+        edit_after_reopen = self.client.put(f"/api/gradebooks/{gb_id}/scores", headers=self.teacher_headers, json={
+            "scores": {str(s1_id): [{"assessment_item_id": q1_id, "score": 19.0, "status": "Scored"}]},
+            "change_reason": "Corrected after administrator reopened the record",
+        })
+        self.assertEqual(edit_after_reopen.status_code, 200, edit_after_reopen.text)
 
         # 13. Check audit history
         audit_resp = self.client.get(f"/api/gradebooks/{gb_id}/audit", headers=self.admin_headers)
@@ -403,7 +480,7 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(list_adj.json()[0]["status"], "Pending")
 
         # Approve adjustment
-        app_resp = self.client.put(f"/api/adjustment-requests/{adj_id}", headers=self.admin_headers, json={
+        app_resp = self.client.put(f"/api/adjustment-requests/{adj_id}", headers=self.records_headers, json={
             "status": "Approved",
             "note": "Approved per submitted revised rubric",
         })
@@ -416,7 +493,7 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(student_after["scores"][str(item_id)], 18.0)
 
 
-    def test_05_admin_only_reviews_teacher_adjustments(self):
+    def test_05_records_officer_only_reviews_teacher_adjustments(self):
         structure = self.client.get('/api/admin/academic-structure', headers=self.admin_headers).json()
         teacher_structure = self.client.get('/api/admin/academic-structure?context=grading', headers=self.teacher_headers).json()
         other_teacher_structure = self.client.get('/api/admin/academic-structure?context=grading', headers=self.other_teacher_headers).json()
@@ -450,7 +527,8 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(admin_view.json()['students'], data['students'])
         self.assertEqual(admin_view.json()['statistics'], data['statistics'])
         self.assertEqual(data['gradebook']['teacher_name'], self.teacher['full_name'])
-        components = [{**component, 'items': component['items'][:1]} for component in data['components']]
+        components = [{**component, 'items': component['items'] if component['component_type'] == 'Term Examinations' else component['items'][:1]}
+                      for component in data['components']]
         scores = {str(student['person_id']): [{'assessment_item_id': activity['id'], 'score': activity['max_score'], 'status': 'Scored'}
                   for component in components for activity in component['items']] for student in data['students']}
         for path, payload in [('components', {'components': components, 'change_reason': 'Unauthorized admin assessment setup'}),
@@ -487,11 +565,12 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(before['students'][0]['scores'][str(item['id'])], item['max_score'])
         review_payload = {'status': 'Approved', 'note': 'Approved after reviewing the teacher rubric'}
         self.assertEqual(self.client.put(f'/api/adjustment-requests/{request_id}', headers=self.teacher_headers, json=review_payload).status_code, 403)
+        self.assertEqual(self.client.put(f'/api/adjustment-requests/{request_id}', headers=self.admin_headers, json=review_payload).status_code, 403)
         self.assertEqual(self.client.delete(f'/api/adjustment-requests/{request_id}', headers=self.admin_headers).status_code, 403)
         listed = self.client.get('/api/admin/grade-adjustments', headers=self.admin_headers)
         self.assertEqual(listed.status_code, 200, listed.text)
         self.assertIn(request_id, {row['id'] for row in listed.json()})
-        reviewed = self.client.put(f'/api/adjustment-requests/{request_id}', headers=self.admin_headers, json=review_payload)
+        reviewed = self.client.put(f'/api/adjustment-requests/{request_id}', headers=self.records_headers, json=review_payload)
         self.assertEqual(reviewed.status_code, 200, reviewed.text)
         notifications = self.client.get('/api/teacher/grade-adjustment-notifications', headers=self.teacher_headers)
         self.assertEqual(notifications.status_code, 200, notifications.text)
@@ -518,14 +597,14 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(locked.status_code, 200, locked.text)
         locked_request = self.client.post(f'/api/gradebooks/{book_id}/adjustments', headers=self.teacher_headers, json={**proposal, 'new_score': item['max_score'] - 2})
         self.assertEqual(locked_request.status_code, 200, locked_request.text)
-        reviewed = self.client.put(f"/api/adjustment-requests/{locked_request.json()['id']}", headers=self.admin_headers, json=review_payload)
+        reviewed = self.client.put(f"/api/adjustment-requests/{locked_request.json()['id']}", headers=self.records_headers, json=review_payload)
         self.assertEqual(reviewed.status_code, 200, reviewed.text)
         after = self.client.get(f'/api/gradebooks/{book_id}', headers=self.teacher_headers).json()
         self.assertEqual(after['gradebook']['status'], 'Locked')
         self.assertEqual(after['students'][0]['scores'][str(item['id'])], item['max_score'] - 2)
         rejected_request = self.client.post(f'/api/gradebooks/{book_id}/adjustments', headers=self.teacher_headers, json=proposal)
         self.assertEqual(rejected_request.status_code, 200, rejected_request.text)
-        rejected = self.client.put(f"/api/adjustment-requests/{rejected_request.json()['id']}", headers=self.admin_headers,
+        rejected = self.client.put(f"/api/adjustment-requests/{rejected_request.json()['id']}", headers=self.records_headers,
                                    json={'status': 'Rejected', 'note': 'Rubric does not support the requested change'})
         self.assertEqual(rejected.status_code, 200, rejected.text)
         rejection_notice = self.client.get('/api/teacher/grade-adjustment-notifications', headers=self.teacher_headers).json()
@@ -534,19 +613,22 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(final['students'][0]['scores'][str(item['id'])], item['max_score'] - 2)
         score_before_criteria = final['students'][0]['scores'][str(item['id'])]
         criteria = [{'component_id': component['id'], 'weight': weight}
-                    for component, weight in zip(final['components'], (20, 50, 30))]
+                    for component, weight in zip(final['components'], (25, 45, 30))]
         criteria_request = self.client.post(f'/api/gradebooks/{book_id}/criteria-adjustments', headers=self.teacher_headers,
-                                            json={'components': criteria, 'reason': 'Align finalized class record with workbook'})
+                                            json={'components': criteria, 'reason': 'Teacher requests revised assessment criteria'})
         self.assertEqual(criteria_request.status_code, 200, criteria_request.text)
         criteria_id = criteria_request.json()['id']
         self.assertLess(criteria_id, 0)
         self.assertIn(criteria_id, {row['id'] for row in self.client.get('/api/admin/grade-adjustments', headers=self.admin_headers).json()})
-        approved_criteria = self.client.put(f'/api/adjustment-requests/{criteria_id}', headers=self.admin_headers,
-                                            json={'status': 'Approved', 'note': 'Approved workbook criteria'})
+        self.assertEqual(self.client.put(f'/api/adjustment-requests/{criteria_id}', headers=self.admin_headers,
+                                         json={'status': 'Approved', 'note': 'Admin cannot approve criteria changes'}).status_code, 403)
+        approved_criteria = self.client.put(f'/api/adjustment-requests/{criteria_id}', headers=self.records_headers,
+                                            json={'status': 'Approved', 'note': 'Approved revised assessment criteria'})
         self.assertEqual(approved_criteria.status_code, 200, approved_criteria.text)
         after_criteria = self.client.get(f'/api/gradebooks/{book_id}', headers=self.teacher_headers).json()
-        self.assertEqual([component['weight'] for component in after_criteria['components']], [20, 50, 30])
+        self.assertEqual([component['weight'] for component in after_criteria['components']], [25, 45, 30])
         self.assertEqual(after_criteria['students'][0]['scores'][str(item['id'])], score_before_criteria)
+        self.assert_exports_match_gradebook(book_id)
         self.assertIn(criteria_id, {row['id'] for row in self.client.get('/api/teacher/grade-adjustment-notifications', headers=self.teacher_headers).json()})
         self.assertEqual(self.client.get(f'/api/gradebooks/{book_id}', headers=self.other_teacher_headers).status_code, 403)
         self.assertEqual(self.client.get('/api/gradebooks/lookup', headers=self.other_teacher_headers, params=context).status_code, 403)

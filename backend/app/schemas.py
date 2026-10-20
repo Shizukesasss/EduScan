@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, time
 
 import re
+import unicodedata
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from .services.enrollment import enrollment_error
@@ -13,12 +14,11 @@ USER_ROLES = {"admin", "teacher", "scanner",
 
 def strong_password(value: str) -> str:
     if len(value) < 12:
-        raise ValueError("Password must contain at least 12 characters")
+        raise ValueError("Use at least 12 characters")
     if not re.search(r"[A-Z]", value) or not re.search(r"[a-z]", value):
-        raise ValueError(
-            "Password must contain uppercase and lowercase letters")
+        raise ValueError("Include at least one capital letter and one small letter")
     if not re.search(r"\d", value) or not re.search(r"[^A-Za-z0-9]", value):
-        raise ValueError("Password must contain a number and a symbol")
+        raise ValueError("Include at least one number and one symbol, such as ! or #")
     return value
 
 
@@ -127,6 +127,19 @@ class PersonCreate(BaseModel):
     transfer_school: str | None = Field(default=None, max_length=180)
     biometric_consent: bool = False
 
+    @field_validator("surname", "first_name", "middle_name", "name_extension", mode="before")
+    @classmethod
+    def valid_person_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("Names must be entered as text")
+        value = value.strip()
+        if any(not (character.isalpha() or unicodedata.category(character).startswith("M")
+                    or character in " -'’.") for character in value):
+            raise ValueError("Use letters, spaces, hyphens, apostrophes, or periods in names; do not enter numbers or other symbols")
+        return value
+
     @model_validator(mode="before")
     @classmethod
     def clean_na_values(cls, values: dict) -> dict:
@@ -137,6 +150,16 @@ class PersonCreate(BaseModel):
         if not values.get("external_id") and values.get("role") == "Student":
             values["external_id"] = values.get("lrn") or ""
         return values
+
+    @field_validator("guardian_phone")
+    @classmethod
+    def valid_philippine_mobile(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        value = value.strip()
+        if not re.fullmatch(r"(?:09|\+?639)[0-9]{9}", value):
+            raise ValueError("Enter a Philippine mobile number: 09171234567 or +639171234567, without spaces")
+        return "+63" + value[-10:]
 
     @field_validator("external_id")
     @classmethod
@@ -184,6 +207,7 @@ class SchedulePayload(BaseModel):
     section: str
     subject: str
     teacher_name: str
+    teacher_user_id: int | None = None
     weekdays: str = "0,1,2,3,4"
     start_time: time
     end_time: time

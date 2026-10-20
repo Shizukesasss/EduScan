@@ -71,6 +71,7 @@ class ClassSchedule(Base):
     section: Mapped[str] = mapped_column(String(80), index=True)
     subject: Mapped[str] = mapped_column(String(120))
     teacher_name: Mapped[str] = mapped_column(String(180))
+    teacher_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     weekdays: Mapped[str] = mapped_column(String(40), default="0,1,2,3,4")
     start_time: Mapped[time] = mapped_column(Time)
     end_time: Mapped[time] = mapped_column(Time)
@@ -457,6 +458,7 @@ class GeneratedReport(Base):
     generated_by: Mapped[int] = mapped_column(
         ForeignKey("users.id"), index=True)
     generated_by_name: Mapped[str] = mapped_column(String(180))
+    generated_by_role: Mapped[str | None] = mapped_column(String(30), nullable=True)
     reviewed_by: Mapped[int | None] = mapped_column(
         ForeignKey("users.id"), nullable=True)
     reviewed_by_name: Mapped[str | None] = mapped_column(

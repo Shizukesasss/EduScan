@@ -93,7 +93,7 @@ export default function Attendance() {
   };
 
   return <div className="page-stack">
-    <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}><button className="btn-secondary" onClick={load}>Refresh attendance</button><button className="btn-primary" onClick={downloadLog}><Download size={17} /> Download current log</button></div>
+    <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}><button className="btn-secondary" onClick={load}>Refresh attendance</button>{auth.role() === 'admin' && <button className="btn-primary" onClick={downloadLog}><Download size={17} /> Download current log</button>}</div>
     <p className="muted-small">Attendance updates every 5 seconds while this page is visible. Registered students appear in the roster; a successful Time In marks them Present or Late. Time Out keeps their attendance for the day and records their departure time.</p>
     <div className="notice notice-blue"><ShieldCheck size={19} /><div><strong>One row per unique student ID or LRN.</strong> The all-school file includes every active record; adviser downloads are filtered by section and alphabetized. Raw scans and clean-slate actions remain auditable.</div></div>
 
@@ -101,7 +101,7 @@ export default function Attendance() {
 
     <section className="card-static">
       <div className="toolbar">
-        <div><label className="field-label" htmlFor="attendance-date">Attendance date</label><input id="attendance-date" type="date" className="input-field" value={date} onChange={(event) => setDate(event.target.value)} /></div>
+        <div><label className="field-label" htmlFor="attendance-date">Attendance date</label><input title="Choose a calendar date" id="attendance-date" type="date" className="input-field" value={date} onChange={(event) => setDate(event.target.value)} /></div>
         <div><label className="field-label" htmlFor="section-filter">Reporting scope</label><select id="section-filter" className="input-field" value={sectionKey} onChange={(event) => setSectionKey(event.target.value)}>{auth.role() === 'admin' && <option value="">All school records</option>}{sections.map((item) => <option key={item.id} value={`${item.grade}|${item.section}`}>Grade {item.grade} — {item.section}</option>)}</select></div>
         {auth.role() === 'admin' && <div><label className="field-label" htmlFor="role-filter">Personnel group</label><select id="role-filter" className="input-field" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}><option>All</option><option>Student</option><option>Faculty</option><option>Non-teaching Personnel</option></select></div>}
         <div className="toolbar-note"><MessageSquareText size={17} /> {auth.role() === 'admin' ? `${outboxCount} SMS notice(s) in outbox` : `${sections.length} assigned section(s)`}</div>
@@ -127,7 +127,7 @@ export default function Attendance() {
 function CorrectionModal({ row, date, onClose, onSaved }) {
   const assisted = Boolean(row.assisted);
   const [identityVerified, setIdentityVerified] = useState(false);
-  const [form, setForm] = useState({ status: assisted ? (row.status === 'Late' ? 'Late' : 'Present') : ['No scan', 'Time Out'].includes(row.status) ? 'Present' : row.status, time_in: row.time_in || '', time_out: row.time_out || '', reason: '' });
+  const [form, setForm] = useState({ status: assisted ? (row.status === 'Late' ? 'Late' : 'Present') : ['No scan', 'Time Out'].includes(row.status) ? 'Present' : row.status, time_in: row.time_in || '', time_out: row.time_out || '', reason: '', reasonDetail: '' });
   const [error, setError] = useState('');
   const update = (field) => (event) => setForm((current) => ({ ...current, [field]: event.target.value,
     ...(field === 'status' && event.target.value === 'No scan' ? { time_in: '', time_out: '' } : {}),
@@ -135,8 +135,10 @@ function CorrectionModal({ row, date, onClose, onSaved }) {
   const submit = async (event) => {
     event.preventDefault();
     if (assisted && (!identityVerified || !form.time_in)) return setError('Confirm the school ID or official roster and enter the verified arrival time.');
-    if (form.reason.trim().length < 8) return setError('Enter a specific correction reason (at least 8 characters).');
-    try { await api.post('/attendance/corrections', { person_id: row.person_id, attendance_date: date, status: form.status, time_in: form.time_in || null, time_out: form.time_out || null, reason: form.reason, assisted, identity_verified: identityVerified }); await onSaved(); }
+    if (!form.reason) return setError('Select a reason for this attendance action.');
+    if (form.reason === 'Other' && form.reasonDetail.trim().length < 8) return setError('For Other, enter a specific reason of at least 8 characters.');
+    const reason = form.reason === 'Other' ? `Other: ${form.reasonDetail.trim()}` : form.reasonDetail.trim() ? `${form.reason}: ${form.reasonDetail.trim()}` : form.reason;
+    try { await api.post('/attendance/corrections', { person_id: row.person_id, attendance_date: date, status: form.status, time_in: form.time_in || null, time_out: form.time_out || null, reason, assisted, identity_verified: identityVerified }); await onSaved(); }
     catch (err) { setError(err.message); }
   };
   return <div className="modal-backdrop"><form className="modal-card" onSubmit={submit}>
@@ -144,13 +146,14 @@ function CorrectionModal({ row, date, onClose, onSaved }) {
     <p className="section-copy">The raw gate event remains unchanged. This becomes a separate attributable record for {date}.</p>
     {assisted && <div className="notice notice-blue">Use this option when face capture or blinking is difficult, including facial differences. Confirm identity in person, enter the observed times, and apply the existing school rules for Present or Late. Do not enter medical details.</div>}
     <div className="form-grid two-columns">
-      <label><span className="field-label">Authorized account</span><input className="input-field" value={`${auth.name()} (${auth.role()})`} readOnly /></label>
+      <label><span className="field-label">Authorized account</span><input placeholder="Enter authorized account" className="input-field" value={`${auth.name()} (${auth.role()})`} readOnly /></label>
       <label><span className="field-label">{assisted ? 'Verified attendance status' : 'Corrected status'}</span><select className="input-field" value={form.status} onChange={update('status')}><option>Present</option><option>Late</option>{!assisted && <><option>Absent</option><option>No scan</option></>}</select></label>
-      <label><span className="field-label">{assisted ? 'Verified arrival time' : 'Corrected time in'}</span><input className="input-field" type="time" required={assisted} disabled={form.status === 'No scan'} value={form.time_in} onChange={update('time_in')} /></label>
-      <label><span className="field-label">{assisted ? 'Verified departure time (if any)' : 'Corrected time out'}</span><input className="input-field" type="time" disabled={form.status === 'No scan'} value={form.time_out} onChange={update('time_out')} /></label>
+      <label><span className="field-label">{assisted ? 'Verified arrival time' : 'Corrected time in'}</span><input title="Choose a time using the time picker" className="input-field" type="time" required={assisted} disabled={form.status === 'No scan'} value={form.time_in} onChange={update('time_in')} /></label>
+      <label><span className="field-label">{assisted ? 'Verified departure time (if any)' : 'Corrected time out'}</span><input title="Choose a time using the time picker" className="input-field" type="time" disabled={form.status === 'No scan'} value={form.time_out} onChange={update('time_out')} /></label>
     </div>
     {assisted && <label className="checkbox-field"><input type="checkbox" checked={identityVerified} onChange={(event) => setIdentityVerified(event.target.checked)} required /><span>I checked this person's school ID or official roster in person: {row.external_id}{row.lrn ? ` · LRN ${row.lrn}` : ''}.</span></label>}
-    <label><span className="field-label">Required reason and supporting detail</span><textarea className="text-area" value={form.reason} onChange={update('reason')} maxLength={1000} required /></label>
+    <label><span className="field-label">Reason</span><select className="input-field" value={form.reason} onChange={update('reason')} required><option value="">Select a reason</option><option>Scanner unavailable</option><option>Camera or face recognition problem</option><option>Network or system issue</option><option>Person arrived without an ID</option><option>Attendance time or status correction</option><option>Other</option></select></label>
+    <label><span className="field-label">{form.reason === 'Other' ? 'Explain the reason' : 'Additional details (optional)'}</span><textarea placeholder={form.reason === 'Other' ? 'Enter the specific reason' : 'Add relevant details'} className="text-area" value={form.reasonDetail} onChange={update('reasonDetail')} maxLength={900} required={form.reason === 'Other'} /></label>
     {error && <p className="error-text" role="alert">{error}</p>}
     <div className="modal-actions"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary" type="submit">{assisted ? 'Save assisted attendance' : 'Save correction'}</button></div>
   </form></div>;
@@ -165,5 +168,5 @@ function ResetDayModal({ date, onClose, onSaved }) {
     try { await onSaved(await api.post('/attendance/reset', { attendance_date: date, reason, confirmation })); }
     catch (err) { setError(err.message); }
   };
-  return <div className="modal-backdrop"><form className="modal-card" onSubmit={submit}><div className="modal-header"><div><p className="eyebrow">Admin-only clean slate</p><h2>Reset reporting view for {date}</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={20} /><span className="control-label">Close</span></button></div><div className="notice notice-warning">Existing scans and corrections are retained for accountability but superseded in attendance, scanner history, and generated logs. New scans after this reset become the active records.</div><label><span className="field-label">Documented reason</span><textarea className="text-area" value={reason} onChange={(event) => setReason(event.target.value)} required /></label><label><span className="field-label">Type {date} to confirm</span><input className="input-field" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label>{error && <p className="error-text">{error}</p>}<div className="modal-actions"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-danger" disabled={confirmation !== date || reason.trim().length < 12}><Eraser size={16} /> Start clean slate</button></div></form></div>;
+  return <div className="modal-backdrop"><form className="modal-card" onSubmit={submit}><div className="modal-header"><div><p className="eyebrow">Admin-only clean slate</p><h2>Reset reporting view for {date}</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={20} /><span className="control-label">Close</span></button></div><div className="notice notice-warning">Existing scans and corrections are retained for accountability but superseded in attendance, scanner history, and generated logs. New scans after this reset become the active records.</div><label><span className="field-label">Documented reason</span><textarea placeholder="Explain the reason for this action" className="text-area" value={reason} onChange={(event) => setReason(event.target.value)} required /></label><label><span className="field-label">Type {date} to confirm</span><input placeholder="Type the exact confirmation shown above" className="input-field" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label>{error && <p className="error-text">{error}</p>}<div className="modal-actions"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-danger" disabled={confirmation !== date || reason.trim().length < 12}><Eraser size={16} /> Start clean slate</button></div></form></div>;
 }

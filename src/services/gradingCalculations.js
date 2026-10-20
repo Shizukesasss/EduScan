@@ -63,11 +63,15 @@ export function calculateComponentPercentage(scores, items, componentType = '') 
     const portions = { ST1: 30, ST2: 30, TE: 40 };
     const labels = new Set(items.map(item => item.label));
     complete = complete && items.length === 3 && ['ST1', 'ST2', 'TE'].every(label => labels.has(label));
-    percentage = items.reduce((sum, item) => {
+    const scoredItems = items.filter(item => {
       const entry = scoreMap.get(item.id);
-      return sum + (entry?.status === 'Scored' && !isBlankScore(entry.score)
-        ? Number(entry.score) / Number(item.max_score) * (portions[item.label] || 0) : 0);
-    }, 0);
+      return entry?.status === 'Scored' && !isBlankScore(entry.score);
+    });
+    // Draft previews normalize the scored exam portions; complete exams retain 30/30/40.
+    const usedPortion = scoredItems.reduce((sum, item) => sum + (portions[item.label] || 0), 0);
+    const weightedPercentage = scoredItems.reduce((sum, item) =>
+      sum + Number(scoreMap.get(item.id).score) / Number(item.max_score) * (portions[item.label] || 0), 0);
+    percentage = usedPortion === 100 ? weightedPercentage : usedPortion > 0 ? weightedPercentage * 100 / usedPortion : null;
   }
   return {
     totalEarned,

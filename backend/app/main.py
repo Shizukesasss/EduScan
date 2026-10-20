@@ -68,11 +68,11 @@ from .schemas_grading import (
 )
 from .services.reports import (
     attendance_report_html, generate_attendance_range_xlsx, generate_grade_report_xlsx,
-    grade_report_html, register_report, generate_gradebook_report_xlsx, gradebook_report_html
+    grade_report_html, register_report, generate_gradebook_report_xlsx, gradebook_report_html, official_sf2_preview
 )
 from .services.retention import execute_retention, public_preview, retention_policy, retention_preview
 from .services.settings_store import get_json, get_secret, set_json, set_secret
-from .services.sf2 import generate_sf2, generate_temporary_log, save_template, template_path
+from .services.sf2 import sf2_pending_attendance, sf2_students, generate_sf2, generate_temporary_log, save_template, template_path
 from .services.sms import (
     cancel_record, dispatch_outbox, dispatch_queued, dispatch_record_by_id, gateway_diagnostics,
     mask_phone, reconcile_outbox, requeue_record, send_record, sms_config,
@@ -210,7 +210,7 @@ def report_sections(
     if starts_on and ends_on:
         active_years = select(SchoolYear.id).where(
             SchoolYear.active.is_(True), SchoolYear.deleted_at.is_(None),
-            SchoolYear.starts_on <= starts_on, SchoolYear.ends_on >= ends_on,
+            SchoolYear.starts_on <= ends_on, SchoolYear.ends_on >= starts_on,
         )
         if school_year_name:
             active_years = active_years.where(SchoolYear.name == school_year_name)
@@ -288,13 +288,6 @@ def report_parameters_allowed(db: Session, user: User, parameters: dict) -> bool
     except (HTTPException, TypeError, ValueError):
         return False
     return True
-
-
-def ensure_schedule_owner(record: ClassSchedule, user: User) -> None:
-    if user.role == "teacher" and (record.teacher_name or "").strip().casefold() != user.full_name.strip().casefold():
-        raise HTTPException(
-            status_code=403, detail="This schedule belongs to another teacher",
-        )
 
 
 def biometric_enrollment_json(person: Person, db: Session, include_samples: bool = False) -> dict:
@@ -377,10 +370,10 @@ def change_password(payload: PasswordChangePayload, db: Session = Depends(get_db
                     user: User = Depends(current_user)) -> dict:
     if not verify_password(payload.current_password, user.password_hash):
         raise HTTPException(
-            status_code=422, detail="Current password is incorrect")
+            status_code=422, detail="That password is incorrect. Check it and try again.")
     if payload.current_password == payload.new_password:
         raise HTTPException(
-            status_code=422, detail="New password must be different")
+            status_code=422, detail="Choose a new password that is different from your current one.")
     user.password_hash = hash_password(payload.new_password)
     user.must_change_password = False
     user.password_changed_at = datetime.utcnow()
@@ -1235,15 +1228,10 @@ def correct(payload: AttendanceCorrectionPayload, db: Session = Depends(get_db),
 
 @app.get("/api/attendance/temporary-log")
 def temporary_log(day: date = Query(alias="date"), grade: str | None = None, section: str | None = None,
-                  db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> FileResponse:
+                  db: Session = Depends(get_db), user: User = Depends(require_roles("admin"))) -> FileResponse:
     if bool(grade) != bool(section):
         raise HTTPException(
             status_code=422, detail="Select both grade and section, or neither for the all-school log")
-    if user.role == "teacher":
-        if not grade or not section:
-            raise HTTPException(
-                status_code=422, detail="Teachers must select an assigned grade and section")
-        ensure_adviser_access(db, user, grade, section)
     path = generate_temporary_log(db, day, grade, section, snapshot=True)
     report = register_report(db, path, "Temporary Attendance Log", {
                              "date": day, "grade": grade, "section": section}, user)
@@ -1254,18 +1242,12 @@ def temporary_log(day: date = Query(alias="date"), grade: str | None = None, sec
 def attendance_report_xlsx(starts_on: date, ends_on: date, role: str | None = None, grade: str | None = None,
                            section: str | None = None, person_id: int | None = None,
                            db: Session = Depends(get_db),
-                           user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> FileResponse:
-    if user.role == "teacher":
-        if not grade or not section:
-            raise HTTPException(
-                status_code=422, detail="Teachers must select an assigned grade and section")
-        ensure_report_access(db, user, grade, section, starts_on, ends_on)
-        role = "Student"
+                           user: User = Depends(require_roles("admin"))) -> FileResponse:
     path = generate_attendance_range_xlsx(
         db, starts_on, ends_on, role, grade, section, person_id)
     parameters = {"starts_on": starts_on, "ends_on": ends_on, "role": role, "grade": grade,
                   "section": section, "person_id": person_id}
-    report = register_report(db, path, "Attendance Range", parameters, user)
+    report = register_report(db, path, "Daily Attendance" if starts_on == ends_on else "Attendance Range", parameters, user)
     return FileResponse(report.file_path, filename=report.filename,
                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -1274,13 +1256,7 @@ def attendance_report_xlsx(starts_on: date, ends_on: date, role: str | None = No
 def attendance_report_print(starts_on: date, ends_on: date, role: str | None = None, grade: str | None = None,
                             section: str | None = None, person_id: int | None = None,
                             db: Session = Depends(get_db),
-                            user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> HTMLResponse:
-    if user.role == "teacher":
-        if not grade or not section:
-            raise HTTPException(
-                status_code=422, detail="Teachers must select an assigned grade and section")
-        ensure_report_access(db, user, grade, section, starts_on, ends_on)
-        role = "Student"
+                            user: User = Depends(require_roles("admin"))) -> HTMLResponse:
     return HTMLResponse(attendance_report_html(db, starts_on, ends_on, role, grade, section, person_id))
 
 
@@ -1310,10 +1286,12 @@ def schedules(db: Session = Depends(get_db), user: User = Depends(require_roles(
     )).all()
     if user.role == "teacher":
         teacher_name = user.full_name.strip().casefold()
-        items = [item for item in items
-                 if (item.teacher_name or "").strip().casefold() == teacher_name]
+        same_name = db.scalar(select(func.count(User.id)).where(User.role == "teacher",
+            func.lower(func.trim(User.full_name)) == teacher_name))
+        items = [item for item in items if item.teacher_user_id == user.id or (
+            item.teacher_user_id is None and same_name == 1 and (item.teacher_name or "").strip().casefold() == teacher_name)]
     return [{"id": item.id, "grade": item.grade, "section": item.section, "subject": item.subject,
-             "teacher_name": item.teacher_name, "weekdays": item.weekdays, "start_time": item.start_time,
+             "teacher_name": item.teacher_name, "teacher_user_id": item.teacher_user_id, "weekdays": item.weekdays, "start_time": item.start_time,
              "end_time": item.end_time, "late_grace_minutes": item.late_grace_minutes,
              "absence_cutoff": item.absence_cutoff, "active": item.active}
             for item in items]
@@ -1321,7 +1299,17 @@ def schedules(db: Session = Depends(get_db), user: User = Depends(require_roles(
 
 @app.post("/api/schedules")
 def save_schedule(payload: SchedulePayload, db: Session = Depends(get_db),
-                  user: User = Depends(require_roles("admin", "teacher"))) -> dict:
+                  user: User = Depends(require_roles("admin"))) -> dict:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only administrators can manage teaching schedules")
+    teacher = db.get(User, payload.teacher_user_id) if payload.teacher_user_id else None
+    if not teacher and not payload.teacher_user_id:
+        candidates = db.scalars(select(User).where(User.role == "teacher", User.active.is_(True),
+            func.lower(func.trim(User.full_name)) == payload.teacher_name.strip().casefold())).all()
+        if len(candidates) == 1:
+            teacher = candidates[0]
+    if not teacher or teacher.role != "teacher" or not teacher.active:
+        raise HTTPException(status_code=422, detail="Select an active teacher account")
     grade_level = db.scalar(select(GradeLevel).where(
         GradeLevel.name == payload.grade, GradeLevel.active.is_(True), GradeLevel.deleted_at.is_(None)))
     section = db.scalar(select(SchoolSection).where(
@@ -1335,23 +1323,10 @@ def save_schedule(payload: SchedulePayload, db: Session = Depends(get_db),
         Subject.name == payload.subject, Subject.active.is_(True), Subject.deleted_at.is_(None)))
     if not subject_id:
         raise HTTPException(status_code=422, detail="Select an active subject")
-    if user.role == "teacher":
-        active_year = db.scalar(select(SchoolYear).where(
-            SchoolYear.active.is_(True), SchoolYear.deleted_at.is_(None),
-        ).order_by(SchoolYear.starts_on.desc()).limit(1))
-        if not active_year or not grading_service.teacher_can_access_gradebook_context(
-            db, user, active_year.id, section.id, subject_id,
-        ):
-            raise HTTPException(
-                status_code=403,
-                detail="This subject is not assigned to your teacher account for the active school year",
-            )
     record = db.get(
         ClassSchedule, payload.id) if payload.id else ClassSchedule()
     if payload.id and not record:
         raise HTTPException(status_code=404, detail="Schedule was not found")
-    if user.role == "teacher" and payload.id:
-        ensure_schedule_owner(record, user)
     duplicate = db.scalar(select(ClassSchedule.id).where(
         ClassSchedule.grade == payload.grade, ClassSchedule.section == payload.section,
         ClassSchedule.subject == payload.subject, ClassSchedule.weekdays == payload.weekdays,
@@ -1363,8 +1338,8 @@ def save_schedule(payload: SchedulePayload, db: Session = Depends(get_db),
     before = model_snapshot(record) if payload.id else {}
     for key, value in payload.model_dump(exclude={"id"}).items():
         setattr(record, key, value)
-    if user.role == "teacher":
-        record.teacher_name = user.full_name
+    record.teacher_user_id = teacher.id
+    record.teacher_name = teacher.full_name
     db.add(record)
     db.flush()
     add_audit(db, user, "Update" if payload.id else "Create", "ClassSchedule", record.id,
@@ -1377,12 +1352,10 @@ def save_schedule(payload: SchedulePayload, db: Session = Depends(get_db),
 
 @app.delete("/api/schedules/{schedule_id}")
 def remove_schedule(schedule_id: int, db: Session = Depends(get_db),
-                    user: User = Depends(require_roles("admin", "teacher"))) -> dict:
+                    user: User = Depends(require_roles("admin"))) -> dict:
     record = db.get(ClassSchedule, schedule_id)
     if not record:
         raise HTTPException(status_code=404, detail="Schedule was not found")
-    if user.role == "teacher":
-        ensure_schedule_owner(record, user)
     before = model_snapshot(record)
     db.delete(record)
     add_audit(db, user, "Delete", "ClassSchedule", record.id,
@@ -2159,14 +2132,41 @@ async def upload_sf2(file: UploadFile = File(...), _: User = Depends(require_rol
     return {"configured": True, "filename": path.name}
 
 
+@app.get("/api/sf2/preview")
+def sf2_preview(year: int, month: int, grade: str, section: str, db: Session = Depends(get_db),
+                user: User = Depends(require_roles("admin"))) -> dict:
+    import calendar
+    from .services.attendance import rows_for_people, local_now
+    people = sf2_students(db, year, month, grade, section)
+    first_day = date(year, month, 1)
+    last_day = date(year, month, calendar.monthrange(year, month)[1])
+    preview_day = max(first_day, min(local_now().date(), last_day))
+    return {"preview_date": preview_day, "rows": rows_for_people(db, people, preview_day), **sf2_pending_attendance(db, people, year, month)}
+
+
 @app.get("/api/sf2/export")
 def sf2_export(year: int, month: int, grade: str, section: str, school_id: str = "",
                school_year: str = "", school_name: str = "SAN JOSE NATIONAL HIGH SCHOOL",
-               db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> FileResponse:
+               db: Session = Depends(get_db), user: User = Depends(require_roles("admin"))) -> FileResponse:
     if not 1 <= month <= 12:
         raise HTTPException(
             status_code=422, detail="Month must be between 1 and 12")
+    import calendar
+    year_record = db.scalar(select(SchoolYear).where(SchoolYear.name == school_year, SchoolYear.deleted_at.is_(None)))
+    if not year_record:
+        raise HTTPException(status_code=422, detail="Choose an existing school year before generating official SF2")
+    try:
+        first_day = date(year, month, 1)
+        last_day = date(year, month, calendar.monthrange(year, month)[1])
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="Choose a valid reporting year") from error
+    if year_record.starts_on > last_day or year_record.ends_on < first_day:
+        raise HTTPException(status_code=422, detail="The reporting month is outside the selected school year")
     ensure_adviser_access(db, user, grade, section)
+    people = sf2_students(db, year, month, grade, section)
+    pending = sf2_pending_attendance(db, people, year, month)
+    if pending['unresolved_count']:
+        raise HTTPException(status_code=409, detail={"message": "Review or close the unresolved daily attendance before generating official SF2. No attendance was changed.", **pending})
     path = generate_sf2(db, year, month, grade, section,
                         school_id, school_year, school_name)
     report = register_report(db, path, "Official SF2", {"year": year, "month": month, "grade": grade,
@@ -2184,28 +2184,48 @@ def report_json(item: GeneratedReport) -> dict:
             "reviewed_at": item.reviewed_at, "created_at": item.created_at}
 
 
+def teacher_can_view_report(db: Session, user: User, item: GeneratedReport) -> bool:
+    return (item.report_type == "Official SF2" and item.generated_by_role == "admin"
+            and item.status not in {"Rejected", "Superseded"}
+            and report_parameters_allowed(db, user, json.loads(item.parameters_json)))
+
+
+@app.get("/api/reports/history/{report_id}/preview")
+def preview_generated_report(report_id: str, db: Session = Depends(get_db),
+                             user: User = Depends(require_roles("admin", "teacher", "records_officer", "school_head"))) -> dict:
+    item = db.get(GeneratedReport, report_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Report was not found")
+    if user.role == "teacher" and not teacher_can_view_report(db, user, item):
+        raise HTTPException(status_code=403, detail="Only administrator-generated official SF2s for your classes are available")
+    path = Path(item.file_path)
+    if item.report_type != "Official SF2" or not path.is_file():
+        raise HTTPException(status_code=404, detail="Official SF2 file was not found")
+    if hashlib.sha256(path.read_bytes()).hexdigest() != item.file_sha256:
+        raise HTTPException(status_code=409, detail="Report integrity check failed; ask the administrator to regenerate it")
+    return {"report": report_json(item), **official_sf2_preview(path)}
+
+
 @app.get("/api/reports/history")
 def report_history(db: Session = Depends(get_db),
                    user: User = Depends(require_roles("admin", "teacher", "records_officer", "privacy_officer", "school_head"))) -> list[dict]:
-    items = db.scalars(select(GeneratedReport).order_by(
-        GeneratedReport.created_at.desc()).limit(1000)).all()
+    query = select(GeneratedReport)
     if user.role == "teacher":
-        items = [item for item in items
-                 if report_parameters_allowed(db, user, json.loads(item.parameters_json))]
+        query = query.where(GeneratedReport.report_type == "Official SF2", GeneratedReport.generated_by_role == "admin",
+                            GeneratedReport.status.not_in(["Rejected", "Superseded"]))
+    items = db.scalars(query.order_by(GeneratedReport.created_at.desc()).limit(1000)).all()
+    if user.role == "teacher":
+        items = [item for item in items if teacher_can_view_report(db, user, item)]
     return [report_json(item) for item in items]
 
 
 @app.get("/api/reports/history/{report_id}/download")
 def download_generated_report(report_id: str, db: Session = Depends(get_db),
-                              user: User = Depends(require_roles("admin", "teacher", "records_officer", "school_head"))) -> FileResponse:
+                              user: User = Depends(require_roles("admin", "records_officer", "school_head"))) -> FileResponse:
     item = db.get(GeneratedReport, report_id)
     if not item or not Path(item.file_path).is_file():
         raise HTTPException(
             status_code=404, detail="Generated report file was not found")
-    if user.role == "teacher":
-        parameters = json.loads(item.parameters_json)
-        if not report_parameters_allowed(db, user, parameters):
-            raise HTTPException(status_code=403, detail="This report is not for a section assigned to the signed-in teacher")
     return FileResponse(item.file_path, filename=item.filename)
 
 
@@ -2460,7 +2480,7 @@ def reopen_gradebook(class_key: str, payload: GradebookActionPayload, db: Sessio
 
 @app.get("/api/gradebook/{class_key}/report.xlsx")
 def gradebook_report_xlsx(class_key: str, grade: str = "", section: str = "", db: Session = Depends(get_db),
-                          user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> FileResponse:
+                          user: User = Depends(require_roles("teacher", "records_officer"))) -> FileResponse:
     state = db.get(GradebookState, class_key)
     if not state:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
@@ -2475,7 +2495,7 @@ def gradebook_report_xlsx(class_key: str, grade: str = "", section: str = "", db
 
 @app.get("/api/gradebook/{class_key}/report/print", response_class=HTMLResponse)
 def gradebook_report_print(class_key: str, grade: str = "", section: str = "", db: Session = Depends(get_db),
-                           user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> HTMLResponse:
+                           user: User = Depends(require_roles("admin", "records_officer"))) -> HTMLResponse:
     state = db.get(GradebookState, class_key)
     if not state:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
@@ -3250,7 +3270,7 @@ def review_adjustment_endpoint(
     request_id: int,
     payload: GradeAdjustmentReview,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("admin", "records_officer")),
+    user: User = Depends(require_roles("records_officer")),
 ):
     try:
         req = (grading_service.review_criteria_adjustment_request(
@@ -3282,9 +3302,12 @@ def gradebook_report_xlsx_new(
     region: str = "",
     division: str = "",
     school_id: str = "",
+    all_terms: bool = False,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("admin", "teacher", "records_officer", "school_head")),
+    user: User = Depends(require_roles("teacher", "records_officer", "school_head")),
 ):
+    if all_terms and user.role != 'records_officer':
+        raise HTTPException(status_code=403, detail="Only the records officer can export all three terms together")
     book = db.get(Gradebook, gradebook_id)
     if book:
         ensure_gradebook_access(db, user, book)
@@ -3296,10 +3319,11 @@ def gradebook_report_xlsx_new(
     if not full["students"] or full["statistics"]["incomplete"]:
         raise HTTPException(status_code=409, detail="Cannot export official grades with missing or incomplete learner scores")
     path = generate_gradebook_report_xlsx(db, book.id, region=region, division=division, school_id=school_id,
-                                        allowed_teacher_id=user.id if user.role == 'teacher' else None)
+                                        allowed_teacher_id=user.id if user.role == 'teacher' else None, all_terms=all_terms)
     report = register_report(db, path, "Grading Summary", {
         "gradebook_id": book.id, "grade": book.grade_name, "section": book.section_name,
         "school_year": book.school_year_name, "quarter": book.quarter, "subject": book.subject_name,
+        "all_terms": all_terms,
     }, user)
     return FileResponse(report.file_path, filename=report.filename,
                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -3309,7 +3333,7 @@ def gradebook_report_xlsx_new(
 def gradebook_report_print_new(
     gradebook_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("admin", "teacher", "records_officer", "school_head")),
+    user: User = Depends(require_roles("admin", "records_officer", "school_head")),
 ):
     book = db.get(Gradebook, gradebook_id)
     if book:

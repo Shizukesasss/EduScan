@@ -486,7 +486,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
             section_id=self.section.id, teacher_user_id=self.teacher.id,
         ))
         self.db.commit()
-        result = save_schedule(payload, self.db, self.teacher)
+        result = save_schedule(payload, self.db, self.admin)
         self.assertIsNotNone(self.db.get(ClassSchedule, result["id"]))
 
         other_subject = Subject(code="SHS-OTHER", name="Other Subject", category="SHS-Core")
@@ -497,7 +497,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
             save_schedule(payload, self.db, self.teacher)
         self.assertEqual(error.exception.status_code, 403)
 
-    def test_teacher_can_schedule_assigned_subject_in_non_advisory_section(self):
+    def test_admin_can_schedule_teacher_in_non_advisory_section(self):
         teaching_section = SchoolSection(grade_level_id=self.grade.id, name="Jose")
         self.db.add(teaching_section)
         self.db.flush()
@@ -511,7 +511,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
             teacher_name=self.teacher.full_name, start_time=time(7, 30), end_time=time(8, 30),
         )
 
-        result = save_schedule(payload, self.db, self.teacher)
+        result = save_schedule(payload, self.db, self.admin)
 
         self.assertEqual(self.db.get(ClassSchedule, result["id"]).section, "Jose")
 
@@ -892,7 +892,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.export_path = path
         workbook = openpyxl.load_workbook(path)
         full = grading.get_gradebook_full(self.db, book.id)
-        cell = 'F17' if full['gradebook']['grade_name'] in {'11', '12'} else 'E16'
+        cell = 'E16'
         self.assertEqual(workbook['INPUT DATA'][cell].value,
                          full['gradebook']['school_head'])
         return workbook
@@ -912,6 +912,11 @@ class ClassRecordRegressionTest(unittest.TestCase):
                 {'name': name, 'weight': weight, 'max_items': count} for name, weight, count in components])
         else:
             self.general.component_definitions_json = definitions((20, 50 if kind == 'core' else 60, 30 if kind == 'core' else 20), (1, 1, 3))
+        component_definitions = json.loads(self.general.component_definitions_json)
+        for component in component_definitions:
+            if component['name'] == 'Quarterly Assessment':
+                component['component_type'] = 'Term Examinations'
+        self.general.component_definitions_json = json.dumps(component_definitions)
         _, filename = subject_template(self.subject.name)
         self.general.transmutation_table_json = json.dumps(template_table(TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename))
         self.db.commit()
@@ -1031,33 +1036,45 @@ class ClassRecordRegressionTest(unittest.TestCase):
                 _, filename = subject_template(subject)
                 self.assertTrue((TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename).is_file())
 
-    def test_unknown_jhs_subject_does_not_export_an_unrelated_template(self):
-        from fastapi import HTTPException
+    def test_unknown_jhs_subject_exports_its_saved_gradebook_layout(self):
         from app.services import reports
         self.grade.name, self.subject.name, self.subject.category = '7', 'Unsupported Subject', 'JHS'
+        self.first.grade, self.second.grade = '7', '7'
         self.db.commit()
         book = self.create(self.general)
-        with self.assertRaises(HTTPException) as error:
-            reports.generate_gradebook_report_xlsx(self.db, book.id)
-        self.assertEqual(error.exception.status_code, 409)
-        self.assertIn('Unsupported Subject', error.exception.detail)
-        self.assertIn('No matching updated DepEd class-record workbook', error.exception.detail)
+        self.score_student(book, 80)
+        self.score_second_student(book, 80)
+        book.status = 'Finalized'
+        self.db.commit()
+        workbook = self.export(book)
+        try:
+            self.assertEqual(workbook['INPUT DATA']['E24'].value, 'Unsupported Subject')
+            self.assertIn('Term 1', workbook.sheetnames)
+        finally:
+            workbook.close()
 
-    def test_missing_selected_template_does_not_use_another_available_workbook(self):
+    def test_missing_selected_template_uses_the_gradebook_instead_of_an_unrelated_workbook(self):
         from fastapi import HTTPException
         from app.services import reports
         self.grade.name, self.subject.name, self.subject.category = '7', 'English', 'JHS'
         self.first.grade, self.second.grade = '7', '7'
         self.db.commit()
         book = self.create(self.general)
+        self.score_student(book, 80)
+        self.score_second_student(book, 80)
+        book.status = 'Finalized'
+        self.db.commit()
         with tempfile.TemporaryDirectory(dir=TEST_DIR.name) as directory:
             templates = Path(directory)
             (templates / 'UPDATED CLASS RECORD').mkdir()
             (templates / 'UPDATED CLASS RECORD' / 'unrelated.xlsx').write_bytes(b'unrelated template must not be opened')
-            with patch.object(reports, 'TEMPLATES_DIR', templates), self.assertRaises(HTTPException) as error:
-                reports.generate_gradebook_report_xlsx(self.db, book.id)
-        self.assertEqual(error.exception.status_code, 409)
-        self.assertIn('ENGLISH - Grade 7-10 Class Record.xlsx', error.exception.detail)
+            with patch.object(reports, 'TEMPLATES_DIR', templates):
+                workbook = self.export(book)
+                try:
+                    self.assertEqual(workbook['INPUT DATA']['E24'].value, 'English')
+                    self.assertIn('Term 1', workbook.sheetnames)
+                finally:
+                    workbook.close()
 
     def test_shs_export_uses_all_three_terms_and_authoritative_results(self):
         first_semester = self.create(self.general)
@@ -1083,21 +1100,108 @@ class ClassRecordRegressionTest(unittest.TestCase):
         set_json(self.db, 'school.heads', {str(self.year.id): {'full_name': 'Buen Owogowog', 'title': 'Principal'}})
         workbook = self.export(third_book)
         try:
-            self.assertEqual(workbook['INPUT DATA']['F17'].value, 'Buen Owogowog')
-            self.assertEqual(workbook['INPUT DATA']['F24'].value, '11')
-            self.assertEqual(workbook['INPUT DATA']['O11'].value, 'First Student')
-            self.assertEqual(workbook['Term 1']['AL17'].value, 90)
-            self.assertEqual(workbook['Term 1']['AM17'].value, 93)
-            self.assertEqual(workbook['Term 2']['AL17'].value, 70)
-            self.assertEqual(workbook['Term 2']['AM17'].value, 81)
-            self.assertEqual(workbook['Term 3']['AL17'].value, 40)
-            self.assertEqual(workbook['Term 3']['AM17'].value, 70)
-            with ZipFile(self.export_path) as package:
-                self.assertIn('xl/media/image3.svg', package.namelist())
-                self.assertIn('customXml/item1.xml', package.namelist())
+            self.assertEqual(workbook['INPUT DATA']['E16'].value, 'Buen Owogowog')
+            self.assertEqual(workbook['INPUT DATA']['E25'].value, '11')
+            self.assertEqual(workbook['Term 1']['B12'].value, 'First Student')
+            self.assertTrue(workbook['Term 1']['Q12'].value.startswith('='))
+            self.assertTrue(workbook['Term 1']['R12'].value.startswith('='))
+        finally:
+            workbook.close()
+        import openpyxl
+        workbook = openpyxl.load_workbook(self.export_path, data_only=True)
+        try:
+            for term, initial, grade in ((1, 90, 93), (2, 70, 81), (3, 40, 70)):
+                self.assertEqual(workbook[f'Term {term}']['Q12'].value, initial)
+                self.assertEqual(workbook[f'Term {term}']['R12'].value, grade)
         finally:
             workbook.close()
 
+    def test_custom_weights_maxima_and_attendance_export_without_changing_saved_scores(self):
+        self.configure_subject_export()
+        definitions = json.loads(self.general.component_definitions_json)
+        definitions[0]['weight'], definitions[1]['weight'] = 25, 35
+        definitions.append({'name': 'Attendance', 'weight': 10, 'max_items': 1})
+        self.general.component_definitions_json = json.dumps(definitions)
+        self.db.commit()
+        book = self.create(self.general)
+        for component in book.components:
+            if component.name == 'Quarterly Assessment':
+                for item, label, maximum in zip(component.items, ('ST1', 'ST2', 'TE'), (30, 20, 50)):
+                    item.label, item.max_score = label, maximum
+        book.components[0].items[0].max_score = 30
+        self.db.commit()
+        self.score_student(book, 80)
+        self.score_second_student(book, 70)
+        book.status = 'Finalized'
+        self.db.commit()
+        before = grading.get_gradebook_full(self.db, book.id)
+        workbook = self.export(book)
+        try:
+            sheet = workbook['Term 1']
+            self.assertEqual(sheet['E11'].value, 30)
+            self.assertEqual(sheet['H11'].value, 0.25)
+            self.assertIn('Attendance', [cell.value for cell in sheet[9]])
+            self.assertTrue(any(cell.value == 'TERM GRADE' for cell in sheet[10]))
+        finally:
+            workbook.close()
+        after = grading.get_gradebook_full(self.db, book.id)
+        self.assertEqual(before, after)
+        with self.assertRaises(HTTPException) as error:
+            from app.services.reports import generate_gradebook_report_xlsx
+            generate_gradebook_report_xlsx(self.db, book.id, 'V', 'V', '301874', allowed_teacher_id=book.teacher_user_id + 99999)
+        self.assertEqual(error.exception.status_code, 403)
+
+    def test_custom_music_and_health_setups_keep_the_combined_workbook(self):
+        self.configure_subject_export('mapeh')
+        self.general.component_definitions_json = definitions((30, 50, 20), (1, 1, 3))
+        self.subject.name = 'Music and Arts'
+        self.db.commit()
+        arts = self.create(self.general)
+        health = Subject(code='PEH-CUSTOM', name='Physical Education and Health', category='JHS')
+        self.db.add(health)
+        self.db.commit()
+        pe = self.create(self.general, subject_id=health.id)
+        for book in (arts, pe):
+            self.label_export_exams(book)
+            self.score_student(book, 80)
+            self.score_second_student(book, 80)
+            book.status = 'Finalized'
+        self.db.commit()
+        workbook = self.export(arts)
+        try:
+            self.assertIn('Term 1 M and A', workbook.sheetnames)
+            self.assertIn('Term 1 PE and H', workbook.sheetnames)
+            self.assertTrue(workbook['FINAL GRADES']['E5'].value.startswith('='))
+        finally:
+            workbook.close()
+        import openpyxl
+        workbook = openpyxl.load_workbook(self.export_path, data_only=True)
+        try:
+            self.assertEqual(workbook['FINAL GRADES']['E5'].value, 83)
+            self.assertIsNone(workbook['FINAL GRADES']['L5'].value)
+        finally:
+            workbook.close()
+
+    def test_export_uses_the_saved_calculation_even_when_template_weights_match(self):
+        for method, examination_type in (('floor', 'Term Examinations'), ('half_up', 'Quarterly Assessment')):
+            with self.subTest(method=method, examination_type=examination_type):
+                self.configure_subject_export()
+                self.general.rounding_method = method
+                self.db.commit()
+                book = self.create(self.general)
+                book.status = 'Draft'
+                book.components[-1].component_type = examination_type
+                self.db.commit()
+                self.label_export_exams(book)
+                self.score_student(book, 83.123)
+                self.score_second_student(book, 71.2)
+                book.status = 'Finalized'
+                self.db.commit()
+                workbook = self.export(book)
+                try:
+                    self.assertIn('Term 1', workbook.sheetnames)
+                finally:
+                    workbook.close()
     def test_mapeh_export_uses_updated_three_term_workbook(self):
         self.configure_subject_export('mapeh')
         self.subject.name = 'Music and Arts'
@@ -1139,6 +1243,83 @@ class ClassRecordRegressionTest(unittest.TestCase):
         finally:
             scoped.close()
 
+    def check_records_officer_three_term_export(self, grade):
+        import openpyxl
+        from app.services import reports
+        self.grade.name = self.first.grade = self.second.grade = str(grade)
+        self.subject.category = 'JHS' if grade < 11 else 'SHS-Core'
+        self.outside.grade = '10'
+        officer = User(username='export-officer', full_name='Test Records Officer', password_hash='unused', role='records_officer')
+        self.db.add(officer)
+        self.db.commit()
+        books = []
+        for quarter in (1, 2, 3):
+            period = self.period if quarter == 1 else GradingPeriod(
+                school_year_id=self.year.id, quarter=quarter, name=f'Term {quarter}',
+                starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
+            self.db.add(period)
+            self.db.commit()
+            book = self.create(self.general, grading_period_id=period.id)
+            book.teacher_user_id, book.teacher_name = self.teacher.id, self.teacher.full_name
+            self.score_student(book, 60 + quarter * 10)
+            self.score_second_student(book, 65 + quarter * 10)
+            book.status = 'Locked' if quarter == 3 else 'Finalized'
+            self.db.commit()
+            books.append(book)
+        snapshots = {book.id: grading.get_gradebook_full(self.db, book.id) for book in books}
+        with patch.object(reports, 'EXPORT_DIR', Path(TEST_DIR.name)):
+            response = gradebook_report_xlsx_new(books[0].id, region='V', division='V', school_id='301874',
+                                                all_terms=True, db=self.db, user=officer)
+            self.assertIn('AllTerms', response.filename)
+            formulas = openpyxl.load_workbook(response.path)
+            values = openpyxl.load_workbook(response.path, data_only=True)
+            try:
+                self.assertEqual(values.sheetnames, ['INPUT DATA', 'Term 1', 'Term 2', 'Term 3'])
+                for book in books:
+                    full = snapshots[book.id]
+                    sheet = values[f'Term {book.quarter}']
+                    headings = {cell.value: cell.column for cell in sheet[10]}
+                    learners = {student['external_id']: student for student in full['students']}
+                    self.assertEqual(len(learners), 2)
+                    for row in (12, 13):
+                        student = learners[sheet.cell(row, 3).value]
+                        for heading, key in (('INITIAL GRADE', 'initial_grade'), ('TERM GRADE', 'reported_grade')):
+                            self.assertEqual(sheet.cell(row, headings[heading]).value, student[key])
+                            self.assertEqual(formulas[sheet.title].cell(row, headings[heading]).data_type, 'f')
+                        column = 5
+                        for component, result in zip(full['components'], student['component_grades']):
+                            for item in (item for item in component['items'] if item['active']):
+                                self.assertEqual(sheet.cell(row, column).value, student['scores'][str(item['id'])])
+                                self.assertEqual(sheet.cell(11, column).value, item['max_score'])
+                                column += 1
+                            self.assertEqual(sheet.cell(row, column + 1).value, result['percentage'])
+                            self.assertEqual(sheet.cell(row, column + 2).value, result['weighted_score'])
+                            column += 3
+                self.assertEqual(values['INPUT DATA']['E25'].value, str(grade))
+                self.assertEqual(values['INPUT DATA']['E16'].value, 'Buen Owogowog')
+            finally:
+                formulas.close()
+                values.close()
+            single = gradebook_report_xlsx_new(books[0].id, region='V', division='V', school_id='301874',
+                                              all_terms=False, db=self.db, user=officer)
+            self.assertIn('Term1', single.filename)
+            self.assertEqual(snapshots, {book.id: grading.get_gradebook_full(self.db, book.id) for book in books})
+            books[1].status = 'Draft'
+            self.db.commit()
+            with self.assertRaises(HTTPException) as blocked:
+                gradebook_report_xlsx_new(books[0].id, region='V', division='V', school_id='301874',
+                                         all_terms=True, db=self.db, user=officer)
+            self.assertEqual(blocked.exception.status_code, 409)
+
+    def test_records_officer_all_terms_grade_7(self):
+        self.check_records_officer_three_term_export(7)
+
+    def test_records_officer_all_terms_grade_11(self):
+        self.check_records_officer_three_term_export(11)
+
+    def test_records_officer_all_terms_grade_12(self):
+        self.check_records_officer_three_term_export(12)
+
     def test_jhs_export_writes_students_and_all_three_term_grades(self):
         self.configure_subject_export()
         self.subject.name, self.subject.category = 'English', 'JHS'
@@ -1163,11 +1344,13 @@ class ClassRecordRegressionTest(unittest.TestCase):
         import openpyxl
         workbook = openpyxl.load_workbook(self.export_path, data_only=True)
         try:
-            self.assertEqual(workbook['INPUT DATA']['K11'].value, 'First Student')
-            self.assertEqual(workbook['INPUT DATA']['N11'].value, 'Second Student')
-            self.assertEqual([workbook[f'TERM {term}'][f'AC18'].value for term in (1, 2, 3)], [75, 76, 76])
-            with ZipFile(self.export_path) as package:
-                self.assertIn('xl/drawings/drawing1.xml', package.namelist())
+            self.assertEqual(workbook['Term 1']['B12'].value, 'First Student')
+            self.assertEqual(workbook['Term 1']['B13'].value, 'Second Student')
+            for book in books:
+                sheet = workbook[f'Term {book.quarter}']
+                column = next(cell.column for cell in sheet[10] if cell.value == 'TERM GRADE')
+                expected = grading.get_gradebook_full(self.db, book.id)['students'][0]['reported_grade']
+                self.assertEqual(sheet.cell(12, column).value, expected)
         finally:
             workbook.close()
         from app.services import reports

@@ -160,9 +160,14 @@ def calculate_component_percentage(
         portions = {'ST1': 30, 'ST2': 30, 'TE': 40}
         labels = [item['label'] for item in items]
         complete = complete and len(labels) == 3 and set(labels) == set(portions)
-        percentage = sum(float(score_map[item['id']]['score']) / float(item['max_score']) * portions.get(item['label'], 0)
-                         for item in items if item['id'] in score_map and score_map[item['id']].get('status') == 'Scored'
-                         and score_map[item['id']].get('score') is not None)
+        scored_items = [item for item in items if item['id'] in score_map
+                        and score_map[item['id']].get('status') == 'Scored'
+                        and score_map[item['id']].get('score') is not None]
+        # Draft previews normalize the scored exam portions; complete exams retain 30/30/40.
+        used_portion = sum(portions.get(item['label'], 0) for item in scored_items)
+        weighted_percentage = sum(float(score_map[item['id']]['score']) / float(item['max_score']) * portions.get(item['label'], 0)
+                                  for item in scored_items)
+        percentage = weighted_percentage if used_portion == 100 else weighted_percentage * 100 / used_portion if used_portion else None
 
     return {
         "total_earned": total_earned,

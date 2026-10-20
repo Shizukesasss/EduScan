@@ -11,8 +11,9 @@ export default function AdjustmentRequestsModal({
   onClose,
   onRefresh,
 }) {
-  const userRole = auth.role();
-  const isAdminOrOfficer = ['admin', 'records_officer'].includes(userRole);
+  const userRole = String(auth.role()).toLowerCase();
+  const canReviewAdjustments = userRole === 'records_officer';
+  const canRequestAdjustments = userRole === 'teacher';
 
   const [mode, setMode] = useState('list'); // 'list' | 'create'
   const [criteriaWeights, setCriteriaWeights] = useState(() => Object.fromEntries(components.map((c) => [c.id, c.weight])));
@@ -86,7 +87,7 @@ export default function AdjustmentRequestsModal({
         new_status: 'Scored',
         reason: requestReason.trim(),
       });
-      showSuccess('Grade adjustment request successfully submitted for administrative review.');
+      showSuccess('Grade adjustment request sent to the Records Officer for review.');
       setIsConfirmed(false);
       setNewScore('');
       setRequestReason('');
@@ -120,7 +121,7 @@ export default function AdjustmentRequestsModal({
         components: requested,
         reason: requestReason.trim(),
       });
-      showSuccess('Criteria adjustment request submitted for administrative review.');
+      showSuccess('Criteria adjustment request sent to the Records Officer for review.');
       setIsConfirmed(false);
       setRequestReason('');
       await onRefresh?.();
@@ -200,7 +201,7 @@ export default function AdjustmentRequestsModal({
               >
                 Adjustment Requests ({adjustments.length})
               </button>
-              {!isAdminOrOfficer && (
+              {canRequestAdjustments && (
                 <button
                   type="button"
                   className={`status-filter-btn${mode === 'create' ? ' status-filter-active status-filter-audit' : ''}`}
@@ -209,7 +210,7 @@ export default function AdjustmentRequestsModal({
                   <Plus size={13} style={{ display: 'inline', marginRight: '3px' }} /> New Request
                 </button>
               )}
-              {!isAdminOrOfficer && (
+              {canRequestAdjustments && (
                 <button
                   type="button"
                   className={`status-filter-btn${mode === 'criteria' ? ' status-filter-active status-filter-audit' : ''}`}
@@ -228,14 +229,14 @@ export default function AdjustmentRequestsModal({
                 {components.map((component) => (
                   <label key={component.id}>
                     <span className="field-label">{component.component_type === 'Term Examinations' ? 'QA / Term Examinations' : component.name} (%)</span>
-                    <input type="number" min="0" max="100" step="1" className="input-field"
+                    <input placeholder="e.g. 20" type="number" min="0" max="100" step="1" className="input-field"
                       value={criteriaWeights[component.id] ?? component.weight} disabled={loading}
                       onChange={(event) => setCriteriaWeights((prev) => ({ ...prev, [component.id]: event.target.value }))} />
                   </label>
                 ))}
               </div>
               <strong>Total: {components.reduce((sum, component) => sum + (Number(criteriaWeights[component.id]) || 0), 0)}%</strong>
-              <label><span className="field-label">Reason for criteria change</span><textarea className="input-field" value={requestReason} minLength={8} maxLength={2000} onChange={(event) => setRequestReason(event.target.value)} disabled={loading} required /></label>
+              <label><span className="field-label">Reason for criteria change</span><textarea placeholder="Explain the reason for this action" className="input-field" value={requestReason} minLength={8} maxLength={2000} onChange={(event) => setRequestReason(event.target.value)} disabled={loading} required /></label>
               <label className="flex items-center gap-2"><input type="checkbox" checked={isConfirmed} onChange={(event) => setIsConfirmed(event.target.checked)} disabled={loading} /> I understand approval will recalculate every learner’s grade in this class record.</label>
               <div className="action-row pt-4 border-t border-border flex justify-end gap-3">
                 <button type="button" className="btn btn-secondary" onClick={() => setMode('list')} disabled={loading}>Cancel</button>
@@ -313,7 +314,7 @@ export default function AdjustmentRequestsModal({
                 </div>
               </div>
 
-              <label><span className="field-label">Reason for correction</span><textarea className="input-field" value={requestReason} minLength={8} maxLength={2000} onChange={event => setRequestReason(event.target.value)} disabled={loading} required /></label>
+              <label><span className="field-label">Reason for correction</span><textarea placeholder="Explain the reason for this action" className="input-field" value={requestReason} minLength={8} maxLength={2000} onChange={event => setRequestReason(event.target.value)} disabled={loading} required /></label>
 
               <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '15px', marginBottom: '20px' }}>
                 <input
@@ -421,7 +422,7 @@ export default function AdjustmentRequestsModal({
                             </span>
                           </td>
                           <td className="text-center align-middle">
-                            {isPending && isAdminOrOfficer && (
+                            {isPending && canReviewAdjustments && (
                               <div className="action-row compact-actions flex-wrap gap-2 mb-2 justify-center">
                                 {reviewingId === req.id ? (
                                   <div className="review-input-group flex-col items-center gap-2 w-48 mx-auto">
@@ -483,11 +484,11 @@ export default function AdjustmentRequestsModal({
                                 )}
                               </div>
                             )}
-                            {isPending && (
+                            {isPending && (canReviewAdjustments || canRequestAdjustments) && (
                               <button
                                 type="button"
                                 className="btn-link-action mx-auto block"
-                                style={{ color: '#dc2626', padding: 0, marginTop: isAdminOrOfficer && isPending ? '4px' : '0px' }}
+                                style={{ color: '#dc2626', padding: 0, marginTop: canReviewAdjustments && isPending ? '4px' : '0px' }}
                                 title="Delete request"
                                 onClick={() => handleDeleteRequest(req.id)}
                                 disabled={loading}

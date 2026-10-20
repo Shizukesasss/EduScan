@@ -151,7 +151,10 @@ class AtomicEnrollmentTest(unittest.TestCase):
         dispatch.assert_not_called()
 
     def test_sms_problem_does_not_report_successful_face_registration_as_failed(self):
-        result = self.enroll(payload={**self.payload, 'guardian_phone': 'invalid'})
+        from fastapi import HTTPException
+        from app.services import sms
+        with patch.object(sms, 'normalize_phone', side_effect=HTTPException(status_code=422, detail='SMS recipient validation failed')):
+            result = self.enroll(payload={**self.payload, 'guardian_phone': '09171234567'})
         self.assertEqual(result.status_code, 200, result.text)
         self.assertEqual(result.json()['sms']['status'], 'not_queued')
         self.assertEqual(len(self.fixture.samples(self.db.get(Person, result.json()['person_id']))), 15)
@@ -221,3 +224,21 @@ class AtomicEnrollmentTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+    def test_phone_validation_rejects_bad_contacts_before_saving_or_enrolling(self):
+        before = self.snapshot()
+        for role in ('Student', 'Faculty', 'Non-teaching Personnel'):
+            for phone in ('12345', '+12025550123', '091712345678', '0917abc4567', '0917 1234567'):
+                payload = {**self.payload, 'role': role, 'guardian_phone': phone}
+                with self.subTest(role=role, phone=phone):
+                    self.assertEqual(self.client.post('/api/persons', json=payload).status_code, 422)
+                    self.assertEqual(self.client.patch(f'/api/persons/{self.fixture.first.id}', json=payload).status_code, 422)
+                    self.assertEqual(self.enroll(payload=payload).status_code, 422)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_phone_formats_are_normalized_and_blank_contact_stays_optional(self):
+        from app.schemas import PersonCreate
+        for phone in ('09171234567', '639171234567', '+639171234567'):
+            self.assertEqual(PersonCreate(**{**self.payload, 'guardian_phone': phone}).guardian_phone, '+639171234567')
+        for phone in ('', ' ', None):
+            self.assertIsNone(PersonCreate(**{**self.payload, 'guardian_phone': phone}).guardian_phone)

@@ -21,7 +21,7 @@ export default function Grading() {
   const currentRole = String(auth.role()).toLowerCase();
   const isTeacher = currentRole === 'teacher';
   const isReviewer = ['admin', 'records_officer', 'school_head'].includes(currentRole);
-  const canReviewAdjustments = ['admin', 'records_officer'].includes(currentRole);
+  const canReviewAdjustments = currentRole === 'records_officer';
   const [structure, setStructure] = useState({
     school_years: [],
     grading_periods: [],
@@ -605,7 +605,7 @@ export default function Grading() {
   };
 
   // 9. Export & Print Handlers
-  const handleExportXlsx = async () => {
+  const handleExportXlsx = async (allTerms = false) => {
     if (!gradebookId || !fullGradebook) return;
     if (isDirty) return showError('Save your scores before exporting the class record.');
 
@@ -615,12 +615,13 @@ export default function Grading() {
     }
 
     const gb = fullGradebook.gradebook;
-    const filename = `ClassRecord-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-Term${gb.quarter}.xlsx`;
+    const filename = `ClassRecord-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-${allTerms ? 'AllTerms' : `Term${gb.quarter}`}.xlsx`;
     try {
       const q = new URLSearchParams({
         region,
         division,
-        school_id: schoolId
+        school_id: schoolId,
+        all_terms: String(allTerms)
       });
       await api.download(`/gradebooks/${gradebookId}/report.xlsx?${q.toString()}`, filename);
     } catch (err) {
@@ -850,6 +851,7 @@ export default function Grading() {
                     adjustmentCount={teacherAdjustmentCount}
                     onToggleValidation={() => setShowValidation((prev) => !prev)}
                     onExportXlsx={handleExportXlsx}
+                    onExportAllTerms={() => handleExportXlsx(true)}
                     onPrintReport={handlePrintReport}
                     disabled={loading || saving}
                     onValidateFinalize={handleValidateFinalize}

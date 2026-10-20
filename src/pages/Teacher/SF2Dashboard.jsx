@@ -3,7 +3,7 @@ import { FileSpreadsheet } from 'lucide-react';
 import AdviserAnalyticsWidget from '../../components/Teacher/AdviserAnalyticsWidget';
 import SubjectSelector from '../../components/Teacher/SubjectSelector';
 import SectionAttendance from '../../components/Teacher/SectionAttendance';
-import SF2ReportGenerator from '../../components/Teacher/SF2ReportGenerator';
+import ReleasedSF2Reports from '../../components/Teacher/ReleasedSF2Reports';
 import StudentProfileModal from '../../components/Teacher/StudentProfileModal';
 import { api, localDate } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
@@ -38,7 +38,7 @@ export default function SF2Dashboard() {
       {/* Top Header & Analytics */}
       <div className="teacher-workspace-toolbar">
         <SubjectSelector currentClass={currentClass} setCurrentClass={setCurrentClass} setCurrentSchedule={setCurrentSchedule} />
-        <button onClick={() => setActiveTab('reports')} className="btn-primary"><FileSpreadsheet size={18} /> Generate monthly SF2</button>
+        <button onClick={() => setActiveTab('reports')} className="btn-primary"><FileSpreadsheet size={18} /> View official SF2</button>
       </div>
 
       <AdviserAnalyticsWidget students={students} />
@@ -55,7 +55,7 @@ export default function SF2Dashboard() {
           onClick={() => setActiveTab('reports')}
           style={{ padding: '8px 16px', background: activeTab === 'reports' ? 'var(--primary-color)' : 'transparent', color: activeTab === 'reports' ? 'white' : 'var(--text-secondary)', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, transition: 'all 0.2s' }}
         >
-          Reports & Exports
+          Official SF2 reports
         </button>
       </div>
 
@@ -65,7 +65,7 @@ export default function SF2Dashboard() {
       )}
 
       {activeTab === 'reports' && (
-        <SF2ReportGenerator />
+        <ReleasedSF2Reports />
       )}
 
       {/* Modals */}

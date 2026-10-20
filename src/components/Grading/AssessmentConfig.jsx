@@ -217,7 +217,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
                       </label>
                       <label>
                         <span className="field-label">Weight (%)</span>
-                        <input
+                        <input placeholder="e.g. 20"
                           type="number"
                           step="1"
                           min="0"
@@ -270,7 +270,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
                                   />
                                 </td>
                                 <td>
-                                  <input
+                                  <input placeholder="Enter a score"
                                     type="number"
                                     min="1"
                                     step="1"

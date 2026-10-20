@@ -15,7 +15,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from xml.etree import ElementTree as ET
 
 from fastapi import HTTPException
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -49,12 +49,44 @@ def register_report(db: Session, source: Path, report_type: str, parameters: dic
     record = GeneratedReport(
         id=report_id, report_type=report_type, filename=source.name, file_path=str(target), file_sha256=digest,
         parameters_json=json.dumps(parameters, default=str, sort_keys=True), status="Generated",
-        generated_by=actor.id, generated_by_name=actor.full_name,
+        generated_by=actor.id, generated_by_name=actor.full_name, generated_by_role=actor.role,
     )
     db.add(record)
     db.commit()
     db.refresh(record)
     return record
+
+
+def official_sf2_preview(path: Path) -> dict:
+    from .sf2 import SHEET_NAME, MALE_ROWS, FEMALE_ROWS, DAY_COLUMNS, NS_XDR
+    tardy = set()
+    with ZipFile(path) as archive:
+        if "xl/drawings/drawing1.xml" in archive.namelist():
+            drawing = ET.fromstring(archive.read("xl/drawings/drawing1.xml"))
+            for node in drawing.iter(f"{{{NS_XDR}}}cNvPr"):
+                match = re.fullmatch(r"EduScan Tardy (\d+)-(\d+)", node.get("name", ""))
+                if match:
+                    tardy.add(tuple(map(int, match.groups())))
+    with path.open('rb') as source:
+        book = load_workbook(source, read_only=True, data_only=True)
+        try:
+            sheet = book[SHEET_NAME]
+            cells = list(sheet.iter_rows(min_row=1, max_row=62, max_col=31, values_only=True))
+            days = [(index, cells[10][column - 1]) for index, column in enumerate(DAY_COLUMNS) if cells[10][column - 1] is not None]
+            learners = []
+            for sex, rows in (("Male", MALE_ROWS), ("Female", FEMALE_ROWS)):
+                for row in rows:
+                    values = cells[row - 1]
+                    if not values[1]:
+                        continue
+                    learners.append({"name": str(values[1]), "sex": sex,
+                        "marks": ["L" if (row, DAY_COLUMNS[index]) in tardy else str(values[DAY_COLUMNS[index] - 1] or "") for index, _ in days],
+                        "absences": values[28] or 0, "late": values[29] or 0, "remarks": str(values[30] or "")})
+            return {"days": [day for _, day in days], "learners": learners,
+                    "school_name": str(cells[7][2] or ""), "school_id": str(cells[5][2] or ""),
+                    "school_year": str(cells[5][10] or "")}
+        finally:
+            book.close()
 
 
 def _title(sheet, title: str, subtitle: str, last_column: int) -> None:
@@ -294,13 +326,6 @@ def _write_class_record_workbook(template: Path, target: Path, changes: dict[str
         raise HTTPException(status_code=500, detail=f"Could not fill the updated class-record workbook: {exc}") from exc
 
 
-def _class_record_template(subject_name: str, grade_name: str) -> tuple[str, str]:
-    if is_senior_high(grade_name):
-        return "shs", "ECR_3Term - SSHS - SY2026-2027.xlsx"
-    from .class_record_export import subject_template
-    return subject_template(subject_name)
-
-
 def _student_groups(students: list[dict]) -> tuple[list[dict], list[dict]]:
     males, females, unknown = [], [], []
     for student in students:
@@ -329,85 +354,12 @@ def _assessment_category(component: dict) -> str | None:
     return None
 
 
-def _component_categories(full: dict) -> dict[int, str]:
-    components = full["components"]
-    categories = {component["id"]: _assessment_category(component) for component in components}
-    if components and not any(categories.values()) and len(components) == 3:
-        categories = dict(zip((component["id"] for component in components), ("ww", "pt", "exam")))
-    if any(category is None for category in categories.values()):
-        raise HTTPException(status_code=409, detail="This class record has an assessment component that the selected DepEd workbook cannot represent. Configure its component type before exporting.")
-    return categories
-
-
 def _column_name(number: int) -> str:
     result = ""
     while number:
         number, remainder = divmod(number - 1, 26)
         result = chr(65 + remainder) + result
     return result
-
-
-def _write_subject_term(changes: dict[str, dict[str, object]], sheet_name: str, fulls: list[dict],
-                        males: list[dict], females: list[dict], male_start: int, female_start: int,
-                        hps_row: int, column_map: dict[str, tuple[int, int]],
-                        initial_col: int, grade_col: int, require_all: bool = False) -> dict[int, float | None]:
-    sheet_changes = changes.setdefault(sheet_name, {})
-    active_items: dict[str, list[dict]] = {"ww": [], "pt": [], "exam": []}
-    for full in fulls:
-        categories = _component_categories(full)
-        active_ids = set()
-        for student in full["students"]:
-            scores = student.get("scores") or {}
-            statuses = student.get("score_statuses") or {}
-            active_ids.update(int(item_id) for item_id, status in statuses.items() if status != "Missing")
-            active_ids.update(int(item_id) for item_id, score in scores.items() if score is not None)
-        for component in full["components"]:
-            active_items[categories[component["id"]]].extend(
-                item for item in component.get("items", []) if item["id"] in active_ids
-            )
-    students_by_full = [{student["person_id"]: student for student in full["students"]} for full in fulls]
-
-    for category, (first_column, capacity) in column_map.items():
-        items = active_items[category]
-        slots = [items[index:index + 1] for index in range(min(len(items), capacity))]
-        if len(items) > capacity:
-            slots[-1] = items[capacity - 1:]
-        for slot_index, slot_items in enumerate(slots):
-            if not slot_items:
-                continue
-            column = first_column + slot_index
-            sheet_changes[f"{_column_name(column)}{hps_row}"] = sum(float(item["max_score"]) for item in slot_items)
-            for students, first_row in ((males, male_start), (females, female_start)):
-                for index, student in enumerate(students):
-                    scores = []
-                    for source_index, _ in enumerate(fulls):
-                        source_student = students_by_full[source_index].get(student["person_id"])
-                        if not source_student:
-                            continue
-                        score_map = source_student.get("scores") or {}
-                        scores.extend(score_map.get(str(item["id"])) for item in slot_items if str(item["id"]) in score_map)
-                    numeric_scores = [float(score) for score in scores if score is not None]
-                    if numeric_scores:
-                        sheet_changes[f"{_column_name(column)}{first_row + index}"] = sum(numeric_scores)
-
-    term_grades = {}
-    for students, first_row in ((males, male_start), (females, female_start)):
-        for index, student in enumerate(students):
-            sources = [source.get(student["person_id"]) for source in students_by_full]
-            sources = [source for source in sources if source]
-            complete_sources = [source for source in sources if source.get("reported_grade") is not None]
-            initial = grade = None
-            if sources and len(complete_sources) == len(sources) and (not require_all or len(sources) == len(fulls)):
-                initial_values = [source["initial_grade"] for source in complete_sources if source.get("initial_grade") is not None]
-                if len(initial_values) == len(complete_sources):
-                    initial = round_value(sum(initial_values) / len(initial_values), 2, "half_up")
-                grades = [float(source["reported_grade"]) for source in complete_sources]
-                grade = round_value(sum(grades) / len(grades), 0, "half_up")
-            data_row = first_row + index
-            sheet_changes[f"{_column_name(initial_col)}{data_row}"] = initial
-            sheet_changes[f"{_column_name(grade_col)}{data_row}"] = grade
-            term_grades[student["person_id"]] = grade
-    return term_grades
 
 
 def _complete_finalized_record(full: dict | None) -> bool:
@@ -419,72 +371,26 @@ def _complete_finalized_record(full: dict | None) -> bool:
     )
 
 
-def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str = "", division: str = "", school_id: str = "", allowed_teacher_id: int | None = None) -> Path:
+def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str = "", division: str = "", school_id: str = "", allowed_teacher_id: int | None = None, all_terms: bool = False) -> Path:
     from .grading import get_gradebook_full
     from ..models_grading import Gradebook
+    from .adaptive_class_record import export_adaptive
 
     full = get_gradebook_full(db, gradebook_id)
-    gb_orm = db.get(Gradebook, gradebook_id)
-    if not full or not gb_orm:
+    book = db.get(Gradebook, gradebook_id)
+    if not full or not book:
         raise HTTPException(status_code=404, detail="Gradebook not found")
-    gb = full["gradebook"]
-    subject_name = gb["subject_name"] or ""
-    if not is_senior_high(gb['grade_name']):
+    if not all_terms and not is_senior_high(full['gradebook']['grade_name']):
         from .class_record_export import export_jhs, subject_template
-        kind, filename = subject_template(subject_name)
-        return export_jhs(db, gb_orm, full, kind, TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename,
-                          region, division, school_id, allowed_teacher_id)
-    kind, filename = _class_record_template(subject_name, gb["grade_name"])
-    template = TEMPLATES_DIR / "UPDATED CLASS RECORD" / filename
-    current_term = int(gb["quarter"])
-    if current_term not in (1, 2, 3):
-        raise HTTPException(status_code=409, detail="The updated workbook supports Term 1, Term 2, and Term 3 only.")
-
-    sibling_query = select(Gradebook).where(
-        Gradebook.school_year_id == gb_orm.school_year_id,
-        Gradebook.grade_level_id == gb_orm.grade_level_id,
-        Gradebook.section_id == gb_orm.section_id,
-        Gradebook.subject_id == gb_orm.subject_id,
-    )
-    if allowed_teacher_id is not None:
-        sibling_query = sibling_query.where(Gradebook.teacher_user_id == allowed_teacher_id)
-    term_fulls = {}
-    for book in db.scalars(sibling_query).all():
-        item = get_gradebook_full(db, book.id)
-        if _complete_finalized_record(item):
-            term_fulls[int(item['gradebook']['quarter'])] = item
-
-    males, females = _student_groups(full["students"])
-    if not full["students"]:
-        raise HTTPException(status_code=409, detail="This section has no active students to export.")
-    changes: dict[str, dict[str, object]] = {"INPUT DATA": {}}
-    inp = changes["INPUT DATA"]
-    year = re.match(r"\d{4}", gb["school_year_name"])
-    if not year:
-        raise HTTPException(status_code=409, detail="The school-year name must begin with its four-digit starting year for the SHS workbook.")
-    inp.update({"F10": region, "F11": division, "F13": school_id, "F14": "San Jose National High School",
-                "F16": int(year.group()), "F22": gb["teacher_name"], "F24": gb["grade_name"],
-                "F25": gb["section_name"], "F28": "CORE SUBJECT", "F29": "ALL TRACKS", "F30": subject_name})
-    school_head = get_json(db, 'school.heads', {}).get(str(gb_orm.school_year_id), {}).get('full_name', '')
-    if school_head:
-        inp.update({'C17': 'SCHOOL HEAD', 'E17': ':', 'F17': school_head})
-    for roster, name_column, lrn_column in ((males, 'O', 'N'), (females, 'S', 'R')):
-        for index, student in enumerate(roster):
-            inp[f'{name_column}{11 + index}'] = student['full_name']
-            inp[f'{lrn_column}{11 + index}'] = student.get('lrn') or ''
-    for term in range(1, 4):
-        term_full = term_fulls.get(term)
-        if term_full:
-            _write_subject_term(changes, f'Term {term}', [term_full], males, females, 17, 68,
-                                14, {'ww': (4, 10), 'pt': (17, 10), 'exam': (30, 3)}, 38, 39)
-
-    safe_subject = subject_name
-    target = new_report_path(EXPORT_DIR,
-        f"ClassRecord-{_safe_name(gb['school_year_name'])}-Term{current_term}"
-        f"-Grade{_safe_name(gb['grade_name'])}-{_safe_name(gb['section_name'])}"
-        f"-{_safe_name(safe_subject)}.xlsx")
-    _write_class_record_workbook(template, target, changes)
-    return target
+        try:
+            kind, filename = subject_template(full['gradebook']['subject_name'] or '')
+            return export_jhs(db, book, full, kind, TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename,
+                              region, division, school_id, allowed_teacher_id)
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+            # A fixed workbook cannot represent every approved grading setup.
+    return export_adaptive(db, book, full, region, division, school_id, allowed_teacher_id, all_terms=all_terms)
 
 
 def gradebook_report_html(db: Session, gradebook_id: int) -> str:
@@ -541,13 +447,13 @@ def generate_attendance_range_xlsx(db: Session, starts_on: date, ends_on: date, 
     book = Workbook()
     detail = book.active
     detail.title = "Attendance Detail"
-    labels = ["Date", "ID / LRN", "Name", "Role", "Grade", "Section / assignment", "Time in", "Time out", "Status", "Source"]
+    labels = ["Date", "ID / LRN", "Name", "Role", "Grade", "Section / assignment", "Time in", "Time out", "Attendance status", "Enrollment / employment", "Start date", "Last enrolled / duty date", "Previous / receiving school", "Movement note", "Source"]
     _title(detail, "EDUSCAN ATTENDANCE REPORT", f"{starts_on.isoformat()} through {ends_on.isoformat()}", len(labels))
     _headers(detail, 4, labels)
     for row_number, item in enumerate(rows, 5):
         values = [item["attendance_date"], item["lrn"] or item["external_id"], item["full_name"], item["role"], item["grade"] or "",
                   item["section"] or item["assignment"] or "", item["time_in"].strftime("%H:%M:%S") if item["time_in"] else "",
-                  item["time_out"].strftime("%H:%M:%S") if item["time_out"] else "", item["status"], item["source"]]
+                  item["time_out"].strftime("%H:%M:%S") if item["time_out"] else "", item["status"], item["enrollment_status"], item["enrollment_start_date"], item["enrollment_end_date"], item["transfer_school"], item["enrollment_note"], item["source"]]
         for column, value in enumerate(values, 1):
             detail.cell(row_number, column, value)
     detail.freeze_panes = "A5"
@@ -576,6 +482,16 @@ def attendance_report_html(db: Session, starts_on: date, ends_on: date, role: st
                            grade: str | None = None, section: str | None = None,
                            person_id: int | None = None) -> str:
     rows = attendance_range_rows(db, starts_on, ends_on, role, grade, section, person_id)
+    if starts_on == ends_on:
+        headings = ["LRN / ID", "Name", "Role", "Grade / section", "Time in", "Time out", "Attendance", "Enrollment / employment", "Movement note"]
+        body = ""
+        for item in rows:
+            values = [item["lrn"] or item["external_id"], item["full_name"], item["role"],
+                      f"{item['grade'] or ''} {item['section'] or item['assignment'] or ''}", item["time_in"] or "", item["time_out"] or "",
+                      item["status"], item["enrollment_status"], item["enrollment_note"] or ""]
+            body += "<tr>" + "".join(f"<td>{html.escape(str(value))}</td>" for value in values) + "</tr>"
+        return _printable_html("Daily Attendance and Movement", starts_on.isoformat(),
+            "<table><thead><tr>" + "".join(f"<th>{label}</th>" for label in headings) + "</tr></thead><tbody>" + body + "</tbody></table>")
     grouped: dict[int, list[dict]] = defaultdict(list)
     for item in rows:
         grouped[item["person_id"]].append(item)

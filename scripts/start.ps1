@@ -1,3 +1,8 @@
+[CmdletBinding()]
+param(
+  [switch]$Wait
+)
+
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $backendRoot = Join-Path $projectRoot "backend"
@@ -65,3 +70,14 @@ try {
 Write-Host "EduScan API ready (PID $($api.Id)): http://127.0.0.1:8000/api/health"
 Write-Host "EduScan web app ready (PID $($web.Id)): http://127.0.0.1:5174"
 Write-Host "Logs: $logDirectory"
+
+if ($Wait) {
+  try {
+    Write-Host "EduScan is running in foreground. Press Ctrl+C to stop."
+    Wait-Process -Id $api.Id, $web.Id
+  } finally {
+    Stop-Process -Id $api.Id -ErrorAction SilentlyContinue
+    Stop-Process -Id $web.Id -ErrorAction SilentlyContinue
+  }
+}
+

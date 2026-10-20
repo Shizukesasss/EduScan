@@ -9,6 +9,7 @@ import { availableOptionId, isJuniorHighGrade, isSeniorHighGrade } from '../../s
 import { useToast } from '../../contexts/useToast';
 import BiometricConsent from '../../components/Scanner/BiometricConsent';
 import EnrollmentFields from '../../components/Scanner/EnrollmentFields';
+import PhoneNumberField from '../../components/Scanner/PhoneNumberField';
 
 const tabs = [
   ['people', 'People & records'],
@@ -30,6 +31,7 @@ const orderedOptions = (items, getLabel = (item) => item?.name) => [...items].so
 const orderedSections = (items) => [...items].sort((a, b) => compareText(a.grade, b.grade) || compareText(a.name, b.name));
 const orderedTracks = orderedOptions(SHS_TRACKS, (track) => track);
 const JHS_PROGRAMS = orderedOptions(['BEP', 'STE'], (program) => program);
+const personNamePattern = "[\\p{L}\\p{M} '’.-]+";
 
 // ─── Confirmation Modal ─────────────────────────────────────────────────────
 function ConfirmModal({ title, message, onConfirm, onCancel, danger = false }) {
@@ -72,11 +74,11 @@ function ActiveBadge({ active }) {
 }
 
 // ─── Shared form primitives ─────────────────────────────────────────────────
-function Field({ label, value, onChange, type = 'text', required = false, disabled = false }) {
+function Field({ label, value, onChange, type = 'text', required = false, disabled = false, pattern, title }) {
   return (
     <label>
       <span className="field-label">{label}</span>
-      <input className="input-field" type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} required={required} disabled={disabled} />
+      <input placeholder={String(label).startsWith('Type') ? label : `Enter ${String(label).toLowerCase()}`} className="input-field" type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} required={required} disabled={disabled} pattern={pattern} title={title} />
     </label>
   );
 }
@@ -198,13 +200,13 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
             {form.role === 'Student'
               ? <Field label="LRN" value={form.lrn} onChange={(v) => patch('lrn', v)} required />
               : <Field label="Employee ID" value={form.external_id} onChange={(v) => patch('external_id', v)} required />}
-            <Field label="Surname" value={form.surname} onChange={(v) => patch('surname', v)} required />
-            <Field label="First name" value={form.first_name} onChange={(v) => patch('first_name', v)} required />
-            <Field label="Middle name" value={form.middle_name} onChange={(v) => patch('middle_name', v)} />
-            <Field label="Extension (e.g. Jr.)" value={form.name_extension} onChange={(v) => patch('name_extension', v)} />
-            <SelectField label="Sex for SF2" value={form.sex} onChange={(v) => patch('sex', v)} options={['Female', 'Male']} />
             <SelectField label="Role" value={form.role} onChange={(v) => patch('role', v)} options={['Student', 'Faculty', 'Non-teaching Personnel']} />
-            <Field label={form.role === 'Student' ? 'Guardian phone' : 'Phone number'} value={form.guardian_phone} onChange={(v) => patch('guardian_phone', v)} />
+            <Field label="Surname" value={form.surname} onChange={(v) => patch('surname', v)} required pattern={personNamePattern} title="Use letters and common name punctuation only." />
+            <Field label="First name" value={form.first_name} onChange={(v) => patch('first_name', v)} required pattern={personNamePattern} title="Use letters and common name punctuation only." />
+            <Field label="Middle name" value={form.middle_name} onChange={(v) => patch('middle_name', v)} pattern={personNamePattern} title="Use letters and common name punctuation only." />
+            <Field label="Extension (e.g. Jr.)" value={form.name_extension} onChange={(v) => patch('name_extension', v)} pattern={personNamePattern} title="Use letters and common name punctuation only." />
+            <SelectField label="Sex for SF2" value={form.sex} onChange={(v) => patch('sex', v)} options={['Female', 'Male']} />
+            <PhoneNumberField label={form.role === 'Student' ? 'Guardian phone' : 'Phone number'} value={form.guardian_phone} onChange={(v) => patch('guardian_phone', v)} />
             {form.role === 'Student' && (
               <>
                 <SelectField label="Grade level" value={form.grade} onChange={(v) => { patch('grade', v); patch('section', ''); }} options={['', ...orderedOptions(structure.grade_levels).map((g) => g.name)]} />
@@ -284,8 +286,8 @@ function SchoolHeadSettings({ schoolYears, success, fail }) {
     <form onSubmit={save}>
       <div className="form-grid three-columns">
         <label><span className="field-label">School year</span><select className="input-field" value={selectedYearId} disabled={loading || saving} onChange={(event) => setYearId(event.target.value)} required>{orderedOptions(schoolYears).map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
-        <label><span className="field-label">School head full name</span><input className="input-field" value={form.full_name} minLength={3} maxLength={160} disabled={loading || saving} onChange={(event) => updateForm('full_name', event.target.value)} required /></label>
-        <label><span className="field-label">Official title</span><input className="input-field" value={form.title} minLength={2} maxLength={100} disabled={loading || saving} onChange={(event) => updateForm('title', event.target.value)} required /></label>
+        <label><span className="field-label">School head full name</span><input placeholder="Enter school head full name" className="input-field" value={form.full_name} minLength={3} maxLength={160} disabled={loading || saving} onChange={(event) => updateForm('full_name', event.target.value)} required /></label>
+        <label><span className="field-label">Official title</span><input placeholder="Enter official title" className="input-field" value={form.title} minLength={2} maxLength={100} disabled={loading || saving} onChange={(event) => updateForm('title', event.target.value)} required /></label>
       </div>
       <div className="modal-actions"><button className="btn-primary" disabled={loading || saving || !selectedYearId}>{saving ? 'Saving…' : 'Save school head'}</button></div>
     </form>
@@ -306,7 +308,7 @@ function AccountManager({ users, schoolYears, reload, success, fail }) {
       <SchoolHeadSettings schoolYears={schoolYears} success={success} fail={fail} />
       <section className="card-static">
         <div className="section-heading"><div><p className="eyebrow">Role-based access</p><h2>{editing ? 'Edit account' : 'Create account'}</h2></div><UserCog size={24} /></div>
-        <p className="section-copy">Temporary and reset passwords require at least 12 characters with uppercase, lowercase, number, and symbol. The account owner must replace them at next login.</p>
+        <p className="section-copy">Temporary and reset passwords need 12 or more characters, including a capital letter, a small letter, a number, and a symbol such as ! or #. The account owner must choose a new password the next time they sign in.</p>
         <form onSubmit={save}>
           <div className="form-grid three-columns">
             <Field label="Username" value={form.username} onChange={(v) => patch('username', v)} disabled={Boolean(editing)} required />
@@ -759,7 +761,7 @@ function RosterManager({ imports, reload, success, fail }) {
   const run = async (dryRun) => { if (!file) return fail(new Error('Select an approved .xlsx roster.')); const form = new FormData(); form.append('file', file); form.append('approved_reference', reference); form.append('dry_run', String(dryRun)); try { const result = await api.post('/admin/roster/import', form); setPreview(result); if (!dryRun) { success(`Roster imported: ${result.inserted} inserted and ${result.updated} updated.`); await reload(); } } catch (err) { fail(err); } };
   return (
     <div className="page-stack">
-      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Approved spreadsheet workflow</p><h2>Bulk roster import</h2></div><FileUp size={26} /></div><p className="section-copy">Required columns: External ID, Full Name, Sex, and Role. Students also require Grade and Section. Optional columns are LRN, Assignment, and Guardian Phone. Existing records with the same ID or LRN are updated.</p><div className="form-grid two-columns"><label><span className="field-label">Approved .xlsx roster</span><input className="input-field" type="file" accept=".xlsx" onChange={(e) => { setFile(e.target.files?.[0] || null); setPreview(null); }} /></label><Field label="School approval / source reference" value={reference} onChange={setReference} required /></div><div className="modal-actions"><button className="btn-secondary" onClick={() => run(true)}><FileUp size={16} /> Validate preview</button><button className="btn-primary" disabled={!preview?.dry_run || preview.invalid_rows > 0} onClick={() => run(false)}><Plus size={16} /> Import valid roster</button></div>{preview && <div className={`notice ${preview.invalid_rows ? 'notice-danger' : 'notice-success'}`}>Valid rows: {preview.valid_rows ?? preview.inserted + preview.updated}. Invalid rows: {preview.invalid_rows}. {preview.errors?.slice(0, 8).map((item) => `Row ${item.row}: ${item.errors.join(', ')}`).join(' · ')}</div>}</section>
+      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Approved spreadsheet workflow</p><h2>Bulk roster import</h2></div><FileUp size={26} /></div><p className="section-copy">Required columns: External ID, Full Name, Sex, and Role. Students also require Grade and Section. Optional columns are LRN, Assignment, and Guardian Phone. Existing records with the same ID or LRN are updated.</p><div className="form-grid two-columns"><label><span className="field-label">Approved .xlsx roster</span><input title="Choose a file in the format shown by this field" className="input-field" type="file" accept=".xlsx" onChange={(e) => { setFile(e.target.files?.[0] || null); setPreview(null); }} /></label><Field label="School approval / source reference" value={reference} onChange={setReference} required /></div><div className="modal-actions"><button className="btn-secondary" onClick={() => run(true)}><FileUp size={16} /> Validate preview</button><button className="btn-primary" disabled={!preview?.dry_run || preview.invalid_rows > 0} onClick={() => run(false)}><Plus size={16} /> Import valid roster</button></div>{preview && <div className={`notice ${preview.invalid_rows ? 'notice-danger' : 'notice-success'}`}>Valid rows: {preview.valid_rows ?? preview.inserted + preview.updated}. Invalid rows: {preview.invalid_rows}. {preview.errors?.slice(0, 8).map((item) => `Row ${item.row}: ${item.errors.join(', ')}`).join(' · ')}</div>}</section>
       <section className="card-static"><h2>Roster import audit</h2><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Imported</th><th>File</th><th>Approval</th><th>Counts</th><th>Actor</th><th>SHA-256</th></tr></thead><tbody>{imports.length === 0 && <tr><td colSpan="6" className="empty-cell">No approved roster has been imported.</td></tr>}{imports.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.filename}</td><td>{item.approved_reference}</td><td>{item.inserted_count} added, {item.updated_count} updated</td><td>{item.actor_name}</td><td className="model-version">{item.file_sha256}</td></tr>)}</tbody></table></div></section>
     </div>
   );
@@ -773,7 +775,7 @@ function RecoveryManager({ backups, reload, success, fail }) {
   return (
     <div className="page-stack">
       <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Database, encryption keys, faces, models, templates</p><h2>Create encrypted backup</h2></div><Database size={25} /></div><div className="notice notice-warning"><KeyRound size={18} /> The passphrase is not stored. Keep it in the school's approved password vault and retain an off-device copy of the .edubak file.</div><div className="form-grid two-columns"><Field label="Backup passphrase (at least 12 characters)" type="password" value={passphrase} onChange={setPassphrase} /><div className="modal-actions"><button className="btn-primary" onClick={create}><Database size={16} /> Create secure backup</button></div></div><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Created</th><th>Filename</th><th>Size</th><th /></tr></thead><tbody>{backups.length === 0 && <tr><td colSpan="4" className="empty-cell">No secure backup has been created.</td></tr>}{backups.map((item) => <tr key={item.filename}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.filename}</td><td>{(item.size_bytes / 1024 / 1024).toFixed(2)} MB</td><td><button className="btn-link" onClick={() => api.download(`/admin/backups/${encodeURIComponent(item.filename)}`, item.filename).catch(fail)}><Download size={15} /> Download</button></td></tr>)}</tbody></table></div></section>
-      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Controlled two-stage recovery</p><h2>Verify and stage a restore</h2></div><ArchiveRestore size={25} /></div><p className="section-copy">The server decrypts and verifies every file hash before staging. SQLite applies on restart. MySQL requires the API to be stopped and the controlled PowerShell restore command to be run; that command first creates a fresh encrypted safety backup, imports the SQL, and then swaps the matching encryption artifacts.</p><div className="form-grid three-columns"><label><span className="field-label">EduScan .edubak file</span><input className="input-field" type="file" accept=".edubak" onChange={(e) => setRestoreFile(e.target.files?.[0] || null)} /></label><Field label="Backup passphrase" type="password" value={restorePassphrase} onChange={setRestorePassphrase} /><Field label='Type "STAGE RESTORE"' value={confirmation} onChange={setConfirmation} /></div><div className="modal-actions"><button className="btn-danger" onClick={restore}><ArchiveRestore size={16} /> Verify and stage restore</button></div></section>
+      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Controlled two-stage recovery</p><h2>Verify and stage a restore</h2></div><ArchiveRestore size={25} /></div><p className="section-copy">The server decrypts and verifies every file hash before staging. SQLite applies on restart. MySQL requires the API to be stopped and the controlled PowerShell restore command to be run; that command first creates a fresh encrypted safety backup, imports the SQL, and then swaps the matching encryption artifacts.</p><div className="form-grid three-columns"><label><span className="field-label">EduScan .edubak file</span><input title="Choose a file in the format shown by this field" className="input-field" type="file" accept=".edubak" onChange={(e) => setRestoreFile(e.target.files?.[0] || null)} /></label><Field label="Backup passphrase" type="password" value={restorePassphrase} onChange={setRestorePassphrase} /><Field label='Type "STAGE RESTORE"' value={confirmation} onChange={setConfirmation} /></div><div className="modal-actions"><button className="btn-danger" onClick={restore}><ArchiveRestore size={16} /> Verify and stage restore</button></div></section>
     </div>
   );
 }

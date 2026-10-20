@@ -5,7 +5,7 @@ import io
 import os
 import uuid
 import zipfile
-from datetime import date
+from datetime import date, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..config import EXPORT_DIR, TEMPLATE_DIR, settings
 from ..models import Person
-from .attendance import active_people, is_instructional_day, raw_row
+from .attendance import active_people, is_instructional_day, raw_row, rows_for_people, local_now, MANILA
 from .export_files import new_report_path
 from .enrollment import enrollment_remark
 
@@ -202,16 +202,47 @@ def _ensure_png_content_type(content_types_xml: bytes) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
+def sf2_students(db: Session, year: int, month: int, grade: str, section: str) -> list[Person]:
+    try:
+        first_day = date(year, month, 1)
+        last_day = date(year, month, calendar.monthrange(year, month)[1])
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="Choose a valid reporting month and year") from error
+    return [person for person in active_people(db, grade, section, students_only=True, include_departed=True)
+            if (not person.enrollment_start_date or person.enrollment_start_date <= last_day)
+            and (not person.enrollment_end_date or person.enrollment_end_date >= first_day)]
+
+
+def sf2_pending_attendance(db: Session, people: list[Person], year: int, month: int) -> dict:
+    today = local_now().date()
+    unresolved = 0
+    examples = []
+    for day in _school_days(db, year, month):
+        if day >= today:
+            continue
+        eligible = []
+        for person in people:
+            registered = person.created_at
+            if registered and registered.tzinfo is None:
+                registered = registered.replace(tzinfo=timezone.utc)
+            if not person.enrollment_start_date and registered and day < registered.astimezone(MANILA).date():
+                continue
+            eligible.append(person)
+        for row in rows_for_people(db, eligible, day):
+            if row['status'] == 'No scan':
+                unresolved += 1
+                if len(examples) < 5:
+                    examples.append({'date': day.isoformat(), 'name': row['full_name']})
+    return {'unresolved_count': unresolved, 'unresolved_examples': examples}
+
+
 def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
                  school_id: str, school_year: str, school_name: str) -> Path:
     days = _school_days(db, year, month)
     if len(days) > len(DAY_COLUMNS):
         raise HTTPException(status_code=422, detail="This month has more than 25 weekdays; the official SF2 template cannot hold every day")
-    first_day = date(year, month, 1)
     last_day = date(year, month, calendar.monthrange(year, month)[1])
-    students = [person for person in active_people(db, grade, section, students_only=True, include_departed=True)
-                if (not person.enrollment_start_date or person.enrollment_start_date <= last_day)
-                and (not person.enrollment_end_date or person.enrollment_end_date >= first_day)]
+    students = sf2_students(db, year, month, grade, section)
     males = sorted((person for person in students if person.sex == "Male"), key=lambda person: person.full_name.casefold())
     females = sorted((person for person in students if person.sex == "Female"), key=lambda person: person.full_name.casefold())
     if len(males) > len(MALE_ROWS) or len(females) > len(FEMALE_ROWS):
