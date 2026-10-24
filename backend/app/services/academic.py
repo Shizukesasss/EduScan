@@ -27,16 +27,6 @@ def change_deleted_reference(db: Session, kind: str, record_id: int, actor: User
         raise HTTPException(status_code=404, detail="Reference record was not found")
     if restore and isinstance(item, SchoolSection) and item.grade_level.deleted_at is not None:
         raise HTTPException(status_code=409, detail="Restore this section's grade level first")
-    if restore and isinstance(item, SchoolSection) and item.adviser_user_id is not None:
-        db.scalar(select(User).where(User.id == item.adviser_user_id).with_for_update())
-        duplicate_adviser = db.scalar(select(SchoolSection.id).where(
-            SchoolSection.adviser_user_id == item.adviser_user_id,
-            SchoolSection.id != item.id,
-            SchoolSection.active.is_(True),
-            SchoolSection.deleted_at.is_(None),
-        ))
-        if duplicate_adviser:
-            raise HTTPException(status_code=409, detail="This teacher is already advising another active section")
     if restore and isinstance(item, GradingPeriod) and item.school_year.deleted_at is not None:
         raise HTTPException(status_code=409, detail="Restore this grading period's school year first")
     if (item.deleted_at is None) != restore:

@@ -91,7 +91,7 @@ export default function CalculationBreakdown({ breakdown, onClose }) {
 
           {/* DepEd assessment methodology note */}
           <div className="deped-formula-note">
-            <p className="note-title">DepEd K-12 Assessment Methodology (DO 8, s. 2015):</p>
+            <p className="note-title">DepEd K-12 Assessment Methodology (DO 15, s. 2026):</p>
             <ol>
               <li>
                 <strong>Total-over-Total Method:</strong> Component % = (Total Earned Points ÷ Total Possible Points) × 100

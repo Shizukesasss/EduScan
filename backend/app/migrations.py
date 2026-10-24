@@ -31,6 +31,8 @@ MIGRATIONS = (
     ("0018_grade_criteria_adjustment_requests", "Allow teachers to request audited grading-weight changes after finalization"),
     ("0019_enrollment_departure_notes", "Add optional lifecycle notes without changing existing records"),
     ("0020_admin_schedules_and_report_roles", "Link schedules to accounts and retain report generator roles"),
+    ("0021_jhs_elective_allowed_grades", "Add compatible JHS elective grade restrictions"),
+    ("0022_annual_advisers_demo_setup", "Annual adviser history and confirmed demo teacher setup"),
 )
 
 
@@ -63,7 +65,34 @@ def run_migrations(engine: Engine) -> list[str]:
         for version, description in MIGRATIONS:
             if version in applied:
                 continue
-            if version == "0020_admin_schedules_and_report_roles":
+            if version == "0022_annual_advisers_demo_setup":
+                _add_column_if_missing(connection, 'users', 'is_demo', 'BOOLEAN NOT NULL DEFAULT FALSE')
+                Base.metadata.tables['section_adviser_assignments'].create(connection, checkfirst=True)
+                Base.metadata.tables['demo_teacher_setup_batches'].create(connection, checkfirst=True)
+                years = connection.execute(text("SELECT id FROM school_years WHERE name = '2026-2027' AND deleted_at IS NULL")).all()
+                legacy = connection.execute(text('SELECT s.id, s.adviser_user_id, s.adviser_name FROM school_sections s JOIN grade_levels g ON g.id=s.grade_level_id WHERE s.deleted_at IS NULL AND s.active=TRUE AND g.deleted_at IS NULL AND g.active=TRUE AND (s.adviser_user_id IS NOT NULL OR s.adviser_name IS NOT NULL)')).all()
+                if legacy and len(years) != 1:
+                    raise ValueError('Cannot map existing advisers: exactly one SY 2026–2027 is required.')
+                mapped_teachers = set()
+                for section_id, teacher_id, teacher_name in legacy:
+                    if teacher_id is None and teacher_name and teacher_name.strip():
+                        teachers = connection.execute(text("SELECT id FROM users WHERE role='teacher' AND LOWER(TRIM(full_name))=:name"), {'name': teacher_name.strip().lower()}).all()
+                        if len(teachers) != 1:
+                            raise ValueError('Resolve the legacy adviser name before migrating annual assignments.')
+                        teacher_id = teachers[0][0]
+                    if teacher_id is not None:
+                        if teacher_id in mapped_teachers:
+                            raise ValueError('An existing adviser has multiple sections. Resolve the legacy assignments before activating annual advisers; no links were changed.')
+                        mapped_teachers.add(teacher_id)
+                        existing = connection.execute(text('SELECT teacher_user_id FROM section_adviser_assignments WHERE school_year_id=:year AND section_id=:section'), {'year': years[0][0], 'section': section_id}).first()
+                        if existing and existing[0] != teacher_id:
+                            raise ValueError('Existing annual adviser conflicts with legacy assignment.')
+                        if not existing:
+                            connection.execute(text('INSERT INTO section_adviser_assignments (school_year_id, section_id, teacher_user_id, created_at) VALUES (:year,:section,:teacher,:created)'), {'year': years[0][0], 'section': section_id, 'teacher': teacher_id, 'created': datetime.utcnow()})
+            elif version == "0021_jhs_elective_allowed_grades":
+                if inspect(connection).has_table('subjects'):
+                    _add_column_if_missing(connection, 'subjects', 'allowed_grades_json', 'TEXT NULL')
+            elif version == "0020_admin_schedules_and_report_roles":
                 _add_column_if_missing(connection, "class_schedules", "teacher_user_id", "INTEGER NULL")
                 _add_column_if_missing(connection, "generated_reports", "generated_by_role", "VARCHAR(30) NULL")
             elif version == "0019_enrollment_departure_notes":
@@ -261,3 +290,25 @@ def run_migrations(engine: Engine) -> list[str]:
             )
             applied_now.append(version)
     return applied_now
+
+
+def upgrade_mapeh_area_schema(engine: Engine, *, approved: bool = False):
+    """Explicit deployment step only; deliberately absent from startup MIGRATIONS."""
+    if not approved:
+        raise ValueError('Review the MAPEH impact preview and approve schema activation first.')
+    if engine.dialect.name != 'postgresql':
+        raise ValueError('Existing-database upgrade supports PostgreSQL; isolated SQLite uses fresh metadata.')
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE gradebooks ADD COLUMN IF NOT EXISTS learning_area VARCHAR(20) NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE gradebooks ADD COLUMN IF NOT EXISTS is_legacy_readonly BOOLEAN NOT NULL DEFAULT false"))
+        constraints=inspect(conn).get_unique_constraints('gradebooks')
+        old=next((c for c in constraints if c['name']=='uq_gradebook_context'),None)
+        columns=['school_year_id','grading_period_id','grade_level_id','section_id','subject_id','learning_area']
+        if old and old['column_names'] != columns:
+            conn.execute(text('ALTER TABLE gradebooks DROP CONSTRAINT uq_gradebook_context'))
+            old=None
+        if not old:
+            conn.execute(text('ALTER TABLE gradebooks ADD CONSTRAINT uq_gradebook_context UNIQUE (school_year_id,grading_period_id,grade_level_id,section_id,subject_id,learning_area)'))
+        # These values are validated in the service and at the database boundary.
+        if not any(c['name']=='ck_mapeh_area' for c in inspect(conn).get_check_constraints('gradebooks')):
+            conn.execute(text("ALTER TABLE gradebooks ADD CONSTRAINT ck_mapeh_area CHECK (learning_area IN ('','music_arts','pe_health'))"))

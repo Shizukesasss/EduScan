@@ -109,6 +109,7 @@ class GradebookComponentPayload(BaseModel):
 # ---------------------------------------------------------------------------
 
 class GradebookCreate(BaseModel):
+    learning_area: str = Field(default="", pattern="^(|music_arts|pe_health)$")
     school_year_id: int
     grading_period_id: int
     grade_level_id: int

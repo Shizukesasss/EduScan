@@ -138,6 +138,52 @@ class AdaptiveClassRecordTests(unittest.TestCase):
         self.assertNotIn('ROUND(', formula)
         self.assertNotIn('LOOKUP(', formula)
 
+    def test_adaptive_export_boundary_cache_matches_decimal_engine(self):
+        from app.services.reports import _write_class_record_workbook
+        table = [{'min': 0, 'max': 71.17, 'value': 75}, {'min': 71.18, 'max': 100, 'value': 76}]
+        for score, expected in ((71.18, 76), (71.175, 75)):
+            with self.subTest(score=score), tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1] / 'data') as directory:
+                full = sample_record(exams=True)
+                full['policy']['transmutation_table'] = table
+                student = full['students'][0]
+                for component in full['components']:
+                    for item in component['items']:
+                        if item['active']:
+                            item['max_score'] = 100
+                            student['scores'][str(item['id'])] = score
+                            student['score_statuses'][str(item['id'])] = 'Scored'
+                result = calculate_student_grade(
+                    [dict(item_id=int(key), score=value, status='Scored') for key, value in student['scores'].items()],
+                    full['components'],
+                    {component['id']: [item for item in component['items'] if item['active']]
+                     for component in full['components']},
+                    table,
+                    full['gradebook']['passing_grade'],
+                    full['policy']['rounding_decimal_places'],
+                    full['policy']['rounding_final_decimal_places'],
+                    full['policy']['rounding_method'],
+                )
+                student.update(result)
+                self.assertEqual(student['initial_grade'], 71.18)
+                self.assertEqual(student['reported_grade'], expected)
+
+                workbook, cached = Workbook(), {}
+                sheet = _term_sheet(workbook, full, cached)
+                headings = {cell.value: cell.column for cell in sheet[10]}
+                initial_col, grade_col = headings['INITIAL GRADE'], headings['TERM GRADE']
+                source, target = Path(directory) / 'source.xlsx', Path(directory) / 'export.xlsx'
+                workbook.save(source)
+                _write_class_record_workbook(source, target, {sheet.title: {}}, formula_values=cached)
+                formulas, values = load_workbook(target), load_workbook(target, data_only=True)
+                try:
+                    formula = formulas[sheet.title].cell(12, grade_col).value
+                    self.assertIn('*100000000', formula)
+                    self.assertEqual(values[sheet.title].cell(12, initial_col).value, 71.18)
+                    self.assertEqual(values[sheet.title].cell(12, grade_col).value, expected)
+                finally:
+                    formulas.close()
+                    values.close()
+
     def test_zero_scores_are_real_scores_and_mismatched_grades_stop_export(self):
         from fastapi import HTTPException
         full = sample_record()

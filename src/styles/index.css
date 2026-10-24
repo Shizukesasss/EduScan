@@ -5135,3 +5135,134 @@ div:has(> .lucide + .input-field) > .input-field {
   .header-actions .icon-btn, .header-actions .compact-button { min-height: 44px; }
   .primary-nav { max-width: 100%; overscroll-behavior-inline: contain; }
 }
+.elective-grade-picker {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 8px 0 0;
+  padding: 20px;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+}
+.elective-grade-picker legend { padding: 0 8px; font-size: 16px; font-weight: 650; color: #1e293b; }
+.elective-grade-picker__intro { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.elective-grade-picker__intro p, .elective-grade-picker__hint { margin: 0; font-size: 14px; line-height: 1.5; color: #475569; }
+.elective-grade-picker__count { flex-shrink: 0; font-size: 13px; font-weight: 600; color: #334155; font-variant-numeric: tabular-nums; }
+.elective-grade-picker__options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 16px 0 12px; }
+.elective-grade-picker__option { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 12px 16px; border: 1px solid #cbd5e1; border-radius: 8px; cursor: pointer; color: #334155; font-weight: 600; }
+.elective-grade-picker__option:hover { background: #f1f5f9; border-color: #64748b; }
+.elective-grade-picker__option:has(input:checked) { background: #eff6ff; border-color: #2563eb; color: #1e40af; }
+.elective-grade-picker__option:focus-within { outline: 2px solid #1d4ed8; outline-offset: 3px; }
+.elective-grade-picker__option input { width: 18px; height: 18px; margin: 0; accent-color: #1d4ed8; flex-shrink: 0; }
+.elective-grade-picker__error { margin: 8px 0 0; font-size: 14px; color: #b91c1c; }
+@media (max-width: 640px) {
+  .elective-grade-picker { padding: 16px; }
+  .elective-grade-picker__options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .elective-grade-picker__intro { flex-wrap: wrap; gap: 6px; }
+}
+.record-pagination{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;flex-wrap:wrap}.record-pagination>div{display:flex;gap:6px;flex-wrap:wrap}.record-pagination button{padding:7px 11px;min-width:36px}.record-pagination [aria-current="page"]{background:#1b3968;color:white}.record-pagination>span{font-size:.875rem;color:#52627a}
+
+.mapeh-area-selector { display: grid; gap: 16px; }
+.mapeh-area-selector__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.mapeh-area-selector__header h3 { margin: 0 0 4px; font-size: 18px; }
+.mapeh-area-selector__header > div > p { margin: 0; }
+.mapeh-area-selector__current { display: grid; gap: 3px; margin: 0; padding: 9px 13px; border: 1px solid #b9d0f5; border-radius: 8px; background: var(--accent-light); color: #173e78; }
+.mapeh-area-selector__current span { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.mapeh-area-selector__current strong { font-size: 14px; }
+.mapeh-area-selector__options { display: grid; grid-template-columns: repeat(2, minmax(0, 240px)); gap: 10px; }
+.mapeh-area-selector__option { width: 100%; min-height: 48px; justify-content: space-between; gap: 12px; text-align: left; }
+.mapeh-area-selector__option.is-active { background: var(--accent-blue); border-color: var(--accent-blue); color: #fff; }
+.mapeh-area-selector__option.is-active:hover { background: #124ba5; border-color: #124ba5; }
+.mapeh-area-selector__badge { flex: 0 0 auto; padding: 3px 7px; border-radius: 5px; background: rgba(255, 255, 255, .18); color: #fff; font-size: 11px; font-weight: 700; }
+.mapeh-area-selector__option:focus-visible { outline: 3px solid #83b4ff; outline-offset: 2px; }
+.mapeh-area-selector > .muted-small { margin: 0; max-width: 75ch; }
+@media (max-width: 560px) {
+  .mapeh-area-selector__header { flex-direction: column; gap: 12px; }
+  .mapeh-area-selector__current { width: 100%; }
+  .mapeh-area-selector__options { grid-template-columns: minmax(0, 1fr); }
+}
+
+.gradebook-summary-card { padding: 0; overflow: hidden; }
+.gradebook-summary-card > .section-heading { margin: 0; padding: 24px 28px 10px; }
+.summary-stats-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin: 0; padding: 8px 12px 20px; }
+.summary-stat { min-width: 0; padding: 14px 18px 16px; }
+.summary-stat + .summary-stat { border-left: 1px solid var(--border-color); }
+.summary-stat .stat-label { display: block; font-size: 12px; line-height: 1.4; }
+.summary-stat-value { margin: 7px 0 6px; color: var(--primary-color); font-size: 30px; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.summary-stat-meta { min-height: 22px; color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
+.summary-stat-badge { display: inline-block; padding: 2px 8px; border-radius: 5px; background: #e2e8f0; color: #334155; font-size: 12px; font-weight: 600; }
+.grade-distribution-section { padding: 20px 28px 24px; border: 0; border-top: 1px solid var(--border-color); border-radius: 0; background: transparent; }
+.distribution-header { align-items: baseline; gap: 8px 20px; flex-wrap: wrap; margin-bottom: 14px; }
+.distribution-header .field-label { font-size: 13px; line-height: 1.45; }
+.distribution-stacked-bar { height: 14px; margin-bottom: 14px; border-radius: 7px; box-shadow: none; }
+.distribution-legend-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.legend-item { min-width: 0; gap: 9px; padding: 4px 8px; }
+.legend-title { font-size: 13px; line-height: 1.4; }
+.legend-range { font-size: 12px; }
+.legend-stats { margin-top: 4px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.legend-stats strong { font-size: 15px; }
+
+@media (max-width: 1024px) {
+  .summary-stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .summary-stat:nth-child(3) { border-top: 1px solid var(--border-color); border-left: 0; }
+  .summary-stat:nth-child(4) { border-top: 1px solid var(--border-color); }
+  .distribution-legend-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 640px) {
+  .gradebook-summary-card > .section-heading { padding: 20px 20px 8px; }
+  .summary-stats-grid { padding: 6px 8px 16px; }
+  .summary-stat { padding: 12px; }
+  .summary-stat-value { font-size: 26px; }
+  .grade-distribution-section { padding: 18px 20px 20px; }
+  .distribution-legend-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 6px; }
+  .legend-item { padding: 4px 2px; }
+}
+
+@media (max-width: 380px) {
+  .summary-stats-grid { grid-template-columns: 1fr; }
+  .summary-stat + .summary-stat { border-top: 1px solid var(--border-color); border-left: 0; }
+}
+
+.admin-gradebook-picker { padding: 22px; }
+.admin-gradebook-picker__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px 20px; }
+.admin-gradebook-picker__header h2 { margin: 0; color: var(--primary-color); font-size: 20px; }
+.admin-gradebook-picker__header p { max-width: 68ch; margin: 5px 0 0; color: var(--text-secondary); font-size: 14px; }
+.admin-gradebook-picker__count { flex: 0 0 auto; padding: 5px 10px; border-radius: 999px; background: var(--surface-muted); color: var(--text-secondary); font-size: 12px; font-weight: 650; }
+.admin-gradebook-picker__search { display: grid; gap: 6px; margin: 16px 0 14px; }
+.admin-gradebook-picker__search-control { position: relative; display: block; }
+.admin-gradebook-picker__search-control > svg { position: absolute; z-index: 1; top: 50%; left: 13px; color: var(--text-muted); transform: translateY(-50%); pointer-events: none; }
+.admin-gradebook-picker__search-control .input-field { padding-left: 40px; }
+.admin-gradebook-picker__list { display: flex; max-height: 340px; flex-direction: column; gap: 13px; overflow-y: auto; padding: 2px 4px 2px 0; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #aab5c5 #f3f5f8; }
+.admin-gradebook-picker__group + .admin-gradebook-picker__group { border-top: 1px solid var(--border-color); padding-top: 11px; }
+.admin-gradebook-picker__group-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 2px 7px; }
+.admin-gradebook-picker__group-heading h3 { margin: 0; color: var(--text-secondary); font-size: 13px; font-weight: 700; }
+.admin-gradebook-picker__group-heading > span { color: var(--text-muted); font-size: 12px; }
+.admin-gradebook-picker__records { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.admin-gradebook-record { display: flex; min-width: 0; min-height: 80px; flex-direction: column; align-items: stretch; gap: 6px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 10px; background: #fff; color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; transition: background-color 140ms ease-out, border-color 140ms ease-out, box-shadow 140ms ease-out; }
+.admin-gradebook-record:hover { border-color: #b8c9e4; background: #f8faff; }
+.admin-gradebook-record:focus-visible { outline: 3px solid rgba(24, 92, 197, 0.24); outline-offset: 2px; }
+.admin-gradebook-record.is-selected { border-color: var(--accent-blue); background: var(--accent-light); box-shadow: inset 0 0 0 1px var(--accent-blue); }
+.admin-gradebook-record__topline { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.admin-gradebook-record__topline > strong { min-width: 0; overflow-wrap: anywhere; color: var(--primary-color); font-size: 13px; line-height: 1.4; }
+.admin-gradebook-record__status, .admin-gradebook-record__area, .admin-gradebook-record__viewing { flex: 0 0 auto; padding: 2px 7px; border-radius: 999px; font-size: 11px; font-weight: 650; line-height: 1.45; }
+.admin-gradebook-record__status.is-finalized { background: var(--success-bg); color: var(--success); }
+.admin-gradebook-record__status.is-draft { background: #edf1f6; color: #465467; }
+.admin-gradebook-record__status.is-unknown { background: var(--warning-bg); color: var(--warning); }
+.admin-gradebook-record__details { display: flex; min-width: 0; flex-wrap: wrap; gap: 2px 14px; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.admin-gradebook-record__details > span { min-width: 0; overflow-wrap: anywhere; }
+.admin-gradebook-record__footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.admin-gradebook-record__area { background: var(--surface-muted); color: var(--text-secondary); }
+.admin-gradebook-record__viewing { background: #dce9fb; color: #174a9c; }
+.admin-gradebook-picker__message { margin: 14px 0; padding: 12px 14px; border-radius: 9px; background: var(--surface-muted); color: var(--text-secondary); font-size: 14px; }
+.admin-gradebook-picker__history { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-color); }
+
+@media (max-width: 760px) {
+  .admin-gradebook-picker { padding: 18px; }
+  .admin-gradebook-picker__records { grid-template-columns: minmax(0, 1fr); }
+  .admin-gradebook-picker__list { max-height: 320px; }
+}
+
+@media (max-width: 420px) {
+  .admin-gradebook-picker__header { flex-direction: column; }
+  .admin-gradebook-picker__count { align-self: flex-start; }
+}

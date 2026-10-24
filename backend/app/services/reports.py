@@ -259,12 +259,18 @@ def _set_calc_attribute(opening: bytes, name: bytes, value: bytes) -> bytes:
     return opening[:-2] + b" " + name + b'="' + value + b'"/>'
 
 
-def _write_class_record_workbook(template: Path, target: Path, changes: dict[str, dict[str, object]], formula_values: dict | None = None, formula_guards: dict | None = None) -> None:
+def _write_class_record_workbook(template: Path, target: Path, changes: dict[str, dict[str, object]], formula_values: dict | None = None, formula_guards: dict | None = None, formula_overrides: dict | None = None) -> None:
     from tempfile import NamedTemporaryFile
 
     if not template.is_file():
         raise HTTPException(status_code=409, detail=f"The required updated class-record workbook '{template.name}' is missing.")
     temporary_path = None
+    def widen_numeric_column(match):
+        tag = match.group()
+        width = re.search(rb'\bwidth="([^"]+)"', tag)
+        if width and 5 <= float(width.group(1)) < 8:
+            return tag[:width.start(1)] + b'8' + tag[width.end(1):]
+        return tag
     try:
         with ZipFile(template, "r") as source:
             paths = _xlsx_sheet_paths(source)
@@ -275,6 +281,15 @@ def _write_class_record_workbook(template: Path, target: Path, changes: dict[str
                 content = source.read(paths[sheet_name])
                 for coordinate, value in values.items():
                     content = _set_xlsx_cell(content, coordinate, value)
+                for coordinate, formula in (formula_overrides or {}).get(sheet_name, {}).items():
+                    if len(formula.lstrip('=')) > 8192:
+                        raise HTTPException(409, 'The saved policy exceeds the Excel formula length limit.')
+                    content = _set_xlsx_cell(content, coordinate, None)
+                    pattern = rb'<c\b(?=[^>]*\br="' + coordinate.encode('ascii') + rb'")[^>]*>.*?</c>'
+                    match = re.search(pattern, content, re.DOTALL)
+                    opening = re.sub(rb'\s+t="[^"]*"', b'', match.group()[:match.group().find(b'>') + 1])
+                    cell = opening + b'<f>' + html.escape(formula.lstrip('='), quote=False).encode('utf-8') + b'</f></c>'
+                    content = content[:match.start()] + cell + content[match.end():]
                 for coordinate, condition in (formula_guards or {}).get(sheet_name, {}).items():
                     pattern = rb'<c\b(?=[^>]*\br="' + coordinate.encode('ascii') + rb'")[^>]*>.*?</c>'
                     match = re.search(pattern, content, re.DOTALL)
@@ -294,6 +309,11 @@ def _write_class_record_workbook(template: Path, target: Path, changes: dict[str
                     cell = cell.replace(b'</c>', b'<v>' + format(float(value), '.15g').encode('ascii') + b'</v></c>')
                     content = content[:match.start()] + cell + content[match.end():]
                 updated_sheets[paths[sheet_name]] = content
+            # Include unused term sheets in combined templates; 100.00 needs more space.
+            for sheet_name, worksheet_path in paths.items():
+                if sheet_name.upper().startswith('TERM '):
+                    content = updated_sheets.get(worksheet_path, source.read(worksheet_path))
+                    updated_sheets[worksheet_path] = re.sub(rb'<col\b[^>]*/>', widen_numeric_column, content)
             with NamedTemporaryFile(dir=target.parent, suffix=".xlsx", delete=False) as temporary:
                 temporary_path = Path(temporary.name)
             with ZipFile(temporary_path, "w", ZIP_DEFLATED) as output:
@@ -371,7 +391,7 @@ def _complete_finalized_record(full: dict | None) -> bool:
     )
 
 
-def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str = "", division: str = "", school_id: str = "", allowed_teacher_id: int | None = None, all_terms: bool = False) -> Path:
+def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str = "", division: str = "", school_id: str = "", allowed_teacher_id: int | None = None, all_terms: bool = False, through_term: int | None = None) -> Path:
     from .grading import get_gradebook_full
     from ..models_grading import Gradebook
     from .adaptive_class_record import export_adaptive
@@ -380,17 +400,21 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
     book = db.get(Gradebook, gradebook_id)
     if not full or not book:
         raise HTTPException(status_code=404, detail="Gradebook not found")
-    if not all_terms and not is_senior_high(full['gradebook']['grade_name']):
+    # Fixed JHS templates require ST1/ST2/TE; older policies keep their own formulas.
+    uses_term_exams = any(component.get('component_type') == 'Term Examinations' for component in full['components'])
+    fixed_rounding = full['policy']['rounding_method'] == 'half_up' and full['policy']['rounding_decimal_places'] == 2
+    if not is_senior_high(full['gradebook']['grade_name']) and ((uses_term_exams and fixed_rounding) or full['gradebook']['subject_name'].strip().upper() in {'ARALING PANLIPUNAN', 'MAPEH'}):
         from .class_record_export import export_jhs, subject_template
         try:
-            kind, filename = subject_template(full['gradebook']['subject_name'] or '')
-            return export_jhs(db, book, full, kind, TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename,
-                              region, division, school_id, allowed_teacher_id)
+            kind, filename = subject_template(full['gradebook']['subject_name'] or '',
+                                              book.subject.is_elective is True)
         except HTTPException as exc:
             if exc.status_code != 409:
                 raise
-            # A fixed workbook cannot represent every approved grading setup.
-    return export_adaptive(db, book, full, region, division, school_id, allowed_teacher_id, all_terms=all_terms)
+        else:
+            return export_jhs(db, book, full, kind, TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename,
+                              region, division, school_id, allowed_teacher_id, all_terms=all_terms, through_term=through_term)
+    return export_adaptive(db, book, full, region, division, school_id, allowed_teacher_id, all_terms=all_terms, through_term=through_term)
 
 
 def gradebook_report_html(db: Session, gradebook_id: int) -> str:

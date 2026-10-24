@@ -19,6 +19,15 @@ def is_junior_high(value: str) -> bool:
     return normalize_grade_name(value) in {"7", "8", "9", "10"}
 
 
+def subject_matches_grade(subject, grade_name: str) -> bool:
+    senior = (subject.category or 'JHS').strip().upper().startswith('SHS')
+    if senior != is_senior_high(grade_name):
+        return False
+    if not senior and subject.is_elective:
+        return is_junior_high(grade_name) and int(normalize_grade_name(grade_name)) in subject.allowed_grades
+    return True
+
+
 def elective_track_for_subject(category: str, is_elective: bool, elective_track: str | None) -> str | None:
     if not is_elective:
         return None

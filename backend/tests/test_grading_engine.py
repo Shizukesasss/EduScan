@@ -315,6 +315,43 @@ class TestFullStudentCalculation(unittest.TestCase):
         )
         self.assertEqual(result["reported_grade"], 99)
 
+    def test_decimal_safe_transmutation_boundary(self):
+        components = [
+            {"id": 1, "name": "Written Works", "weight": 20, "component_type": "Written Work"},
+            {"id": 2, "name": "Performance Tasks", "weight": 50, "component_type": "Performance Task"},
+            {"id": 3, "name": "Quarterly Assessment", "weight": 30, "component_type": "Term Examinations"},
+        ]
+        items = {
+            1: [{"id": 10, "max_score": 20}],
+            2: [{"id": 20, "max_score": 20}],
+            3: [
+                {"id": 30, "label": "ST1", "max_score": 20},
+                {"id": 31, "label": "ST2", "max_score": 20},
+                {"id": 32, "label": "TE", "max_score": 20},
+            ],
+        }
+        table = [
+            {"min": 0, "max": 71.17, "value": 75},
+            {"min": 71.18, "max": 72.35, "value": 76},
+        ]
+
+        for score, expected_grade in ((14.236, 76), (14.235, 75)):
+            for weights in ((20, 50, 30), (0.2, 0.5, 0.3)):
+                with self.subTest(score=score, weights=weights):
+                    active_components = [
+                        {**component, "weight": weight}
+                        for component, weight in zip(components, weights)
+                    ]
+                    scores = [
+                        {"item_id": item["id"], "score": score, "status": "Scored"}
+                        for component_items in items.values()
+                        for item in component_items
+                    ]
+                    result = calculate_student_grade(scores, active_components, items, table)
+
+                    self.assertEqual(result["initial_grade"], 71.18)
+                    self.assertEqual(result["reported_grade"], expected_grade)
+
 
 class TestValidation(unittest.TestCase):
 

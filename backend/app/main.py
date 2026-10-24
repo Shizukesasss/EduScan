@@ -1,4 +1,7 @@
 from __future__ import annotations
+from .schemas import DemoTeacherSetupPayload, DedicatedDemoAdvisoryPayload
+from .models import SectionAdviserAssignment
+from .services.section_advisers import adviser_for_section, current_school_year_id
 
 import hashlib
 import csv
@@ -171,23 +174,21 @@ def reset_json(item: AttendanceResetAudit) -> dict:
     }
 
 
-def adviser_sections(db: Session, user: User) -> list[SchoolSection]:
+def adviser_sections(db: Session, user: User, school_year_id: int | None = None) -> list[SchoolSection]:
     query = select(SchoolSection).join(GradeLevel).where(
         SchoolSection.active.is_(True), SchoolSection.deleted_at.is_(None), GradeLevel.deleted_at.is_(None))
     if user.role in {"admin", "records_officer"}:
         return db.scalars(query).all()
-    return [item for item in db.scalars(query).all()
-            if item.adviser_user_id == user.id or (
-                item.adviser_user_id is None and (item.adviser_name or "").strip(
-                ).casefold() == user.full_name.strip().casefold()
-    )]
+    from .services.section_advisers import advised_section_ids
+    allowed = advised_section_ids(db, user.id, school_year_id)
+    return [item for item in db.scalars(query).all() if item.id in allowed]
 
 
-def ensure_adviser_access(db: Session, user: User, grade: str, section: str) -> None:
+def ensure_adviser_access(db: Session, user: User, grade: str, section: str, school_year_id: int | None = None) -> None:
     if user.role in {"admin", "records_officer"}:
         return
     allowed = {(item.grade_level.name, item.name)
-               for item in adviser_sections(db, user)}
+               for item in adviser_sections(db, user, school_year_id)}
     if (grade, section) not in allowed:
         raise HTTPException(
             status_code=403, detail="This section is not assigned to the signed-in adviser")
@@ -216,7 +217,16 @@ def report_sections(
             active_years = active_years.where(SchoolYear.name == school_year_name)
         advisory_allowed = db.scalar(active_years.limit(1)) is not None
     if advisory_allowed:
-        allowed_ids.update(item.id for item in adviser_sections(db, user))
+        year_query = select(SchoolYear.id).where(SchoolYear.deleted_at.is_(None))
+        if school_year_name:
+            year_query = year_query.where(SchoolYear.name == school_year_name)
+        elif starts_on and ends_on:
+            year_query = year_query.where(SchoolYear.starts_on <= ends_on, SchoolYear.ends_on >= starts_on)
+        else:
+            from .services.section_advisers import current_school_year_id
+            year_query = year_query.where(SchoolYear.id == (current_school_year_id(db) or -1))
+        for year_id in db.scalars(year_query).all():
+            allowed_ids.update(item.id for item in adviser_sections(db, user, year_id))
     assignments = select(SubjectTeachingAssignment.section_id).join(
         SchoolYear, SchoolYear.id == SubjectTeachingAssignment.school_year_id,
     ).where(
@@ -389,7 +399,7 @@ def change_password(payload: PasswordChangePayload, db: Session = Depends(get_db
 @app.get("/api/admin/users")
 def admin_users(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))) -> list[dict]:
     return [{"id": item.id, "username": item.username, "role": item.role, "full_name": item.full_name,
-             "active": item.active, "must_change_password": item.must_change_password,
+             "active": item.active, "is_demo": item.is_demo, "must_change_password": item.must_change_password,
              "locked_until": item.locked_until, "last_login_at": item.last_login_at,
              "created_at": item.created_at}
             for item in db.scalars(select(User).order_by(User.full_name)).all()]
@@ -612,9 +622,9 @@ def admin_persons(db: Session = Depends(get_db), _: User = Depends(require_roles
 
 
 @app.get("/api/my/advisory-sections")
-def my_advisory_sections(db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> list[dict]:
+def my_advisory_sections(school_year_id: int | None = None, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> list[dict]:
     return [{"id": item.id, "grade": item.grade_level.name, "section": item.name,
-             "adviser_name": item.adviser_name} for item in adviser_sections(db, user)]
+             "adviser_name": user.full_name if user.role == "teacher" else (adviser_for_section(db, school_year_id or current_school_year_id(db), item.id).full_name if adviser_for_section(db, school_year_id or current_school_year_id(db), item.id) else None)} for item in adviser_sections(db, user, school_year_id)]
 
 
 @app.get("/api/my/report-sections")
@@ -627,8 +637,15 @@ def my_report_sections(
         raise HTTPException(status_code=422, detail="Select both dates for the reporting period")
     if starts_on and ends_on and starts_on > ends_on:
         raise HTTPException(status_code=422, detail="The report start date must be on or before the end date")
+    year_query = select(SchoolYear.id).where(SchoolYear.deleted_at.is_(None))
+    if starts_on and ends_on:
+        year_query = year_query.where(SchoolYear.starts_on <= ends_on, SchoolYear.ends_on >= starts_on)
+        matched_years = db.scalars(year_query).all()
+        report_year = matched_years[0] if len(matched_years) == 1 else None
+    else:
+        report_year = current_school_year_id(db)
     return [{"id": item.id, "grade": item.grade_level.name, "section": item.name,
-             "adviser_name": item.adviser_name} for item in report_sections(db, user, starts_on, ends_on)]
+             "adviser_name": adviser_for_section(db, report_year, item.id).full_name if report_year and adviser_for_section(db, report_year, item.id) else None} for item in report_sections(db, user, starts_on, ends_on)]
 
 
 @app.post("/api/admin/persons/{person_id}/active")
@@ -1190,7 +1207,7 @@ def attendance_close(background_tasks: BackgroundTasks, day: date = Query(alias=
         if not grade or not section:
             raise HTTPException(
                 status_code=422, detail="Teachers must select their assigned grade and section")
-        ensure_adviser_access(db, user, grade, section)
+        ensure_adviser_access(db, user, grade, section, current_school_year_id(db, day) or -1)
     created = close_day(db, day, grade, section)
     generate_temporary_log(db, day)
     background_tasks.add_task(dispatch_outbox)
@@ -1202,10 +1219,8 @@ def corrections(db: Session = Depends(get_db), user: User = Depends(require_role
     items = db.scalars(select(AttendanceCorrection).order_by(
         AttendanceCorrection.created_at.desc()).limit(500)).all()
     if user.role == "teacher":
-        allowed = {(item.grade_level.name, item.name)
-                   for item in adviser_sections(db, user)}
-        items = [item for item in items if (
-            item.person.grade, item.person.section) in allowed]
+        items = [item for item in items if (item.person.grade, item.person.section) in {
+            (section.grade_level.name, section.name) for section in adviser_sections(db, user, current_school_year_id(db, item.attendance_date) or -1)}]
     return [correction_json(item) for item in items]
 
 
@@ -1217,7 +1232,7 @@ def correct(payload: AttendanceCorrectionPayload, db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="Person was not found")
     if user.role == "teacher":
         ensure_adviser_access(
-            db, user, person.grade or "", person.section or "")
+            db, user, person.grade or "", person.section or "", current_school_year_id(db, payload.attendance_date) or -1)
     with gate_presence.lock:
         item = save_correction(db, payload, user)
         if payload.status == "No scan":
@@ -1323,6 +1338,11 @@ def save_schedule(payload: SchedulePayload, db: Session = Depends(get_db),
         Subject.name == payload.subject, Subject.active.is_(True), Subject.deleted_at.is_(None)))
     if not subject_id:
         raise HTTPException(status_code=422, detail="Select an active subject")
+    from .services.academic_context import subject_matches_grade
+    scheduled_subject = db.get(Subject, subject_id)
+    track = elective_track_for_subject(scheduled_subject.category, scheduled_subject.is_elective, scheduled_subject.elective_track)
+    if not subject_matches_grade(scheduled_subject, grade_level.name) or (track and (section.track or '').casefold() != track.casefold()):
+        raise HTTPException(422, 'This subject is not allowed for the selected grade and program')
     record = db.get(
         ClassSchedule, payload.id) if payload.id else ClassSchedule()
     if payload.id and not record:
@@ -1476,10 +1496,8 @@ def excused_absences(db: Session = Depends(get_db),
     items = db.scalars(select(ExcusedAbsence).order_by(
         ExcusedAbsence.event_date.desc(), ExcusedAbsence.created_at.desc())).all()
     if user.role == "teacher":
-        allowed = {(item.grade_level.name, item.name)
-                   for item in adviser_sections(db, user)}
-        items = [item for item in items if (
-            item.person.grade, item.person.section) in allowed]
+        items = [item for item in items if (item.person.grade, item.person.section) in {
+            (section.grade_level.name, section.name) for section in adviser_sections(db, user, current_school_year_id(db, item.event_date) or -1)}]
     return [{"id": item.id, "person_id": item.person_id, "person_name": item.person.full_name,
              "event_date": item.event_date, "reason": item.reason, "actor_name": item.actor_name,
              "created_at": item.created_at} for item in items]
@@ -1493,7 +1511,7 @@ def save_excused_absence(payload: ExcusedAbsencePayload, db: Session = Depends(g
         raise HTTPException(status_code=404, detail="Student was not found")
     if user.role == "teacher":
         ensure_adviser_access(
-            db, user, person.grade or "", person.section or "")
+            db, user, person.grade or "", person.section or "", current_school_year_id(db, payload.event_date) or -1)
     item = db.scalar(select(ExcusedAbsence).where(
         ExcusedAbsence.person_id == payload.person_id, ExcusedAbsence.event_date == payload.event_date,
     ))
@@ -1515,7 +1533,7 @@ def delete_excused_absence(excused_id: str, db: Session = Depends(get_db),
             status_code=404, detail="Excused absence was not found")
     if user.role == "teacher":
         ensure_adviser_access(
-            db, user, item.person.grade or "", item.person.section or "")
+            db, user, item.person.grade or "", item.person.section or "", current_school_year_id(db, item.event_date) or -1)
     db.delete(item)
     db.commit()
     return {"deleted": True}
@@ -1542,10 +1560,8 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
     ).order_by(SubjectTeachingAssignment.school_year_id,
                SubjectTeachingAssignment.subject_id,
                SubjectTeachingAssignment.section_id)).all()
-    adviser_ids = {item.adviser_user_id for item in sections if item.adviser_user_id is not None}
-    adviser_names = {
-        item.id: item.full_name for item in db.scalars(select(User).where(User.id.in_(adviser_ids or {-1}))).all()
-    }
+    annual_advisers = {row.section_id: row.teacher_user_id for row in db.scalars(select(SectionAdviserAssignment).where(SectionAdviserAssignment.school_year_id == (current_school_year_id(db) or -1))).all()}
+    adviser_names = {item.id: item.full_name for item in db.scalars(select(User).where(User.id.in_(set(annual_advisers.values()) or {-1}))).all()}
     if user.role == "teacher":
         allowed_sections = adviser_sections(db, user)
         allowed_section_ids = {item.id for item in allowed_sections}
@@ -1562,11 +1578,15 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
                              "ends_on": item.ends_on, "active": item.active} for item in periods],
         "grade_levels": [{"id": item.id, "name": item.name, "active": item.active} for item in grades],
         "sections": [{"id": item.id, "grade_level_id": item.grade_level_id, "grade": item.grade_level.name,
-                      "name": item.name, "adviser_user_id": item.adviser_user_id,
-                      "adviser_name": adviser_names.get(item.adviser_user_id) or item.adviser_name,
+                      "name": item.name, "adviser_user_id": annual_advisers.get(item.id),
+                      "adviser_name": adviser_names.get(annual_advisers.get(item.id)),
                       "track": item.track, "active": item.active} for item in sections],
+        "adviser_assignments": [{"school_year_id": item.school_year_id, "section_id": item.section_id, "teacher_user_id": item.teacher_user_id,
+            "adviser_name": db.get(User, item.teacher_user_id).full_name} for item in db.scalars(select(SectionAdviserAssignment)).all()
+            if user.role != 'teacher' or item.teacher_user_id == user.id],
         "subjects": [{"id": item.id, "code": item.code, "name": item.name, "category": item.category,
                       "is_elective": item.is_elective,
+                      "allowed_grades": item.allowed_grades,
                       "elective_track": elective_track_for_subject(item.category, item.is_elective, item.elective_track),
                       "active": item.active} for item in subjects],
         "subject_assignments": [{
@@ -1607,7 +1627,7 @@ def _matching_deleted_reference(db: Session, model, payload):
     return matches[0] if matches else None
 
 
-def _save_reference(db: Session, model, payload, actor: User, exclude: set[str] = {"id"}) -> dict:
+def _save_reference(db: Session, model, payload, actor: User, exclude: set[str] = {"id"}, commit: bool = True) -> dict:
     item = db.get(model, payload.id) if payload.id else model()
     restoring = False
     if payload.id and not item:
@@ -1630,7 +1650,8 @@ def _save_reference(db: Session, model, payload, actor: User, exclude: set[str] 
         summary = (f"{model.__name__} restored from Deleted items and updated" if restoring
                    else f"{model.__name__} {'updated' if payload.id else 'created'}")
         add_audit(db, actor, action, model.__name__, item.id, summary, before, model_snapshot(item))
-        db.commit()
+        if commit:
+            db.commit()
         db.refresh(item)
     except IntegrityError as exc:
         db.rollback()
@@ -1667,33 +1688,39 @@ def save_section(payload: SectionPayload, db: Session = Depends(get_db), actor: 
     if not parent_grade or parent_grade.deleted_at is not None:
         raise HTTPException(
             status_code=422, detail="Grade level was not found")
-    if payload.adviser_user_id is not None:
-        adviser = db.scalar(select(User).where(User.id == payload.adviser_user_id).with_for_update())
-        if not adviser or adviser.role != "teacher" or not adviser.active:
-            raise HTTPException(
-                status_code=422, detail="Select an active teacher account as adviser")
-        payload.adviser_name = adviser.full_name
-        other_section = db.scalar(select(SchoolSection.id).where(
-            SchoolSection.adviser_user_id == adviser.id,
-            SchoolSection.active.is_(True),
-            SchoolSection.deleted_at.is_(None),
-            SchoolSection.id != (payload.id or -1),
-        ))
-        if other_section:
-            raise HTTPException(status_code=409, detail="A teacher can advise only one active section. Unassign them from the current section first.")
-    else:
-        payload.adviser_name = None
+    from .services.section_advisers import current_school_year_id, assign_section_adviser
+    year_id = payload.school_year_id or current_school_year_id(db)
+    if year_id is None:
+        raise HTTPException(422, 'Select a school year for section and adviser changes')
+    db.scalar(select(SchoolYear).where(SchoolYear.id == year_id).with_for_update())
     if is_junior_high(parent_grade.name):
         if payload.track and payload.track.strip().upper() not in {"BEP", "STE"}:
             raise HTTPException(status_code=422, detail="Junior high sections must use the BEP or STE program")
         payload.track = payload.track.strip().upper() if payload.track else None
     elif not is_senior_high(parent_grade.name):
         payload.track = None
-    return _save_reference(db, SchoolSection, payload, actor)
+    try:
+        result = _save_reference(db, SchoolSection, payload, actor, exclude={'id', 'school_year_id', 'adviser_user_id', 'adviser_name'}, commit=False)
+        previous = adviser_for_section(db, year_id, result['id'])
+        previous_id = previous.id if previous else None
+        assign_section_adviser(db, year_id, result['id'], payload.adviser_user_id)
+        add_audit(db, actor, 'Update', 'SectionAdviserAssignment', result['id'], 'School-year adviser assignment updated',
+            {'school_year_id': year_id, 'teacher_user_id': previous_id}, {'school_year_id': year_id, 'teacher_user_id': payload.adviser_user_id})
+        db.commit()
+        return result
+    except (ValueError, IntegrityError) as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+
 
 
 @app.post("/api/admin/subjects")
 def save_subject(payload: SubjectPayload, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))) -> dict:
+    if payload.is_elective and not payload.category.strip().upper().startswith('SHS'):
+        grades = payload.allowed_grades if payload.allowed_grades is not None else [7, 8, 9, 10]
+        if not grades or any(grade not in (7, 8, 9, 10) for grade in grades):
+            raise HTTPException(422, 'Select at least one allowed JHS grade from Grades 7–10.')
+        payload.allowed_grades = sorted(set(grades))
     if payload.category.strip().upper().startswith("SHS") and payload.is_elective and not (payload.elective_track or "").strip():
         raise HTTPException(status_code=422, detail="Choose the SHS track allowed to take this elective")
     if payload.category.strip().upper().startswith("SHS") and payload.is_elective:
@@ -1711,7 +1738,7 @@ def save_subject_teaching_assignments(
     db: Session = Depends(get_db),
     actor: User = Depends(require_roles("admin")),
 ) -> dict:
-    year = db.get(SchoolYear, payload.school_year_id)
+    year = db.scalar(select(SchoolYear).where(SchoolYear.id == payload.school_year_id).with_for_update())
     subject = db.scalar(select(Subject).where(Subject.id == payload.subject_id).with_for_update())
     teacher = db.scalar(select(User).where(User.id == payload.teacher_user_id).with_for_update())
     if not year or year.deleted_at is not None or not year.active:
@@ -1746,7 +1773,24 @@ def save_subject_teaching_assignments(
             )
         if len({section.grade_level_id for section in sections}) > 1:
             raise HTTPException(status_code=422, detail="Assign this teacher to sections from one grade level at a time")
+    other_grade = db.scalar(select(SubjectTeachingAssignment.id).join(SchoolSection).where(
+        SubjectTeachingAssignment.school_year_id == year.id, SubjectTeachingAssignment.teacher_user_id == teacher.id,
+        SubjectTeachingAssignment.active.is_(True), SchoolSection.grade_level_id.notin_({section.grade_level_id for section in sections} or {-1}),
+        SubjectTeachingAssignment.section_id.notin_(section_ids or {-1})))
+    if section_ids and other_grade:
+        raise HTTPException(422, 'A teacher can teach sections from only one grade level per school year')
     for section in sections:
+        from .services.academic_context import subject_matches_grade
+        if not subject_matches_grade(subject, section.grade_level.name):
+            retained = db.scalar(select(SubjectTeachingAssignment.id).where(
+                SubjectTeachingAssignment.school_year_id == year.id,
+                SubjectTeachingAssignment.subject_id == subject.id,
+                SubjectTeachingAssignment.section_id == section.id,
+                SubjectTeachingAssignment.teacher_user_id == teacher.id,
+                SubjectTeachingAssignment.active.is_(True),
+            ))
+            if not retained:
+                raise HTTPException(422, f'{subject.name} is not allowed for this grade level')
         senior_high = is_senior_high(section.grade_level.name)
         if senior_high != (subject.category or "JHS").strip().upper().startswith("SHS"):
             raise HTTPException(status_code=422, detail=f"{subject.name} does not match Grade {section.grade_level.name}")
@@ -2162,7 +2206,7 @@ def sf2_export(year: int, month: int, grade: str, section: str, school_id: str =
         raise HTTPException(status_code=422, detail="Choose a valid reporting year") from error
     if year_record.starts_on > last_day or year_record.ends_on < first_day:
         raise HTTPException(status_code=422, detail="The reporting month is outside the selected school year")
-    ensure_adviser_access(db, user, grade, section)
+    ensure_adviser_access(db, user, grade, section, year_record.id)
     people = sf2_students(db, year, month, grade, section)
     pending = sf2_pending_attendance(db, people, year, month)
     if pending['unresolved_count']:
@@ -2249,7 +2293,7 @@ def review_generated_report(report_id: str, payload: ReportReviewPayload, db: Se
 
 
 def ensure_legacy_gradebook_access(db: Session, user: User, class_key: str,
-                                 grade: str = "", section: str = "") -> None:
+                                 grade: str = "", section: str = "", school_year: str = "") -> None:
     if user.role != "teacher":
         return
     state = db.get(GradebookState, class_key)
@@ -2257,7 +2301,9 @@ def ensure_legacy_gradebook_access(db: Session, user: User, class_key: str,
     stored_grade = state.grade if state else rules.get("grade")
     stored_section = state.section if state else rules.get("section")
     if stored_grade and stored_section:
-        ensure_adviser_access(db, user, stored_grade, stored_section)
+        year_name = state.school_year if state else rules.get("school_year")
+        year_id = db.scalar(select(SchoolYear.id).where(SchoolYear.name == year_name, SchoolYear.deleted_at.is_(None)))
+        ensure_adviser_access(db, user, stored_grade, stored_section, year_id or -1)
         return
     # Records without trusted class metadata must not inherit the caller's scope.
     if state or rules or db.scalar(select(GradeComponent.id).where(GradeComponent.class_key == class_key).limit(1)) or db.scalar(
@@ -2266,7 +2312,8 @@ def ensure_legacy_gradebook_access(db: Session, user: User, class_key: str,
         raise HTTPException(status_code=403, detail="This legacy record has no verified class assignment")
     if not grade or not section:
         raise HTTPException(status_code=422, detail="Grade and section are required for adviser access control")
-    ensure_adviser_access(db, user, grade, section)
+    year_id = db.scalar(select(SchoolYear.id).where(SchoolYear.name == school_year, SchoolYear.deleted_at.is_(None))) if school_year else current_school_year_id(db)
+    ensure_adviser_access(db, user, grade, section, year_id or -1)
 
 
 def gradebook_data(class_key: str, db: Session) -> dict:
@@ -2313,11 +2360,15 @@ def read_gradebook(class_key: str, grade: str = "", section: str = "", db: Sessi
 @app.put("/api/gradebook/{class_key}")
 def save_gradebook(class_key: str, payload: GradebookPayload, db: Session = Depends(get_db),
                    user: User = Depends(require_roles("teacher"))) -> dict:
+    linked = db.scalar(select(Gradebook).where(Gradebook.class_key == class_key))
+    if linked and (linked.is_legacy_readonly or linked.learning_area):
+        raise HTTPException(409, 'Use the learning-area workspace. Legacy MAPEH records are read-only.')
     if payload.class_key != class_key:
         raise HTTPException(
             status_code=422, detail="Class key does not match URL")
-    ensure_legacy_gradebook_access(db, user, class_key, payload.grade, payload.section)
-    ensure_adviser_access(db, user, payload.grade, payload.section)
+    ensure_legacy_gradebook_access(db, user, class_key, payload.grade, payload.section, payload.school_year)
+    payload_year_id = db.scalar(select(SchoolYear.id).where(SchoolYear.name == payload.school_year, SchoolYear.deleted_at.is_(None)))
+    ensure_adviser_access(db, user, payload.grade, payload.section, payload_year_id or -1)
     existing_state = db.get(GradebookState, class_key)
     if existing_state and existing_state.status == "Finalized":
         raise HTTPException(
@@ -2432,11 +2483,14 @@ def save_gradebook(class_key: str, payload: GradebookPayload, db: Session = Depe
 @app.post("/api/gradebook/{class_key}/finalize")
 def finalize_gradebook(class_key: str, payload: GradebookActionPayload, db: Session = Depends(get_db),
                        user: User = Depends(require_roles("teacher"))) -> dict:
+    linked = db.scalar(select(Gradebook).where(Gradebook.class_key == class_key))
+    if linked and (linked.is_legacy_readonly or linked.learning_area):
+        raise HTTPException(409, 'Use the learning-area workspace. Legacy MAPEH records are read-only.')
     state = db.get(GradebookState, class_key)
     if not state:
         raise HTTPException(
             status_code=404, detail="Save the gradebook before finalizing it")
-    ensure_adviser_access(db, user, state.grade, state.section)
+    ensure_legacy_gradebook_access(db, user, class_key)
     if state.status == "Finalized":
         return {"finalized": True, "already_finalized": True}
     summary = gradebook_summary(db, class_key)
@@ -2460,6 +2514,9 @@ def finalize_gradebook(class_key: str, payload: GradebookActionPayload, db: Sess
 @app.post("/api/gradebook/{class_key}/reopen")
 def reopen_gradebook(class_key: str, payload: GradebookActionPayload, db: Session = Depends(get_db),
                      user: User = Depends(require_roles("records_officer"))) -> dict:
+    linked = db.scalar(select(Gradebook).where(Gradebook.class_key == class_key))
+    if linked and (linked.is_legacy_readonly or linked.learning_area):
+        raise HTTPException(409, 'Use the learning-area workspace. Legacy MAPEH records are read-only.')
     state = db.get(GradebookState, class_key)
     if not state:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
@@ -2645,7 +2702,7 @@ def update_grading_policy(
     linked_books = db.scalars(select(Gradebook).where(Gradebook.grading_policy_id == p.id)).all()
     if any(not grading_service.teacher_can_access_gradebook_context(
         db, user, book.school_year_id, book.section_id, book.subject_id,
-    ) or book.status in {'Finalized', 'Locked'} for book in linked_books):
+    ) or book.is_legacy_readonly or book.learning_area or book.status in {'Finalized', 'Locked'} for book in linked_books):
         raise HTTPException(status_code=409, detail='This policy is used by another class or a finalized record. Create a new policy instead of changing saved grades.')
     p.name = payload.name.strip()
     p.description = payload.description.strip()
@@ -2736,6 +2793,9 @@ def list_gradebooks(
             "grade_name": b.grade_name,
             "section_name": b.section_name,
             "subject_name": b.subject_name,
+            "learning_area": b.learning_area,
+            "teacher_user_id": b.teacher_user_id,
+            "is_legacy_readonly": b.is_legacy_readonly,
             "teacher_name": b.teacher_name,
             "grading_period_name": b.grading_period.name if b.grading_period else None,
             "class_key": b.class_key,
@@ -2754,6 +2814,7 @@ def lookup_gradebook_endpoint(
     grade_level_id: int,
     section_id: int,
     subject_id: int,
+    learning_area: str = "",
     db: Session = Depends(get_db),
     user: User = Depends(require_roles('admin', 'teacher', 'records_officer')),
 ):
@@ -2763,6 +2824,7 @@ def lookup_gradebook_endpoint(
         Gradebook.grade_level_id == grade_level_id,
         Gradebook.section_id == section_id,
         Gradebook.subject_id == subject_id,
+        Gradebook.learning_area == learning_area,
     ))
     if not book:
         return {'id': None}
@@ -2786,6 +2848,7 @@ def create_gradebook_endpoint(
             subject_id=payload.subject_id,
             user=user,
             grading_policy_id=payload.grading_policy_id,
+            learning_area=payload.learning_area,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -2908,7 +2971,12 @@ def validate_gradebook_endpoint(
                           "message": f"Component '{comp['name']}' has no assessment items", "component_id": comp["id"]})
     if full["statistics"]["incomplete"] > 0:
         issues.append({"level": "error", "code": "INCOMPLETE_LEARNERS",
-                      "message": f"{full['statistics']['incomplete']} learner(s) have missing or incomplete scores"})
+                      "message": grading_service.incomplete_gradebook_message(full)})
+    if book.learning_area:
+        from .services.mapeh_learning_areas import partner_gradebook_issue
+        issue = partner_gradebook_issue(db, book)
+        if issue:
+            issues.append({"level": "error", "code": "MAPEH_PARTNER_INCOMPLETE", "message": issue})
     return {"valid": not any(i["level"] == "error" for i in issues), "issues": issues}
 
 
@@ -2948,7 +3016,8 @@ def finalize_gradebook_new_endpoint(
         grading_service.finalize_gradebook(
             db, gradebook_id, user, payload.reason)
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        detail = {"code": exc.code, "message": str(exc)} if getattr(exc, "code", None) else str(exc)
+        raise HTTPException(status_code=409, detail=detail) from exc
     return {"finalized": True, "status": "Finalized"}
 
 
@@ -3303,27 +3372,33 @@ def gradebook_report_xlsx_new(
     division: str = "",
     school_id: str = "",
     all_terms: bool = False,
+    through_term: int | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("teacher", "records_officer", "school_head")),
 ):
-    if all_terms and user.role != 'records_officer':
-        raise HTTPException(status_code=403, detail="Only the records officer can export all three terms together")
+    if through_term not in (None, 2) or (through_term and all_terms):
+        raise HTTPException(422, 'Choose a single term, Terms 1–2, or all three terms.')
+    if (all_terms or through_term) and user.role not in {'teacher', 'records_officer'}:
+        raise HTTPException(status_code=403, detail="Only the assigned teacher or records officer can export multiple terms")
     book = db.get(Gradebook, gradebook_id)
     if book:
         ensure_gradebook_access(db, user, book)
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
+    if through_term and book.quarter != 2:
+        raise HTTPException(422, 'Select Term 2 to export Terms 1–2 together.')
     if book.status not in {"Finalized", "Locked"}:
         raise HTTPException(status_code=409, detail="Finalize the complete class record before exporting XLSX")
     full = grading_service.get_gradebook_full(db, book.id)
     if not full["students"] or full["statistics"]["incomplete"]:
         raise HTTPException(status_code=409, detail="Cannot export official grades with missing or incomplete learner scores")
     path = generate_gradebook_report_xlsx(db, book.id, region=region, division=division, school_id=school_id,
-                                        allowed_teacher_id=user.id if user.role == 'teacher' else None, all_terms=all_terms)
+                                        allowed_teacher_id=user.id if user.role == 'teacher' else None, all_terms=all_terms, through_term=through_term)
     report = register_report(db, path, "Grading Summary", {
         "gradebook_id": book.id, "grade": book.grade_name, "section": book.section_name,
         "school_year": book.school_year_name, "quarter": book.quarter, "subject": book.subject_name,
         "all_terms": all_terms,
+        "through_term": through_term,
     }, user)
     return FileResponse(report.file_path, filename=report.filename,
                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -3413,3 +3488,35 @@ def add_intervention(payload: InterventionPayload, db: Session = Depends(get_db)
     db.add(item)
     db.commit()
     return {"id": item.id, "created_at": item.created_at}
+
+
+@app.post('/api/admin/demo-teacher-setup/advisory-preview')
+def demo_advisory_setup_preview(payload: DedicatedDemoAdvisoryPayload, db: Session = Depends(get_db), actor: User = Depends(require_roles('admin'))):
+    from .services.demo_teacher_setup import preview_demo_advisory_setup
+    try:
+        return preview_demo_advisory_setup(db, payload.school_year_id, actor)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post('/api/admin/demo-teacher-setup/preview')
+def demo_teacher_setup_preview(payload: DemoTeacherSetupPayload, db: Session = Depends(get_db), actor: User = Depends(require_roles('admin'))):
+    from .services.demo_teacher_setup import preview_demo_teacher_setup
+    try:
+        return preview_demo_teacher_setup(db, payload.school_year_id, payload.section_ids, actor)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post('/api/admin/demo-teacher-setup/{batch_id}/apply')
+def demo_teacher_setup_apply(batch_id: str, db: Session = Depends(get_db), actor: User = Depends(require_roles('admin'))):
+    from .services.demo_teacher_setup import apply_demo_teacher_setup
+    try:
+        return apply_demo_teacher_setup(db, batch_id, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, 'School setup changed. Generate a new preview before confirming.') from exc

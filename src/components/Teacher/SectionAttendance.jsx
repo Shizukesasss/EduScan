@@ -1,3 +1,4 @@
+import PaginatedBody from '../Common/PaginatedBody';
 import { useMemo, useState } from 'react';
 import { CheckCircle, FileEdit, Search, XCircle } from 'lucide-react';
 import { displayTime } from '../../api/client';
@@ -24,7 +25,7 @@ export default function SectionAttendance({ students, isLocked, onStudentClick }
         <div style={{ position: 'relative', width: '300px' }}><Search size={16} style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} /><input type="search" placeholder="Search name, LRN, or ID" className="input-field" style={{ paddingLeft: '40px', background: '#f8fafc' }} value={query} onChange={(event) => setQuery(event.target.value)} /></div>
       </div>
       <p className="section-copy">Use the Corrections page to change a record. That workflow preserves the gate event and requires an auditable reason.</p>
-      <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Student</th><th>Gate evidence</th><th>Current SF2 status</th><th>Latest reason</th><th>Action</th></tr></thead><tbody>
+      <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Student</th><th>Gate evidence</th><th>Current SF2 status</th><th>Latest reason</th><th>Action</th></tr></thead><PaginatedBody resetKey={query}>
         {visibleStudents.length === 0 && <tr><td colSpan="5" className="empty-cell">No learner matches this search.</td></tr>}
         {visibleStudents.map((student) => <tr key={student.id}>
           <td className="student-cell" onClick={() => onStudentClick(student)}><strong>{student.name}</strong><span>{student.lrn || student.external_id} · {student.sex}</span></td>
@@ -33,7 +34,7 @@ export default function SectionAttendance({ students, isLocked, onStudentClick }
           <td>{student.remark || '—'}</td>
           <td><button className="btn-link" disabled={isLocked} onClick={() => { window.location.href = '/teacher/attendance'; }}><FileEdit size={15} /> Open correction</button></td>
         </tr>)}
-      </tbody></table></div>
+      </PaginatedBody></table></div>
     </div>
   );
 }

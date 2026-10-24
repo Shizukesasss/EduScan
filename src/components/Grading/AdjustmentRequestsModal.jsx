@@ -1,3 +1,4 @@
+import PaginatedBody from '../Common/PaginatedBody';
 import React, { useState } from 'react';
 import { Plus, X, Trash2 } from 'lucide-react';
 import { api, auth } from '../../api/client';
@@ -364,7 +365,7 @@ export default function AdjustmentRequestsModal({
                     <th className="text-center">Actions</th>
                   </tr>
                 </thead>
-                <tbody>
+                <PaginatedBody>
                   {adjustments.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="empty-cell text-center py-8 text-muted">
@@ -501,7 +502,7 @@ export default function AdjustmentRequestsModal({
                       );
                     })
                   )}
-                </tbody>
+                </PaginatedBody>
               </table>
             </div>
           )}

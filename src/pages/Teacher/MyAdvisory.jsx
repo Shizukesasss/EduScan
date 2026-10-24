@@ -1,3 +1,4 @@
+import PaginatedBody from '../../components/Common/PaginatedBody';
 import { useEffect, useMemo, useState } from 'react';
 import { Search, Phone, MoreVertical } from 'lucide-react';
 import StudentProfileModal from '../../components/Teacher/StudentProfileModal';
@@ -53,7 +54,7 @@ export default function MyAdvisory() {
       <div className="card-static table-scroll">
         <table className="interactive-table">
           <thead><tr><th>Student name</th><th>LRN / ID</th><th>Grade &amp; section</th><th>Today</th><th>Parent contact</th><th /></tr></thead>
-          <tbody>
+          <PaginatedBody resetKey={`${query}|${activeGroup}`}>
             {roster.length === 0 && <tr><td colSpan="6" className="empty-cell">{query ? 'No students match your search.' : activeGroup === 'advisory' ? 'No students are assigned to your advisory section. Ask an administrator to check your advisory assignment.' : 'No students are in your assigned classes outside your advisory. Ask an administrator to check your current-year subject assignments.'}</td></tr>}
             {roster.map((student) => (
               <tr key={student.id} onClick={() => setSelectedStudent(student)}>
@@ -65,7 +66,7 @@ export default function MyAdvisory() {
                 <td><button className="icon-btn" onClick={(event) => { event.stopPropagation(); setSelectedStudent(student); }}><MoreVertical size={18} /><span className="control-label">View details</span></button></td>
               </tr>
             ))}
-          </tbody>
+          </PaginatedBody>
         </table>
       </div>
       <StudentProfileModal student={selectedStudent} onClose={() => setSelectedStudent(null)} />

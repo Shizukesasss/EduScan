@@ -33,6 +33,29 @@ test('updated workbook conversion uses the unrounded initial grade at a boundary
   assert.equal(result.reportedGrade, 75);
 });
 
+test('decimal-safe calculation preserves exact transmutation boundaries', () => {
+  const components = [
+    { id: 1, name: 'Written Works', component_type: 'Written Work', weight: 20, items: [{ id: 10, max_score: 20 }] },
+    { id: 2, name: 'Performance Tasks', component_type: 'Performance Task', weight: 50, items: [{ id: 20, max_score: 20 }] },
+    { id: 3, name: 'Quarterly Assessment', component_type: 'Term Examinations', weight: 30,
+      items: ['ST1', 'ST2', 'TE'].map((label, index) => ({ id: 30 + index, label, max_score: 20 })) },
+  ];
+  const transmutationTable = [{ min: 0, max: 71.17, value: 75 }, { min: 71.18, max: 72.35, value: 76 }];
+
+  for (const [score, expectedGrade] of [[14.236, 76], [14.235, 75]]) {
+    for (const weights of [[20, 50, 30], [0.2, 0.5, 0.3]]) {
+      const weightedComponents = components.map((component, index) => ({ ...component, weight: weights[index] }));
+      const studentScores = weightedComponents.flatMap(component => component.items.map(item => ({
+        itemId: item.id, score, status: 'Scored',
+      })));
+      const result = calculateStudentGrade({ studentScores, components: weightedComponents, transmutationTable });
+
+      assert.equal(result.initialGrade, 71.18);
+      assert.equal(result.reportedGrade, expectedGrade);
+    }
+  }
+});
+
 test('prefixed grades and SHS category variants remain selectable', () => {
   assert.equal(normalizeGradeName(' Grade 11 '), '11');
   assert.equal(isSeniorHighGrade('Grade 12'), true);

@@ -125,8 +125,8 @@ def calculate_component_percentage(
         }
     """
     score_map = {s["item_id"]: s for s in scores}
-    total_earned = 0.0
-    total_possible = 0.0  # sum of max_score for scored items only
+    total_earned = Decimal("0")
+    total_possible = Decimal("0")  # sum of max_score for scored items only
     scored_count = 0
     complete = True
 
@@ -139,8 +139,8 @@ def calculate_component_percentage(
         if score_val is None:
             complete = False
             continue
-        total_earned += float(score_val)
-        total_possible += float(item["max_score"])
+        total_earned += Decimal(str(score_val))
+        total_possible += Decimal(str(item["max_score"]))
         scored_count += 1
 
     if total_possible <= 0 or scored_count == 0:
@@ -154,7 +154,7 @@ def calculate_component_percentage(
         }
 
     # Percentage is computed from the graded items only
-    percentage = (total_earned / total_possible) * 100.0
+    percentage = total_earned / total_possible * 100
 
     if component_type == 'Term Examinations':
         portions = {'ST1': 30, 'ST2': 30, 'TE': 40}
@@ -165,14 +165,14 @@ def calculate_component_percentage(
                         and score_map[item['id']].get('score') is not None]
         # Draft previews normalize the scored exam portions; complete exams retain 30/30/40.
         used_portion = sum(portions.get(item['label'], 0) for item in scored_items)
-        weighted_percentage = sum(float(score_map[item['id']]['score']) / float(item['max_score']) * portions.get(item['label'], 0)
-                                  for item in scored_items)
+        weighted_percentage = sum((Decimal(str(score_map[item['id']]['score'])) / Decimal(str(item['max_score']))
+                                   * portions.get(item['label'], 0) for item in scored_items), Decimal("0"))
         percentage = weighted_percentage if used_portion == 100 else weighted_percentage * 100 / used_portion if used_portion else None
 
     return {
-        "total_earned": total_earned,
-        "total_possible": total_possible,
-        "percentage": percentage,
+        "total_earned": float(total_earned),
+        "total_possible": float(total_possible),
+        "percentage": float(percentage) if percentage is not None else None,
         "complete": complete,
         "scored_count": scored_count,
         "item_count": len(items),
@@ -303,15 +303,15 @@ def apply_transmutation(
     if initial_grade is None:
         return None
 
-    grade = max(0.0, min(100.0, float(initial_grade)))
+    grade = max(Decimal("0"), min(Decimal("100"), Decimal(str(initial_grade))))
 
     if transmutation_table:
         if use_lower_bounds:
-            return next((int(entry['value']) for entry in sorted(transmutation_table, key=lambda row: float(row['min']), reverse=True)
-                         if grade >= float(entry['min'])), None)
+            return next((int(entry['value']) for entry in sorted(transmutation_table, key=lambda row: Decimal(str(row['min'])), reverse=True)
+                         if grade >= Decimal(str(entry['min']))), None)
         # Use the table: find the range that contains the grade
         for entry in transmutation_table:
-            if float(entry["min"]) <= grade <= float(entry["max"]):
+            if Decimal(str(entry["min"])) <= grade <= Decimal(str(entry["max"])):
                 return int(entry["value"])
         # If somehow not found but grade is 100, return 100
         if grade >= 100:
@@ -322,8 +322,8 @@ def apply_transmutation(
     if grade >= 100:
         return 100
     if grade >= 60:
-        return int(((grade - 60) + 1e-9) // 1.6) + 75
-    return int((grade + 1e-9) // 4) + 60
+        return int(((grade - 60) / Decimal("1.6")).to_integral_value(rounding=ROUND_FLOOR)) + 75
+    return int((grade / Decimal("4")).to_integral_value(rounding=ROUND_FLOOR)) + 60
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +402,7 @@ def calculate_student_grade(
             "item_count": pct_result["item_count"],
         })
 
+    component_results = normalize_component_weights(component_results)
     weighted = calculate_weighted_grade(
         component_results, rounding_decimal_places, rounding_method,
     )

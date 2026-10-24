@@ -25,7 +25,7 @@ class AdminReportingPermissionsTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory(dir=fixtures.TEST_DIR.name)
         self.root = Path(self.directory.name)
         self.subject = Subject(code='TEST-MATH', name='Mathematics', category='JHS')
-        self.db.add_all([self.subject, SchoolYear(name='2026-2027', starts_on=date(2026,6,1), ends_on=date(2027,3,31), active=True)])
+        self.db.add(self.subject)
         self.db.commit()
         template = Path(__file__).resolve().parents[1] / 'data/templates/School Form 2 (SF2) Daily Attendance Report of Learners.xlsx'
         self.patches = [patch.object(reports, 'REPORT_DIR', self.root), patch.object(sf2, 'EXPORT_DIR', self.root),

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildScoreUpdates, validateGradebookForFinalization } from './gradingWorkflow.js';
+import { buildScoreUpdates, collectGradebookFinalizationIssues, validateGradebookForFinalization } from './gradingWorkflow.js';
 
 const students = [{ person_id: 1, full_name: 'Learner A', scores: { 10: 15, 11: 20 }, score_statuses: { 10: 'Scored', 11: 'Scored' } },
   { person_id: 2, full_name: 'Learner B', scores: { 10: 12 }, score_statuses: { 10: 'Scored' } }];
@@ -59,6 +59,67 @@ test('a configured column unused by the whole class does not block finalization'
 
 test('an activity used by one learner is required for every learner', () => {
   assert.throws(() => validateGradebookForFinalization(students, requiredComponents), /Cannot finalize: 1 learner/);
+});
+
+test('finalization issues group every learner with exact missing used activities', () => {
+  const assessmentComponents = [
+    { name: 'Written Work', component_type: 'Written Work', weight: 50, items: [
+      { id: 101, label: 'Quiz 1', max_score: 20 },
+      { id: 102, label: 'Activity 2', max_score: 20 },
+      { id: 103, label: 'Unused Activity', max_score: 20 },
+    ] },
+    { name: 'Term Examinations', component_type: 'Term Examinations', weight: 50, items: [
+      { id: 201, label: 'ST1', max_score: 50 },
+      { id: 202, label: 'ST2', max_score: 50 },
+      { id: 203, label: 'TE', max_score: 50 },
+    ] },
+  ];
+  const classStudents = [
+    { person_id: 1, full_name: 'Learner A', scores: { 101: 0, 102: 10, 201: 0, 203: 45 },
+      score_statuses: { 101: 'Scored', 102: 'Scored', 201: 'Scored', 202: 'Excused', 203: 'Scored' } },
+    { person_id: 2, full_name: 'Learner B', scores: { 101: 15, 201: 20, 202: 30 },
+      score_statuses: { 101: 'Scored', 201: 'Scored', 202: 'Scored' } },
+  ];
+  const expected = {
+    learners: [
+      { personId: 1, learnerName: 'Learner A', activities: [{ label: 'ST2', status: 'Excused' }] },
+      { personId: 2, learnerName: 'Learner B', activities: [
+        { label: 'Activity 2', status: 'Missing' },
+        { label: 'TE', status: 'Missing' },
+      ] },
+    ],
+    componentsWithoutScores: [],
+  };
+  assert.deepEqual(collectGradebookFinalizationIssues(classStudents, assessmentComponents), expected);
+  assert.throws(
+    () => validateGradebookForFinalization(classStudents, assessmentComponents),
+    error => { assert.deepEqual(error.finalizationIssues, expected); return true; },
+  );
+});
+
+test('a component with no entered activity is reported without changing finalization rules', () => {
+  const partialComponents = [
+    { name: 'Written Work', component_type: 'Written Work', weight: 40,
+      items: [{ id: 31, label: 'Quiz', max_score: 20 }] },
+    { name: 'Performance Tasks', component_type: 'Performance Task', weight: 30,
+      items: [{ id: 32, label: 'Project', max_score: 20 }] },
+    { name: 'Term Examinations', component_type: 'Term Examinations', weight: 30, items: [
+      { id: 33, label: 'ST1', max_score: 50 },
+      { id: 34, label: 'ST2', max_score: 50 },
+      { id: 35, label: 'TE', max_score: 50 },
+    ] },
+  ];
+  const classStudent = [{ person_id: 3, full_name: 'Learner C', scores: { 31: 15, 33: 10, 34: 20, 35: 30 },
+    score_statuses: { 31: 'Scored', 33: 'Scored', 34: 'Scored', 35: 'Scored' } }];
+  const expected = {
+    learners: [],
+    componentsWithoutScores: [{ componentName: 'Performance Tasks', activityLabels: ['Project'] }],
+  };
+  assert.deepEqual(collectGradebookFinalizationIssues(classStudent, partialComponents), expected);
+  assert.throws(
+    () => validateGradebookForFinalization(classStudent, partialComponents),
+    error => { assert.deepEqual(error.finalizationIssues, expected); return true; },
+  );
 });
 
 test('finalization checks unsaved entries and accepts genuine zero scores', () => {

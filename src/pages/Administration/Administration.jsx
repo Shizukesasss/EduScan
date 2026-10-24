@@ -1,3 +1,6 @@
+import usePagination from '../../hooks/usePagination';
+import Pagination from '../../components/Common/Pagination';
+import PaginatedBody from '../../components/Common/PaginatedBody';
 import { useCallback, useEffect, useState } from 'react';
 import {
   AlertTriangle, ArchiveRestore, CheckCircle2, ChevronDown,
@@ -5,7 +8,7 @@ import {
   ShieldAlert, Trash2, UserCog, Users, UserCheck
 } from 'lucide-react';
 import { api, auth } from '../../api/client';
-import { availableOptionId, isJuniorHighGrade, isSeniorHighGrade } from '../../services/academicContext';
+import { availableOptionId, isJuniorHighGrade, isSeniorHighGrade, subjectMatchesGrade } from '../../services/academicContext';
 import { useToast } from '../../contexts/useToast';
 import BiometricConsent from '../../components/Scanner/BiometricConsent';
 import EnrollmentFields from '../../components/Scanner/EnrollmentFields';
@@ -83,6 +86,7 @@ function Field({ label, value, onChange, type = 'text', required = false, disabl
   );
 }
 function SectionAssignmentPicker({ sections, selectedIds, onChange }) {
+  const paging = usePagination(sections, sections.map(item => `${item.grade}:${item.track || ''}`).filter((item,index,array) => array.indexOf(item) === index).join('|'));
   const selected = new Set(selectedIds.map(Number));
   const toggle = (sectionId) => {
     const next = new Set(selected);
@@ -103,7 +107,7 @@ function SectionAssignmentPicker({ sections, selectedIds, onChange }) {
       </div>
       {sections.length ? (
         <div className="assignment-section-list">
-          {sections.map((item) => (
+          {paging.items.map((item) => (
             <label className="assignment-section-option" key={item.id}>
               <input type="checkbox" checked={selected.has(item.id)} onChange={() => toggle(item.id)} />
               <span>
@@ -115,6 +119,7 @@ function SectionAssignmentPicker({ sections, selectedIds, onChange }) {
           ))}
         </div>
       ) : <p className="section-copy assignment-section-empty">No active sections match this subject’s grade level or track.</p>}
+      <Pagination {...paging} label="sections" />
     </fieldset>
   );
 }
@@ -222,9 +227,9 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
       <section className="card-static">
         <h2>School records</h2>
         <p className="section-copy">Students use an LRN; teaching and non-teaching staff use an employee ID. Deactivation preserves history and blocks recognition. Full disposal permanently removes the person, face enrollment, and linked records.</p>
-        <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>ID / LRN</th><th>Role / placement</th><th>Movement</th><th>Status</th><th /></tr></thead><tbody>{people.map((item) => <tr key={item.id}><td><strong>{item.full_name}</strong>{item.possible_duplicate && <span className="table-subline duplicate-warning">Possible duplicate name—verify IDs</span>}</td><td>{item.role === 'Student' ? item.lrn || 'LRN not recorded' : item.external_id}<span className="table-subline">{item.role === 'Student' ? 'LRN' : 'Employee ID'}</span></td><td>{item.role}<span className="table-subline">{item.grade ? `Grade ${item.grade} — ${item.section}` : '—'}</span></td><td>{item.enrollment_status}{item.transfer_school && <span className="table-subline">{item.transfer_school}</span>}{item.enrollment_end_date && <span className="table-subline">Last day: {item.enrollment_end_date}</span>}{item.enrollment_note && <span className="table-subline">{item.enrollment_note}</span>}</td><td><span className={`tag ${item.active ? 'tag-success' : 'tag-gray'}`}>{item.active ? 'Active' : 'Inactive'}</span></td><td><details className="action-menu table-action-menu"><summary><ChevronDown size={15} /> Manage</summary><div className="action-menu-panel"><button onClick={() => edit(item)}><Pencil size={14} /> Edit record</button><button onClick={() => setActive(item)}>{item.active ? 'Deactivate record' : 'Reactivate record'}</button><button className="danger-link" onClick={() => setDisposal(item)}><Trash2 size={14} /> Full disposal</button></div></details></td></tr>)}</tbody></table></div>
+        <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>ID / LRN</th><th>Role / placement</th><th>Movement</th><th>Status</th><th /></tr></thead><PaginatedBody>{people.map((item) => <tr key={item.id}><td><strong>{item.full_name}</strong>{item.possible_duplicate && <span className="table-subline duplicate-warning">Possible duplicate name—verify IDs</span>}</td><td>{item.role === 'Student' ? item.lrn || 'LRN not recorded' : item.external_id}<span className="table-subline">{item.role === 'Student' ? 'LRN' : 'Employee ID'}</span></td><td>{item.role}<span className="table-subline">{item.grade ? `Grade ${item.grade} — ${item.section}` : '—'}</span></td><td>{item.enrollment_status}{item.transfer_school && <span className="table-subline">{item.transfer_school}</span>}{item.enrollment_end_date && <span className="table-subline">Last day: {item.enrollment_end_date}</span>}{item.enrollment_note && <span className="table-subline">{item.enrollment_note}</span>}</td><td><span className={`tag ${item.active ? 'tag-success' : 'tag-gray'}`}>{item.active ? 'Active' : 'Inactive'}</span></td><td><details className="action-menu table-action-menu"><summary><ChevronDown size={15} /> Manage</summary><div className="action-menu-panel"><button onClick={() => edit(item)}><Pencil size={14} /> Edit record</button><button onClick={() => setActive(item)}>{item.active ? 'Deactivate record' : 'Reactivate record'}</button><button className="danger-link" onClick={() => setDisposal(item)}><Trash2 size={14} /> Full disposal</button></div></details></td></tr>)}</PaginatedBody></table></div>
       </section>
-      <section className="card-static"><h2>Record-disposal audit</h2><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Completed</th><th>Anonymous reference</th><th>Authority</th><th>Reason</th><th>Removed</th><th>Actor</th></tr></thead><tbody>{disposals.length === 0 && <tr><td colSpan="6" className="empty-cell">No full record disposal has been performed.</td></tr>}{disposals.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.disposal_reference}</td><td>{item.authorization_reference}</td><td>{item.reason}</td><td>{Object.entries(item.removed_counts).map(([k, v]) => `${k}: ${v}`).join(', ')}</td><td>{item.actor_name}</td></tr>)}</tbody></table></div></section>
+      <section className="card-static"><h2>Record-disposal audit</h2><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Completed</th><th>Anonymous reference</th><th>Authority</th><th>Reason</th><th>Removed</th><th>Actor</th></tr></thead><PaginatedBody>{disposals.length === 0 && <tr><td colSpan="6" className="empty-cell">No full record disposal has been performed.</td></tr>}{disposals.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.disposal_reference}</td><td>{item.authorization_reference}</td><td>{item.reason}</td><td>{Object.entries(item.removed_counts).map(([k, v]) => `${k}: ${v}`).join(', ')}</td><td>{item.actor_name}</td></tr>)}</PaginatedBody></table></div></section>
       {disposal && <DisposalModal person={disposal} onClose={() => setDisposal(null)} onDone={async (result) => { setDisposal(null); if (result.file_cleanup_pending) fail(new Error('The record and recognition enrollment were removed, but some encrypted files could not be deleted. Contact the administrator to complete file cleanup.')); else success('The selected person, face enrollment, and linked school records were disposed.'); await reload(); }} fail={fail} />}
     </div>
   );
@@ -319,7 +324,7 @@ function AccountManager({ users, schoolYears, reload, success, fail }) {
           </div>
           <div className="modal-actions">{editing && <button type="button" className="btn-secondary" onClick={() => { setEditing(null); setForm(emptyUser); }}>Cancel</button>}<button className="btn-primary"><Save size={16} /> Save account</button></div>
         </form>
-        <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Security</th><th /></tr></thead><tbody>{users.map((item) => <tr key={item.id}><td>{item.full_name}</td><td>{item.username}</td><td>{item.role}</td><td>{item.active ? 'Active' : 'Inactive'}</td><td>{item.locked_until ? `Locked until ${new Date(item.locked_until).toLocaleString('en-PH')}` : item.must_change_password ? 'Password change required' : 'Ready'}</td><td><details className="action-menu table-action-menu"><summary><ChevronDown size={15} /> Manage</summary><div className="action-menu-panel"><button onClick={() => edit(item)}><Pencil size={14} /> Edit account</button>{item.locked_until && <button onClick={() => unlock(item)}>Unlock account</button>}{item.active && item.username !== 'admin' && <button className="danger-link" onClick={() => deactivate(item)}>Deactivate account</button>}</div></details></td></tr>)}</tbody></table></div>
+        <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Security</th><th /></tr></thead><PaginatedBody>{users.map((item) => <tr key={item.id}><td>{item.full_name}{item.is_demo && <span className="table-subline">Demo account</span>}</td><td>{item.username}</td><td>{item.role}</td><td>{item.active ? 'Active' : 'Inactive'}</td><td>{item.locked_until ? `Locked until ${new Date(item.locked_until).toLocaleString('en-PH')}` : item.must_change_password ? 'Password change required' : 'Ready'}</td><td><details className="action-menu table-action-menu"><summary><ChevronDown size={15} /> Manage</summary><div className="action-menu-panel"><button onClick={() => edit(item)}><Pencil size={14} /> Edit account</button>{item.locked_until && <button onClick={() => unlock(item)}>Unlock account</button>}{item.active && item.username !== 'admin' && <button className="danger-link" onClick={() => deactivate(item)}>Deactivate account</button>}</div></details></td></tr>)}</PaginatedBody></table></div>
       </section>
       <section className="card-static">
         <div className="section-heading"><div><p className="eyebrow">Signed in as {auth.name()}</p><h2>Change my password</h2></div><KeyRound size={24} /></div>
@@ -385,7 +390,7 @@ function AcademicCard({ title, eyebrow, columns, rows, onEdit, onDelete, extraAc
               <th />
             </tr>
           </thead>
-          <tbody>
+          <PaginatedBody>
             {sorted.length === 0 && <tr><td colSpan={columns.length + 1} className="empty-cell">No {title.toLowerCase()} have been added yet.</td></tr>}
             {sorted.map((item) => (
               <tr key={item.id}>
@@ -404,7 +409,7 @@ function AcademicCard({ title, eyebrow, columns, rows, onEdit, onDelete, extraAc
                 </td>
               </tr>
             ))}
-          </tbody>
+          </PaginatedBody>
         </table>
       </div>
     </section>
@@ -414,6 +419,12 @@ function AcademicCard({ title, eyebrow, columns, rows, onEdit, onDelete, extraAc
 // ─── Academic Manager ───────────────────────────────────────────────────────
 function AcademicManager({ structure, deletedReferences, teachers, reload, success, fail }) {
   const sortedSchoolYears = orderedOptions(structure.school_years);
+  const [adviserYear, setAdviserYear] = useState('');
+  const adviserYearId = Number(adviserYear || sortedSchoolYears.find(year => year.active)?.id || 0);
+  const yearlySections = structure.sections.map(section => {
+    const assignment = (structure.adviser_assignments || []).find(item => item.school_year_id === adviserYearId && item.section_id === section.id);
+    return { ...section, adviser_user_id: assignment?.teacher_user_id || null, adviser_name: assignment?.adviser_name || null };
+  });
   const sortedGradeLevels = orderedOptions(structure.grade_levels);
   const sortedSubjects = orderedOptions(structure.subjects, (item) => `${item.name} (${item.category})`);
   const sortedSections = orderedSections(structure.sections);
@@ -427,7 +438,7 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
   const [period,  setPeriod]  = useState({ id: null, school_year_id: '', name: 'Quarter 1', quarter: 1, starts_on: '', ends_on: '', active: true });
   const [grade,   setGrade]   = useState({ id: null, name: '', active: true });
   const [section, setSection] = useState({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', track: '', active: true });
-  const [subject, setSubject] = useState({ id: null, code: '', name: '', category: 'JHS', is_elective: false, elective_track: '', active: true });
+  const [subject, setSubject] = useState({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true });
   const [teaching, setTeaching] = useState({ id: null, school_year_id: '', subject_id: '', teacher_user_id: '', section_ids: [] });
 
   const [adviserModal, setAdviserModal] = useState(null);
@@ -447,13 +458,15 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
   const eligibleTeachingSections = orderedSections(sortedSections.filter((item) => {
     if (!teachingSubject) return false;
     if (!item.active) return false;
+    if (existingAssignmentsBySection.has(item.id)) return true;
+    if (!subjectMatchesGrade(teachingSubject, item.grade)) return false;
     const sectionIsShs = isSeniorHighGrade(item.grade);
     if (sectionIsShs !== String(teachingSubject.category).toUpperCase().startsWith('SHS')) return false;
     return !teachingSubject.is_elective || !teachingSubject.elective_track
       || item.track?.trim().toLowerCase() === teachingSubject.elective_track.trim().toLowerCase();
   })).map((item) => ({
     ...item,
-    assigned_teacher_name: existingAssignmentsBySection.get(item.id)?.teacher_name || '',
+    assigned_teacher_name: (existingAssignmentsBySection.get(item.id)?.teacher_name || '') + (!subjectMatchesGrade(teachingSubject, item.grade) ? ' — outside allowed grades; review required' : ''),
   }));
   if (!period.id && period.school_year_id !== periodYearId) {
     setPeriod({ ...period, school_year_id: periodYearId });
@@ -569,7 +582,7 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
             if (section.grade_level_id === item.id) setSection({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', track: '', active: true });
           }
           if (kind === 'sections' && section.id === item.id) setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', active: true });
-          if (kind === 'subjects' && subject.id === item.id) setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, elective_track: '', active: true });
+          if (kind === 'subjects' && subject.id === item.id) setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true });
           success(`${label} deleted.${recoverable ? ' Linked records were preserved.' : ''}`);
           await reload();
         }
@@ -599,13 +612,13 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
       : 'Unassigned';
     setConfirm({
       title: 'Reassign Adviser',
-      message: `Assign "${targetName}" as adviser for Section "${adviserModal.grade} - ${adviserModal.name}"? The previous adviser will immediately lose access to this section.`,
+      message: `Assign "${targetName}" as adviser for Section "${adviserModal.grade} - ${adviserModal.name}"? The previous adviser will lose adviser access for the selected school year; other years are unchanged.`,
       danger: false,
       onConfirm: async () => {
         setConfirm(null);
         try {
           await api.post('/admin/sections', {
-            id: adviserModal.id, grade_level_id: adviserModal.grade_level_id,
+            school_year_id: adviserYearId, id: adviserModal.id, grade_level_id: adviserModal.grade_level_id,
             name: adviserModal.name, adviser_user_id: newAdviserId ? Number(newAdviserId) : null,
             adviser_name: adviserModal.adviser_name, track: adviserModal.track || null, active: adviserModal.active,
           });
@@ -626,7 +639,7 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
           <p className="section-copy">Restore an item to use it again. Restore a school year before its grading periods, or a grade level before its sections.</p>
           <div className="table-scroll"><table className="interactive-table">
             <thead><tr><th>Type</th><th>Name</th><th>Deleted</th><th>Action</th></tr></thead>
-            <tbody>
+            <PaginatedBody>
               {deletedReferences.length === 0 && <tr><td colSpan="4" className="empty-cell">No deleted academic items.</td></tr>}
               {deletedReferences.map((item) => <tr key={`${item.kind}-${item.id}`}>
                 <td>{{ 'school-years': 'School year', 'grading-periods': 'Grading period', 'grade-levels': 'Grade level', sections: 'Section', subjects: 'Subject' }[item.kind]}</td>
@@ -634,7 +647,7 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
                 <td>{new Date(`${item.deleted_at}Z`).toLocaleString('en-PH')}</td>
                 <td><button className="btn-secondary" disabled={!item.can_restore} onClick={() => confirmRestore(item)}>Restore</button>{!item.can_restore && <p className="section-copy">{item.restore_hint || 'Restore the parent item first.'}</p>}</td>
               </tr>)}
-            </tbody>
+            </PaginatedBody>
           </table></div>
         </details>
       </section>
@@ -675,22 +688,24 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
         isEditing={Boolean(grade.id)}
       />
 
+      <label><span className="field-label">Adviser assignment school year</span><select className="input-field" value={adviserYearId} onChange={event => { setAdviserYear(event.target.value); setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', active: true }); }}>{sortedSchoolYears.filter(year => year.active).map(year => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
+      <p className="section-copy">Adviser changes apply only to this school year. Other years retain their assignments.</p>
       <AcademicCard
         title="Sections" eyebrow="Class sections and adviser assignment"
         columns={[{ key: 'grade', label: 'Grade' }, { key: 'name', label: 'Section' }, { key: 'track', label: 'Program / track', render: (v) => v || '—' }, { key: 'adviser_name', label: 'Adviser', render: (v) => v || <span style={{ color: 'var(--text-muted, #888)' }}>Unassigned</span> }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
-        rows={structure.sections}
+        rows={yearlySections}
         onEdit={(item) => setSection({ ...item, adviser_user_id: item.adviser_user_id || '' })}
         onDelete={(item) => confirmDelete('sections', item, `Section ${item.grade} - ${item.name}`)}
         extraActions={(item) => <button onClick={() => openAdviserModal(item)}><UserCheck size={14} /> Assign adviser</button>}
         form={<div className="form-grid three-columns"><label><span className="field-label">Grade Level</span><select className="input-field" value={section.grade_level_id} onChange={(e) => setSection({ ...section, grade_level_id: Number(e.target.value), track: '' })}>{sortedGradeLevels.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><Field label="Section name" value={section.name} onChange={(v) => setSection({ ...section, name: v })} required />{isJuniorHighGrade(sortedGradeLevels.find(item => item.id === Number(section.grade_level_id))?.name) ? <label><span className="field-label">JHS Program</span><select className="input-field" required value={section.track || ''} onChange={(e) => setSection({ ...section, track: e.target.value })}><option value="">Choose program</option>{sortedJhsPrograms.map(program => <option key={program} value={program}>{program}</option>)}</select></label> : isSeniorHighGrade(sortedGradeLevels.find(item => item.id === Number(section.grade_level_id))?.name) ? <label><span className="field-label">SHS Track</span><select className="input-field" value={section.track || ''} onChange={(e) => setSection({ ...section, track: e.target.value })}><option value="">Choose track</option>{sortedTracks.map(track => <option key={track} value={track}>{track}</option>)}</select></label> : <span />}</div>}
-        formNote="Each teacher can advise one section. Subject teaching assignments below allow teachers to handle other subjects across sections."
+        formNote="Each teacher can advise one section per school year and teach one subject across multiple sections in the same grade."
         onSave={() => {
           const selectedGrade = sortedGradeLevels.find(item => item.id === Number(section.grade_level_id))?.name;
           if (isJuniorHighGrade(selectedGrade) && !section.track) {
             fail({ message: 'Choose BEP or STE for this junior high section.' });
             return;
           }
-          confirmSave('sections', { ...section, adviser_user_id: section.adviser_user_id || null, track: section.track || null }, () => setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', active: true }), 'Section');
+          confirmSave('sections', { ...section, school_year_id: adviserYearId, adviser_user_id: section.adviser_user_id || null, track: section.track || null }, () => setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', active: true }), 'Section');
         }}
         onCancel={() => setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', active: true })}
         isEditing={Boolean(section.id)}
@@ -699,12 +714,12 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
       <AcademicCard
         title="Subjects" eyebrow="Learning areas"
         columns={[{ key: 'code', label: 'Code' }, { key: 'name', label: 'Subject Name' }, { key: 'category', label: 'Category' }, { key: 'elective_label', label: 'Elective' }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
-        rows={structure.subjects.map(item => ({ ...item, elective_label: item.is_elective ? `Yes${item.elective_track ? ` · ${item.elective_track}` : ''}` : 'No' }))}
+        rows={structure.subjects.map(item => ({ ...item, elective_label: item.is_elective && !String(item.category).toUpperCase().startsWith('SHS') ? `STE · Grades ${(item.allowed_grades ?? [7, 8, 9, 10]).join(', ')}` : item.is_elective ? `Yes${item.elective_track ? ` · ${item.elective_track}` : ''}` : 'No' }))}
         onEdit={(item) => setSubject({ ...item })}
         onDelete={(item) => confirmDelete('subjects', item, 'Subject')}
-        form={<div className="form-grid three-columns"><Field label="Subject code (e.g. ENG)" value={subject.code} onChange={(v) => setSubject({ ...subject, code: v })} /><Field label="Subject name" value={subject.name} onChange={(v) => setSubject({ ...subject, name: v })} /><label><span className="field-label">Category</span><select className="input-field" value={String(subject.category || 'JHS').toUpperCase().startsWith('SHS') ? 'SHS' : 'JHS'} onChange={(e) => setSubject({ ...subject, category: e.target.value, elective_track: e.target.value === 'JHS' ? '' : subject.elective_track })}><option value="JHS">JHS (Grades 7-10)</option><option value="SHS">SHS (Grades 11-12)</option></select></label><label className="checkbox-field"><input type="checkbox" checked={Boolean(subject.is_elective)} onChange={(e) => setSubject({ ...subject, is_elective: e.target.checked, elective_track: e.target.checked ? subject.elective_track : '' })} /><span>Elective subject</span></label>{String(subject.category || '').toUpperCase().startsWith('SHS') && subject.is_elective && <label><span className="field-label">Available to SHS track</span><select className="input-field" value={subject.elective_track || ''} onChange={(e) => setSubject({ ...subject, elective_track: e.target.value })}><option value="">Choose track</option>{sortedTracks.map(track => <option key={track} value={track}>{track}</option>)}</select></label>}{!String(subject.category || '').toUpperCase().startsWith('SHS') && subject.is_elective && <p className="section-copy">JHS electives are available to STE sections only. BEP sections do not take JHS electives.</p>}</div>}
-        onSave={() => confirmSave('subjects', subject, () => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, elective_track: '', active: true }), 'Subject')}
-        onCancel={() => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, elective_track: '', active: true })}
+        form={<div className="form-grid three-columns"><Field label="Subject code (e.g. ENG)" value={subject.code} onChange={(v) => setSubject({ ...subject, code: v })} /><Field label="Subject name" value={subject.name} onChange={(v) => setSubject({ ...subject, name: v })} /><label><span className="field-label">Category</span><select className="input-field" value={String(subject.category || 'JHS').toUpperCase().startsWith('SHS') ? 'SHS' : 'JHS'} onChange={(e) => setSubject({ ...subject, category: e.target.value, elective_track: e.target.value === 'JHS' ? '' : subject.elective_track })}><option value="JHS">JHS (Grades 7-10)</option><option value="SHS">SHS (Grades 11-12)</option></select></label><label className="checkbox-field"><input type="checkbox" checked={Boolean(subject.is_elective)} onChange={(e) => setSubject({ ...subject, is_elective: e.target.checked, elective_track: e.target.checked ? subject.elective_track : '' })} /><span>Elective subject</span></label>{String(subject.category || '').toUpperCase().startsWith('SHS') && subject.is_elective && <label><span className="field-label">Available to SHS track</span><select className="input-field" value={subject.elective_track || ''} onChange={(e) => setSubject({ ...subject, elective_track: e.target.value })}><option value="">Choose track</option>{sortedTracks.map(track => <option key={track} value={track}>{track}</option>)}</select></label>}{!String(subject.category || '').toUpperCase().startsWith('SHS') && subject.is_elective && <fieldset className="elective-grade-picker" aria-describedby="elective-grade-help"><legend>Allowed JHS grades</legend><div className="elective-grade-picker__intro"><p id="elective-grade-help">Choose the grade levels that can take this elective. Applies to STE sections.</p><span className="elective-grade-picker__count">{(subject.allowed_grades ?? [7, 8, 9, 10]).length} selected</span></div><div className="elective-grade-picker__options">{[7, 8, 9, 10].map(grade => <label key={grade} className="elective-grade-picker__option"><input type="checkbox" checked={(subject.allowed_grades ?? [7, 8, 9, 10]).includes(grade)} onChange={event => setSubject({ ...subject, allowed_grades: event.target.checked ? [...(subject.allowed_grades ?? [7, 8, 9, 10]), grade] : (subject.allowed_grades ?? [7, 8, 9, 10]).filter(value => value !== grade) })} /><span>Grade {grade}</span></label>)}</div><p className="elective-grade-picker__hint">Select one or more grades. Existing class records are preserved.</p>{!(subject.allowed_grades ?? [7, 8, 9, 10]).length && <p className="elective-grade-picker__error" role="status">Choose at least one grade before saving.</p>}</fieldset>}</div>}
+        onSave={() => subject.is_elective && !String(subject.category).toUpperCase().startsWith('SHS') && !(subject.allowed_grades ?? [7, 8, 9, 10]).length ? showError('Select at least one allowed JHS grade.') : confirmSave('subjects', subject, () => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true }), 'Subject')}
+        onCancel={() => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true })}
         isEditing={Boolean(subject.id)}
       />
 
@@ -762,7 +777,7 @@ function RosterManager({ imports, reload, success, fail }) {
   return (
     <div className="page-stack">
       <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Approved spreadsheet workflow</p><h2>Bulk roster import</h2></div><FileUp size={26} /></div><p className="section-copy">Required columns: External ID, Full Name, Sex, and Role. Students also require Grade and Section. Optional columns are LRN, Assignment, and Guardian Phone. Existing records with the same ID or LRN are updated.</p><div className="form-grid two-columns"><label><span className="field-label">Approved .xlsx roster</span><input title="Choose a file in the format shown by this field" className="input-field" type="file" accept=".xlsx" onChange={(e) => { setFile(e.target.files?.[0] || null); setPreview(null); }} /></label><Field label="School approval / source reference" value={reference} onChange={setReference} required /></div><div className="modal-actions"><button className="btn-secondary" onClick={() => run(true)}><FileUp size={16} /> Validate preview</button><button className="btn-primary" disabled={!preview?.dry_run || preview.invalid_rows > 0} onClick={() => run(false)}><Plus size={16} /> Import valid roster</button></div>{preview && <div className={`notice ${preview.invalid_rows ? 'notice-danger' : 'notice-success'}`}>Valid rows: {preview.valid_rows ?? preview.inserted + preview.updated}. Invalid rows: {preview.invalid_rows}. {preview.errors?.slice(0, 8).map((item) => `Row ${item.row}: ${item.errors.join(', ')}`).join(' · ')}</div>}</section>
-      <section className="card-static"><h2>Roster import audit</h2><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Imported</th><th>File</th><th>Approval</th><th>Counts</th><th>Actor</th><th>SHA-256</th></tr></thead><tbody>{imports.length === 0 && <tr><td colSpan="6" className="empty-cell">No approved roster has been imported.</td></tr>}{imports.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.filename}</td><td>{item.approved_reference}</td><td>{item.inserted_count} added, {item.updated_count} updated</td><td>{item.actor_name}</td><td className="model-version">{item.file_sha256}</td></tr>)}</tbody></table></div></section>
+      <section className="card-static"><h2>Roster import audit</h2><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Imported</th><th>File</th><th>Approval</th><th>Counts</th><th>Actor</th><th>SHA-256</th></tr></thead><PaginatedBody>{imports.length === 0 && <tr><td colSpan="6" className="empty-cell">No approved roster has been imported.</td></tr>}{imports.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.filename}</td><td>{item.approved_reference}</td><td>{item.inserted_count} added, {item.updated_count} updated</td><td>{item.actor_name}</td><td className="model-version">{item.file_sha256}</td></tr>)}</PaginatedBody></table></div></section>
     </div>
   );
 }
@@ -774,7 +789,7 @@ function RecoveryManager({ backups, reload, success, fail }) {
   const restore = async () => { if (!restoreFile) return fail(new Error('Select an .edubak recovery file.')); const form = new FormData(); form.append('file', restoreFile); form.append('passphrase', restorePassphrase); form.append('confirmation', confirmation); try { const result = await api.post('/admin/backups/restore', form); setRestorePassphrase(''); setConfirmation(''); success(result.offline_restore_required ? `Backup integrity verified (${result.file_count} files). Stop EduScan, then run ${result.apply_command} from the project folder.` : `Backup integrity verified (${result.file_count} files). Restart EduScan to apply it.`); } catch (err) { fail(err); } };
   return (
     <div className="page-stack">
-      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Database, encryption keys, faces, models, templates</p><h2>Create encrypted backup</h2></div><Database size={25} /></div><div className="notice notice-warning"><KeyRound size={18} /> The passphrase is not stored. Keep it in the school's approved password vault and retain an off-device copy of the .edubak file.</div><div className="form-grid two-columns"><Field label="Backup passphrase (at least 12 characters)" type="password" value={passphrase} onChange={setPassphrase} /><div className="modal-actions"><button className="btn-primary" onClick={create}><Database size={16} /> Create secure backup</button></div></div><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Created</th><th>Filename</th><th>Size</th><th /></tr></thead><tbody>{backups.length === 0 && <tr><td colSpan="4" className="empty-cell">No secure backup has been created.</td></tr>}{backups.map((item) => <tr key={item.filename}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.filename}</td><td>{(item.size_bytes / 1024 / 1024).toFixed(2)} MB</td><td><button className="btn-link" onClick={() => api.download(`/admin/backups/${encodeURIComponent(item.filename)}`, item.filename).catch(fail)}><Download size={15} /> Download</button></td></tr>)}</tbody></table></div></section>
+      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Database, encryption keys, faces, models, templates</p><h2>Create encrypted backup</h2></div><Database size={25} /></div><div className="notice notice-warning"><KeyRound size={18} /> The passphrase is not stored. Keep it in the school's approved password vault and retain an off-device copy of the .edubak file.</div><div className="form-grid two-columns"><Field label="Backup passphrase (at least 12 characters)" type="password" value={passphrase} onChange={setPassphrase} /><div className="modal-actions"><button className="btn-primary" onClick={create}><Database size={16} /> Create secure backup</button></div></div><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Created</th><th>Filename</th><th>Size</th><th /></tr></thead><PaginatedBody>{backups.length === 0 && <tr><td colSpan="4" className="empty-cell">No secure backup has been created.</td></tr>}{backups.map((item) => <tr key={item.filename}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.filename}</td><td>{(item.size_bytes / 1024 / 1024).toFixed(2)} MB</td><td><button className="btn-link" onClick={() => api.download(`/admin/backups/${encodeURIComponent(item.filename)}`, item.filename).catch(fail)}><Download size={15} /> Download</button></td></tr>)}</PaginatedBody></table></div></section>
       <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Controlled two-stage recovery</p><h2>Verify and stage a restore</h2></div><ArchiveRestore size={25} /></div><p className="section-copy">The server decrypts and verifies every file hash before staging. SQLite applies on restart. MySQL requires the API to be stopped and the controlled PowerShell restore command to be run; that command first creates a fresh encrypted safety backup, imports the SQL, and then swaps the matching encryption artifacts.</p><div className="form-grid three-columns"><label><span className="field-label">EduScan .edubak file</span><input title="Choose a file in the format shown by this field" className="input-field" type="file" accept=".edubak" onChange={(e) => setRestoreFile(e.target.files?.[0] || null)} /></label><Field label="Backup passphrase" type="password" value={restorePassphrase} onChange={setRestorePassphrase} /><Field label='Type "STAGE RESTORE"' value={confirmation} onChange={setConfirmation} /></div><div className="modal-actions"><button className="btn-danger" onClick={restore}><ArchiveRestore size={16} /> Verify and stage restore</button></div></section>
     </div>
   );

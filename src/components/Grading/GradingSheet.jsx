@@ -218,7 +218,7 @@ export default function GradingSheet({
           <div style={{ width: '90px', flexShrink: 0 }}></div> {/* Spacer to center the title */}
           <div className="deped-header-center">
             <div className="deped-header-title">Class Record</div>
-            <div className="deped-header-subtitle">(Pursuant to DepEd Order #8, s.2015)</div>
+            <div className="deped-header-subtitle">(Pursuant to DepEd Order #15, s. 2026)</div>
           </div>
           <div className="deped-header-right">
             <div className={`deped-status-badge ${statusCfg.cls}`} role={loading ? 'status' : undefined}>
@@ -492,7 +492,7 @@ export default function GradingSheet({
                                       className={`deped-score-input${hasError ? ' deped-input-error' : ''}`}
                                       disabled={disabled}
                                       value={currentVal}
-                                      placeholder="Score"
+                                      placeholder={['Finalized', 'Locked'].includes(gradebook?.status) ? '' : 'Score'}
                                       onChange={e => onScoreChange?.(student.person_id, item.id, e.target.value)}
                                       aria-label={`${student.full_name} — ${item.label}`}
                                       onContextMenu={event => openScoreStatus(event, student, item, currentVal, currentStatus)}

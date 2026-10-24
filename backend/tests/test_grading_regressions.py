@@ -67,6 +67,9 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.db.commit()
         from app.services.settings_store import set_json
         set_json(self.db, 'school.heads', {str(self.year.id): {'full_name': 'Buen Owogowog', 'title': 'Principal'}})
+        from app.models import SectionAdviserAssignment
+        self.db.add(SectionAdviserAssignment(school_year_id=self.year.id, section_id=self.section.id, teacher_user_id=self.teacher.id))
+        self.db.commit()
 
     def tearDown(self):
         self.db.close()
@@ -243,11 +246,16 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.assertFalse(next(item for item in full['components'][0]['items'] if item['id'] == unused_ww.id)['active'])
         validation = validate_gradebook_endpoint(book.id, self.db, self.teacher)
         self.assertFalse(validation['valid'])
-        self.assertIn('INCOMPLETE_LEARNERS', [issue['code'] for issue in validation['issues']])
+        incomplete_issue = next(issue for issue in validation['issues'] if issue['code'] == 'INCOMPLETE_LEARNERS')
+        self.assertIn('Second Student', incomplete_issue['message'])
+        self.assertIn('Written Work 2', incomplete_issue['message'])
         before = len(self.db.scalars(select(GradebookAuditEntry)).all())
         with self.assertRaises(HTTPException) as blocked:
             finalize_gradebook_new_endpoint(book.id, GradebookWorkflowPayload(reason='Finalize term record'), self.db, self.teacher)
         self.assertEqual(blocked.exception.status_code, 409)
+        self.assertEqual(blocked.exception.detail['code'], 'INCOMPLETE_GRADEBOOK')
+        self.assertIn('Second Student', blocked.exception.detail['message'])
+        self.assertIn('Written Work 2', blocked.exception.detail['message'])
         self.assertEqual(book.status, 'Draft')
         self.assertIsNone(book.finalized_at)
         self.assertEqual(len(self.db.scalars(select(GradebookAuditEntry)).all()), before)
@@ -259,6 +267,31 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.assertTrue(result['finalized'])
         with self.assertRaisesRegex(ValueError, 'Cannot edit scores'):
             grading.save_gradebook_scores(self.db, book.id, self.teacher, {}, 'Attempt a locked score edit')
+
+    def test_finalize_error_lists_missing_exam_scores_for_each_learner(self):
+        book = self.create(self.general)
+        self.db.add(SubjectTeachingAssignment(school_year_id=self.year.id, subject_id=self.subject.id,
+                                            section_id=self.section.id, teacher_user_id=self.teacher.id))
+        exam_component = book.components[-1]
+        exam_component.items[0].label = 'ST1'
+        exam_component.items.extend((AssessmentItem(label='ST2', max_score=50, sequence=1),
+                                     AssessmentItem(label='TE', max_score=50, sequence=2)))
+        exam_component.component_type = 'Term Examinations'
+        self.db.commit()
+        validation = validate_gradebook_endpoint(book.id, self.db, self.teacher)
+        message = next(issue['message'] for issue in validation['issues'] if issue['code'] == 'INCOMPLETE_LEARNERS')
+        for learner_name in ('First Student', 'Second Student'):
+            self.assertIn(learner_name, message)
+        for label in ('ST1', 'ST2', 'TE'):
+            self.assertEqual(message.count(f'{label} (score missing)'), 2, message)
+        before = self.db.scalars(select(StudentScore)).all()
+        with self.assertRaises(HTTPException) as blocked:
+            finalize_gradebook_new_endpoint(book.id, GradebookWorkflowPayload(reason='Check missing exam scores'), self.db, self.teacher)
+        self.assertEqual(blocked.exception.detail['code'], 'INCOMPLETE_GRADEBOOK')
+        for label in ('ST1', 'ST2', 'TE'):
+            self.assertEqual(blocked.exception.detail['message'].count(f'{label} (score missing)'), 2)
+        self.assertEqual(self.db.scalars(select(StudentScore)).all(), before)
+        self.assertEqual(book.status, 'Draft')
 
     def test_every_unresolved_score_status_blocks_finalization(self):
         book = self.create(self.general)
@@ -595,17 +628,15 @@ class ClassRecordRegressionTest(unittest.TestCase):
             ), self.db, self.admin)
         self.assertEqual(error.exception.status_code, 409)
 
-    def test_restoring_section_cannot_restore_a_second_adviser_assignment(self):
-        other_section = SchoolSection(grade_level_id=self.grade.id, name="Oslo", adviser_user_id=self.teacher.id)
+    def test_restoring_section_preserves_annual_adviser_history(self):
+        from app.models import SectionAdviserAssignment
         self.section.deleted_at = datetime.utcnow()
-        self.db.add(other_section)
-        self.db.commit()
-        with self.assertRaises(HTTPException) as error:
-            change_deleted_reference(self.db, "sections", self.section.id, self.admin, restore=True)
-        self.assertEqual(error.exception.status_code, 409)
-        other_section.active = False
         self.db.commit()
         self.assertTrue(change_deleted_reference(self.db, "sections", self.section.id, self.admin, restore=True)["restored"])
+        assignment = self.db.scalar(select(SectionAdviserAssignment).where(
+            SectionAdviserAssignment.school_year_id == self.year.id,
+            SectionAdviserAssignment.section_id == self.section.id))
+        self.assertEqual(assignment.teacher_user_id, self.teacher.id)
 
     def test_admin_can_assign_same_subject_teacher_to_multiple_sections(self):
         other_section = SchoolSection(grade_level_id=self.grade.id, name="Oslo")
@@ -963,11 +994,43 @@ class ClassRecordRegressionTest(unittest.TestCase):
                     workbook.close()
                 _, filename = subject_template(name)
                 with ZipFile(reports.TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename) as source, ZipFile(self.export_path) as exported:
+                    term_one_path = reports._xlsx_sheet_paths(source)['TERM 1']
                     for part in source.namelist():
                         if part.startswith('xl/worksheets/') and part.endswith('.xml'):
-                            formulas = lambda raw: [ET.tostring(node) for node in ET.fromstring(raw).iter('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}f')]
-                            self.assertEqual(formulas(source.read(part)), formulas(exported.read(part)), part)
+                            def formulas(raw):
+                                root = ET.fromstring(raw)
+                                return {cell.get('r'): formula.text or '' for cell in root.iter('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}c')
+                                        if (formula := cell.find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}f')) is not None}
+                            before_formulas, after_formulas = formulas(source.read(part)), formulas(exported.read(part))
+                            changed = {cell for cell in before_formulas.keys() | after_formulas.keys()
+                                       if before_formulas.get(cell) != after_formulas.get(cell)}
+                            self.assertLessEqual(changed, {'AC18', 'AC69'} if part == term_one_path else set(), part)
+                            for cell in changed:
+                                self.assertIn(f'ROUND(AB{cell[2:]},12)', after_formulas[cell], (part, cell))
                 self.assertEqual(before, [(score.id, score.score, score.status) for score in self.db.scalars(select(StudentScore)).all()])
+
+    def test_jhs_elective_exports_core_template_with_own_subject_name(self):
+        import openpyxl
+        self.configure_subject_export()
+        self.subject.name = 'Research Elective'
+        self.subject.is_elective = True
+        self.section.track = 'STE'
+        self.db.commit()
+        book = self.create(self.general)
+        self.label_export_exams(book)
+        self.score_student(book, 80)
+        self.score_second_student(book, 100)
+        grading.finalize_gradebook(self.db, book.id, self.teacher, 'Isolated elective export test')
+        before = grading.get_gradebook_full(self.db, book.id)
+        workbook = self.export(book)
+        self.assertEqual(workbook['INPUT DATA']['E24'].value, 'Research Elective')
+        self.assertTrue(workbook['TERM 1']['AB18'].value.startswith('='))
+        workbook.close()
+        values = openpyxl.load_workbook(self.export_path, data_only=True)
+        self.assertEqual(values['TERM 1']['AB18'].value, 80)
+        self.assertEqual(values['TERM 1']['AC18'].value, 83)
+        values.close()
+        self.assertEqual(before, grading.get_gradebook_full(self.db, book.id))
 
     def test_subject_export_preserves_formulas_and_matches_saved_grades(self):
         import openpyxl
@@ -1452,10 +1515,19 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.export(book).close()
         source = reports.TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / 'ENGLISH - Grade 7-10 Class Record.xlsx'
         with ZipFile(source) as original, ZipFile(self.export_path) as exported:
+            term_one_path = reports._xlsx_sheet_paths(original)['TERM 1']
             for name in original.namelist():
                 if name.startswith('xl/worksheets/') and name.endswith('.xml'):
-                    formulas = lambda raw: [ET.tostring(node) for node in ET.fromstring(raw).iter('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}f')]
-                    self.assertEqual(formulas(original.read(name)), formulas(exported.read(name)), name)
+                    def formulas(raw):
+                        root = ET.fromstring(raw)
+                        return {cell.get('r'): formula.text or '' for cell in root.iter('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}c')
+                                if (formula := cell.find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}f')) is not None}
+                    before_formulas, after_formulas = formulas(original.read(name)), formulas(exported.read(name))
+                    changed = {cell for cell in before_formulas.keys() | after_formulas.keys()
+                               if before_formulas.get(cell) != after_formulas.get(cell)}
+                    self.assertLessEqual(changed, {'AC18', 'AC69'} if name == term_one_path else set(), name)
+                    for cell in changed:
+                        self.assertIn(f'ROUND(AB{cell[2:]},12)', after_formulas[cell], (name, cell))
 
 
     def test_template_policy_alignment_keeps_every_score_and_existing_maximum(self):
@@ -1484,8 +1556,12 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.assertEqual(self.general.component_definitions_json, old_policy)
         self.assertEqual(grading.get_gradebook_full(self.db, book.id)['statistics']['incomplete'], 2)
         self.assertEqual(len(self.db.scalars(select(GradebookAuditEntry).where(GradebookAuditEntry.action == 'PolicyAlignment')).all()), 1)
-        with self.assertRaisesRegex(ValueError, 'missing or incomplete'):
+        with self.assertRaises(ValueError) as blocked:
             grading.finalize_gradebook(self.db, book.id, self.teacher, 'Missing ST1/ST2')
+        for learner_name in ('First Student', 'Second Student'):
+            self.assertIn(f'{learner_name}:', str(blocked.exception))
+        for label in ('ST1', 'ST2'):
+            self.assertEqual(str(blocked.exception).count(f'{label} (score missing)'), 2)
         self.score_student(book, 80)
         self.score_second_student(book, 100)
         book.status = 'Finalized'

@@ -1,3 +1,4 @@
+import PaginatedBody from '../Common/PaginatedBody';
 import React, { useState, useEffect, useCallback } from 'react';
 import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { api } from '../../api/client';
@@ -76,7 +77,7 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
                 <th>Actions</th>
               </tr>
             </thead>
-            <tbody>
+            <PaginatedBody>
               {adjustments.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="empty-cell">
@@ -205,7 +206,7 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
                   );
                 })
               )}
-            </tbody>
+            </PaginatedBody>
           </table>
         </div>
       </div>

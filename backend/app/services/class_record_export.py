@@ -1,6 +1,7 @@
 """Fill subject templates without replacing their grading formulas."""
 import math
 import re
+from decimal import Decimal
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
@@ -15,7 +16,9 @@ from .grading_engine import round_value
 from .settings_store import get_json
 
 
-def subject_template(subject):
+def subject_template(subject, is_elective=False):
+    if is_elective:
+        return 'core', 'ENGLISH - Grade 7-10 Class Record.xlsx'
     name = re.sub(r'\s+', ' ', subject.strip().upper())
     aliases = {'MATH': 'MATHEMATICS', 'AP': 'ARALING PANLIPUNAN',
                'TECHNOLOGY AND LIVELIHOOD EDUCATION': 'TLE', 'ESP': 'VALUES EDUCATION',
@@ -28,7 +31,7 @@ def subject_template(subject):
         kind = 'gmrc'
     elif name in {'SPA', 'SPS'}:
         kind = name.lower()
-    elif name in {'MUSIC AND ARTS', 'MUSIC & ARTS', 'MAPEH - MUSIC AND ARTS',
+    elif name in {'MAPEH', 'MUSIC AND ARTS', 'MUSIC & ARTS', 'MAPEH - MUSIC AND ARTS',
                   'PHYSICAL EDUCATION AND HEALTH', 'PHYSICAL EDUCATION & HEALTH', 'PE AND HEALTH', 'PE & HEALTH', 'MAPEH - PE AND HEALTH'}:
         return 'mapeh', 'MUSIC AND ARTS AND PE-HEALTH - Grade 7-10 Class Record.xlsx'
     else:
@@ -63,7 +66,95 @@ def assessment_groups(full, kind):
     return result
 
 
-def fill_term(full, kind, sheet_name, changes, cached, males, females, table):
+def _rounded_template_grade_formula(initial_col, grade_row):
+    initial = f'{initial_col}{grade_row}'
+    precise = f'ROUND({initial},12)'
+    return (f'IF({initial}="","",IFERROR(INDEX(HELPER!$D$8:$D$48,'
+            f'IF({precise}>=HELPER!$B$8,1,MATCH({precise},HELPER!$B$8:$B$48,-1)+1)),""))')
+
+
+def fill_saved_core(full, sheet_name, changes, cached, males, females, formulas):
+    """Keep the supplied layout while reflecting an older saved WW/PT/QA policy."""
+    from decimal import Decimal
+    from .reports import _assessment_category, _column_name
+    from .adaptive_class_record import _round
+    groups = {}
+    for component in full['components']:
+        key = _assessment_category({'name': component['name']})
+        if key is None or key in groups:
+            raise HTTPException(409, 'The supplied template needs one Written Work, Performance Tasks, and Quarterly Assessment component.')
+        groups[key] = component
+    if set(groups) != {'ww', 'pt', 'exam'}:
+        raise HTTPException(409, 'The saved components do not fit the supplied subject template.')
+    policy = full['policy']
+    if len(policy['transmutation_table'] or []) > 60:
+        raise HTTPException(409, 'This grade conversion table exceeds the supplied template formula capacity.')
+    sheet, cache, edits = changes.setdefault(sheet_name, {}), cached.setdefault(sheet_name, {}), formulas.setdefault(sheet_name, {})
+    layout = {'ww': (6, 5, 'K', 'L', 'M'), 'pt': (14, 3, 'Q', 'R', 'S'), 'exam': (20, 3, None, 'Z', 'AA')}
+    items_by_group = {}
+    for key, component in groups.items():
+        first, capacity, total, ps, ws = layout[key]
+        items = [item for item in component['items'] if item['active']]
+        if not 1 <= len(items) <= capacity:
+            raise HTTPException(409, f"{component['name']} exceeds the activity capacity of the supplied template.")
+        items_by_group[key] = items
+        sheet[f'{_column_name(first)}12'] = component['name']
+        sheet[f'{ws}15'] = component['weight'] / 100
+        for index in range(capacity):
+            col = _column_name(first + index)
+            sheet[f'{col}14'] = (index + 1 if key in {'ww', 'pt'} else items[index]['label']) if index < len(items) else None
+            sheet[f'{col}15'] = items[index]['max_score'] if index < len(items) else None
+    # The old QA policy pools scores; it must not inherit the template's 30/30/40 exam split.
+    for col in ('W', 'X', 'Y'):
+        sheet[f'{col}14'] = sheet[f'{col}15'] = None
+    student_map = {student['person_id']: student for student in full['students']}
+    for roster, start in ((males, 18), (females, 69)):
+        for index, person in enumerate(roster):
+            student = student_map.get(person['person_id'])
+            if student is None:
+                continue
+            row, expressions, raw = start + index, [], Decimal('0')
+            for key, component in groups.items():
+                first, capacity, total, ps, ws = layout[key]
+                items = items_by_group[key]
+                scores = [student['scores'].get(str(item['id'])) for item in items]
+                if any(value is None for value in scores):
+                    raise HTTPException(409, 'A required exported assessment score is missing.')
+                begin, end = _column_name(first), _column_name(first + len(items) - 1)
+                score_range, max_range = f'{begin}{row}:{end}{row}', f'{begin}$15:{end}$15'
+                percentage = f'SUM({score_range})/SUM({max_range})*100'
+                weighted = f'({percentage})*{ws}$15'
+                for offset, value in enumerate(scores):
+                    sheet[f'{_column_name(first + offset)}{row}'] = value
+                if total:
+                    edits[f'{total}{row}'] = f'SUM({score_range})'
+                    cache[f'{total}{row}'] = sum(scores)
+                edits[f'{ps}{row}'], edits[f'{ws}{row}'] = _round(percentage, policy), _round(weighted, policy)
+                pct = sum(scores) / sum(item['max_score'] for item in items) * 100
+                weighted_value = Decimal(str(pct)) * Decimal(str(component['weight'])) / 100
+                raw += weighted_value
+                cache[f'{ps}{row}'] = round_value(pct, policy['rounding_decimal_places'], policy['rounding_method'])
+                cache[f'{ws}{row}'] = round_value(weighted_value, policy['rounding_decimal_places'], policy['rounding_method'])
+                expressions.append(weighted)
+            for col in ('W', 'X', 'Y'):
+                sheet[f'{col}{row}'] = None
+            assert round_value(raw, policy['rounding_decimal_places'], policy['rounding_method']) == student['initial_grade']
+            edits[f'AB{row}'] = _round(f'SUM({",".join(expressions)})', policy)
+            grade = f'MAX(0,MIN(100,AB{row}))'
+            conversion = f'IF({grade}>=100,100,"")'
+            table = policy['transmutation_table']
+            if table:
+                for entry in reversed(table):
+                    conversion = f'IF(AND({grade}>={float(entry["min"])},{grade}<={float(entry["max"])}),{int(entry["value"])},{conversion})'
+            else:
+                conversion = f'IF({grade}>=100,100,IF({grade}>=60,INT(({grade}-60+0.000000001)/1.6)+75,INT(({grade}+0.000000001)/4)+60))'
+            edits[f'AC{row}'] = conversion
+            cache[f'AB{row}'], cache[f'AC{row}'] = student['initial_grade'], student['reported_grade']
+
+
+def fill_term(full, kind, sheet_name, changes, cached, males, females, table, formulas=None):
+    if kind in {'core', 'mapeh'} and not any(c.get('component_type') == 'Term Examinations' for c in full['components']):
+        return fill_saved_core(full, sheet_name, changes, cached, males, females, formulas)
     groups = assessment_groups(full, kind)
     if full['policy']['rounding_method'] != 'half_up' or full['policy']['rounding_decimal_places'] != 2:
         raise HTTPException(409, 'The fixed workbook cannot represent this saved rounding policy.')
@@ -86,6 +177,7 @@ def fill_term(full, kind, sheet_name, changes, cached, males, females, table):
         raise HTTPException(409, 'The saved grade conversion table differs from this workbook (for example, the workbook converts an initial 80 to 83). Export was stopped to preserve correct grades; approve a matching policy before exporting.')
     sheet = changes.setdefault(sheet_name, {})
     cache = cached.setdefault(sheet_name, {})
+    formula_overrides = (formulas if formulas is not None else {}).setdefault(sheet_name, {})
     hps, male_start, female_start, initial_col, grade_col = (16, 19, 70, 'AV', 'AW') if kind == 'gmrc' else (15, 18, 69, 'AB', 'AC')
     from .reports import _column_name
     items_by_group = {}
@@ -115,7 +207,7 @@ def fill_term(full, kind, sheet_name, changes, cached, males, females, table):
             student = student_map.get(person['person_id'])
             if student is None:
                 continue
-            initial = 0
+            initial = Decimal('0')
             for key, items in items_by_group.items():
                 first, _, weight = layout[key]
                 scores = [student['scores'].get(str(item['id'])) for item in items]
@@ -123,17 +215,23 @@ def fill_term(full, kind, sheet_name, changes, cached, males, females, table):
                     raise HTTPException(409, 'A required exported assessment score is missing.')
                 for offset, score in enumerate(scores):
                     sheet[f'{_column_name(first + offset)}{start + index}'] = score
-                percentage = (sum(score / item['max_score'] * portion for score, item, portion in zip(scores, items, (30, 30, 40)))
-                              if key == 'exam' else sum(scores) / sum(item['max_score'] for item in items) * 100)
-                initial += percentage * weight / 100
-            converted = next((row['value'] for row in sorted(table, key=lambda row: row['min'], reverse=True) if initial >= row['min']), None)
-            if converted is None or student['reported_grade'] != converted or not math.isclose(initial, student['initial_grade'], abs_tol=0.005):
+                if key == 'exam':
+                    percentage = sum((Decimal(str(score)) / Decimal(str(item['max_score'])) * Decimal(str(portion))
+                                      for score, item, portion in zip(scores, items, (30, 30, 40))), Decimal('0'))
+                else:
+                    percentage = (sum((Decimal(str(score)) for score in scores), Decimal('0'))
+                                  / sum((Decimal(str(item['max_score'])) for item in items), Decimal('0')) * 100)
+                initial += percentage * Decimal(str(weight)) / 100
+            converted = next((row['value'] for row in sorted(table, key=lambda row: row['min'], reverse=True)
+                              if initial >= Decimal(str(row['min']))), None)
+            if converted is None or student['reported_grade'] != converted or round_value(float(initial), 2) != student['initial_grade']:
                 raise HTTPException(409, f"The workbook calculation differs from the saved grade for {student['full_name']}. Check the examination weighting and rounding policy. No grades were changed.")
             cache[f'{initial_col}{start + index}'] = student['initial_grade']
             cache[f'{grade_col}{start + index}'] = student['reported_grade']
+            formula_overrides[f'{grade_col}{start + index}'] = _rounded_template_grade_formula(initial_col, start + index)
 
 
-def export_jhs(db, book, full, kind, template, region, division, school_id, allowed_teacher_id=None):
+def export_jhs(db, book, full, kind, template, region, division, school_id, allowed_teacher_id=None, all_terms=False, through_term=None):
     from .reports import _student_groups, _complete_finalized_record, _write_class_record_workbook, _safe_name, new_report_path, EXPORT_DIR
     if not template.is_file():
         raise HTTPException(409, f"The required subject workbook '{template.name}' is missing.")
@@ -165,14 +263,29 @@ def export_jhs(db, book, full, kind, template, region, division, school_id, allo
                                    Gradebook.subject.has(Subject.deleted_at.is_(None)))
     if kind != 'mapeh':
         query = query.where(Gradebook.subject_id == book.subject_id)
+    if book.learning_area:
+        query = query.where(Gradebook.subject_id == book.subject_id,
+                            Gradebook.learning_area.in_(['music_arts','pe_health']),
+                            Gradebook.teacher_user_id == book.teacher_user_id,
+                            Gradebook.is_legacy_readonly.is_(False))
+    elif kind == 'mapeh':
+        # Legacy combined records may export alone, but never stand in for new areas.
+        query = query.where(Gradebook.learning_area == '')
+        if book.is_legacy_readonly:
+            query = query.where(Gradebook.subject_id == book.subject_id,
+                                Gradebook.teacher_user_id == book.teacher_user_id)
     if allowed_teacher_id is not None:
         query = query.where(Gradebook.teacher_user_id == allowed_teacher_id)
-    cached = {}
+    periods = tuple(range(1, (through_term or 3) + 1)) if all_terms or through_term else (book.quarter,)
+    query = query.where(Gradebook.quarter.in_(periods))
+    if all_terms or through_term:
+        query = query.where(Gradebook.teacher_user_id == book.teacher_user_id)
+    cached, formulas = {}, {}
     table = template_table(template)
-    written_sheets = set()
+    written_sheets, exported_terms = set(), {}
     for sibling in db.scalars(query).all():
         try:
-            sibling_kind, _ = subject_template(sibling.subject_name)
+            sibling_kind, _ = subject_template(sibling.subject_name, sibling.subject.is_elective is True)
         except HTTPException:
             continue
         if sibling_kind != kind or sibling.quarter not in (1, 2, 3):
@@ -180,15 +293,21 @@ def export_jhs(db, book, full, kind, template, region, division, school_id, allo
         term = get_gradebook_full(db, sibling.id)
         if not _complete_finalized_record(term):
             continue
-        suffix = (' PE and H' if 'HEALTH' in sibling.subject_name.upper() else ' M and A') if kind == 'mapeh' else ''
+        suffix = (' PE and H' if sibling.learning_area == 'pe_health' or (not sibling.learning_area and 'HEALTH' in sibling.subject_name.upper()) else ' M and A') if kind == 'mapeh' else ''
         sheet_name = f'TERM {sibling.quarter}{suffix}'
         if sheet_name in written_sheets:
             raise HTTPException(409, 'Multiple finalized records match the same learning area and term. Resolve the subject assignment before exporting.')
-        fill_term(term, kind, sheet_name, changes, cached, males, females, table)
+        fill_term(term, kind, sheet_name, changes, cached, males, females, table, formulas)
         written_sheets.add(sheet_name)
+        exported_terms[(sibling.quarter, sibling.learning_area)] = term
         if term['gradebook']['teacher_name'] != gb['teacher_name']:
             changes[sheet_name]['AB10' if kind == 'gmrc' else 'Q10'] = term['gradebook']['teacher_name']
-    target = new_report_path(EXPORT_DIR, f"ClassRecord-{_safe_name(gb['school_year_name'])}-Term{gb['quarter']}-Grade{gb['grade_name']}-{_safe_name(gb['section_name'])}-{_safe_name(gb['subject_name'])}.xlsx")
+    suffix = (' PE and H' if book.learning_area == 'pe_health' or (not book.learning_area and 'HEALTH' in gb['subject_name'].upper()) else ' M and A') if kind == 'mapeh' else ''
+    required = ({f'TERM {period}{area}' for period in periods for area in (' M and A',' PE and H')} if book.learning_area else {f'TERM {period}{suffix}' for period in periods})
+    if not required.issubset(written_sheets):
+        raise HTTPException(409, 'All requested terms must be complete and finalized or locked for this teacher, subject, section, and school year before exporting.')
+    period_name = 'Terms1-2' if through_term == 2 else 'AllTerms' if all_terms else f"Term{gb['quarter']}"
+    target = new_report_path(EXPORT_DIR, f"ClassRecord-{'Legacy-' if book.is_legacy_readonly else ''}{_safe_name(gb['school_year_name'])}-{period_name}-Grade{gb['grade_name']}-{_safe_name(gb['section_name'])}-{_safe_name(gb['subject_name'])}.xlsx")
     guards = {}
     if kind == 'mapeh':
         changes['FINAL GRADES'] = {}
@@ -198,5 +317,21 @@ def export_jhs(db, book, full, kind, template, region, division, school_id, allo
                 row = first_row + index
                 for column, pair in (('H', f'F{row}:G{row}'), ('K', f'I{row}:J{row}'), ('N', f'L{row}:M{row}')):
                     guards['FINAL GRADES'][f'{column}{row}'] = f'COUNT({pair})=2'
-    _write_class_record_workbook(template, target, changes, formula_values=cached, formula_guards=guards)
+                if book.learning_area:
+                    term_grades=[]
+                    for period,first_col,combined_col in ((1,'F','H'),(2,'I','K'),(3,'L','N')):
+                        if period not in periods: continue
+                        area_grades=[]
+                        for area,col in zip(('music_arts','pe_health'),(first_col,chr(ord(first_col)+1))):
+                            student=next((s for s in exported_terms[(period,area)]['students'] if s['person_id']==roster[index]['person_id']),None)
+                            if student is None: raise HTTPException(409,'Both learning areas must have the same learner roster.')
+                            area_grades.append(student['reported_grade'])
+                            cached.setdefault('FINAL GRADES',{})[f'{col}{row}']=student['reported_grade']
+                        combined=round_value(sum(area_grades)/2,0,'half_up')
+                        cached['FINAL GRADES'][f'{combined_col}{row}']=combined
+                        term_grades.append(combined)
+                    if len(term_grades)==3:
+                        cached['FINAL GRADES'][f'O{row}']=round_value(sum(term_grades)/3,0,'half_up')
+
+    _write_class_record_workbook(template, target, changes, formula_values=cached, formula_guards=guards, formula_overrides=formulas)
     return target

@@ -1,6 +1,7 @@
+import { MAPEH_AREAS, formatMapehFinalizeIssue, mapehAreaContext, sameMapehContext } from '../../services/mapehLearningAreas';
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { api, auth } from '../../api/client';
-import { normalizeGradeName, isSeniorHighGrade, subjectMatchesGrade, availableOptionId } from '../../services/academicContext';
+import { normalizeGradeName, subjectMatchesGrade, availableOptionId } from '../../services/academicContext';
 import { buildScoreUpdates, validateGradebookForFinalization } from '../../services/gradingWorkflow';
 import { groupAdminGradebooks } from '../../services/gradebookSelection';
 import { watchGradebookUpdates } from '../../services/gradebookRefresh';
@@ -14,7 +15,7 @@ import AuditHistory from '../../components/Grading/AuditHistory';
 import AdjustmentRequestsModal from '../../components/Grading/AdjustmentRequestsModal';
 import ValidationChecklist from '../../components/Grading/ValidationChecklist';
 import GlobalAdjustmentsTab from '../../components/Grading/GlobalAdjustmentsTab';
-import { Loader2 } from 'lucide-react';
+import { Loader2, Search } from 'lucide-react';
 import { useToast } from '../../contexts/useToast';
 
 export default function Grading() {
@@ -36,6 +37,7 @@ export default function Grading() {
   const [gradeId, setGradeId] = useState('');
   const [sectionId, setSectionId] = useState('');
   const [subjectId, setSubjectId] = useState('');
+  const [mapehArea,setMapehArea] = useState('music_arts');
   const [existingGradebooks, setExistingGradebooks] = useState([]);
   const [existingGradebooksLoading, setExistingGradebooksLoading] = useState(isReviewer);
   const [existingGradebooksError, setExistingGradebooksError] = useState('');
@@ -228,11 +230,6 @@ export default function Grading() {
     });
   }, [structure.grade_levels]);
 
-  const isSeniorHigh = useMemo(() => {
-    const selectedGrade = (structure.grade_levels || []).find((g) => g.id === Number(gradeId));
-    return selectedGrade ? isSeniorHighGrade(selectedGrade.name) : false;
-  }, [structure.grade_levels, gradeId]);
-
   const teacherSubjectIds = useMemo(() => new Set(
     (structure.subject_assignments || [])
       .filter((assignment) => assignment.school_year_id === Number(schoolYearId)
@@ -248,7 +245,8 @@ export default function Grading() {
     const assignedSubjectKeys = new Set((structure.subject_assignment_subjects || []).map(([yearId, subjectKey]) =>
       `${yearId}:${subjectKey}`));
     const filtered = (structure.subjects || []).filter((s) => {
-      if (!subjectMatchesGrade(s, isSeniorHigh ? '11' : '7')) return false;
+      const assignedHere = assignments.some(assignment => assignment.subject_id === s.id && assignment.section_id === Number(sectionId) && assignment.teacher_user_id === structure.current_user_id);
+      if (!subjectMatchesGrade(s, structure.grade_levels.find(grade => grade.id === Number(gradeId))?.name) && !(isTeacher && assignedHere)) return false;
       if (s.is_elective && s.elective_track
         && selectedSection?.track?.trim().toLowerCase() !== s.elective_track.trim().toLowerCase()) return false;
       if (!isTeacher) return true;
@@ -268,7 +266,7 @@ export default function Grading() {
     return [...filtered].sort((a, b) => a.name.localeCompare(b.name));
   }, [structure.subjects, structure.sections, structure.subject_assignments, structure.subject_assignment_subjects,
     structure.current_user_id, teacherSubjectIds,
-    isSeniorHigh, schoolYearId, sectionId, isTeacher]);
+    structure.grade_levels, gradeId, schoolYearId, sectionId, isTeacher]);
 
   // Resolve dependent selections before rendering a class from the new context.
   const validSectionId = availableOptionId(availableSections, sectionId);
@@ -284,7 +282,8 @@ export default function Grading() {
     return period ? period.id : null;
   }, [structure.grading_periods, schoolYearId, quarter]);
 
-  const contextKey = `${schoolYearId}:${gradingPeriodId}:${gradeId}:${sectionId}:${subjectId}`;
+  const learningArea=mapehAreaContext((structure.subjects||[]).find(s=>s.id===Number(subjectId)),mapehArea);
+  const contextKey = `${schoolYearId}:${gradingPeriodId}:${gradeId}:${sectionId}:${subjectId}:${learningArea}`;
   const validContext = Boolean(schoolYearId && gradeId && sectionId && subjectId && gradingPeriodId
     && availableSections.some(section => section.id === Number(sectionId))
     && sortedSubjects.some(subject => subject.id === Number(subjectId)));
@@ -308,11 +307,14 @@ export default function Grading() {
       grade_level_id: Number(gradeId),
       section_id: Number(sectionId),
       subject_id: Number(subjectId),
+      learning_area: learningArea==='legacy'?'':learningArea,
     };
     // Viewing a class must not create or modify its record for Admin.
     const request = isReviewer
       ? api.get(`/gradebooks/${adminGradebookId}`, { signal: AbortSignal.timeout(30000) })
-      : api.post('/gradebooks', context);
+      : learningArea==='legacy'
+        ? api.get('/gradebooks').then(books=>({id:books.find(book=>book.school_year_id===context.school_year_id && book.grading_period_id===context.grading_period_id && book.section_id===context.section_id && book.subject_id===context.subject_id && !book.learning_area)?.id}))
+        : api.post('/gradebooks', context);
     return request.then(async (res) => {
       if (requestId !== loadRequestRef.current) return;
       if (isReviewer) {
@@ -342,7 +344,7 @@ export default function Grading() {
     }).finally(() => {
       if (requestId === loadRequestRef.current) setLoading(false);
     });
-  }, [schoolYearId, gradingPeriodId, gradeId, sectionId, subjectId, validContext, showError, isTeacher, isReviewer, adminGradebookId]);
+  }, [schoolYearId, gradingPeriodId, gradeId, sectionId, subjectId, learningArea, validContext, showError, isTeacher, isReviewer, adminGradebookId]);
 
   useEffect(() => {
     loadGradebook();
@@ -500,16 +502,42 @@ export default function Grading() {
     return true;
   };
 
-  const handleValidateFinalize = () => {
+  const handleValidateFinalize = async () => {
     // 1. Validate required header fields
     if (!validateHeaderFields()) {
       return false;
     }
 
     try {
-      return validateGradebookForFinalization(fullGradebook.students, fullGradebook.components, scoreEdits, statusEdits);
+      const valid = validateGradebookForFinalization(fullGradebook.students, fullGradebook.components, scoreEdits, statusEdits);
+      if (fullGradebook.gradebook.learning_area) {
+        const validation = await api.post(`/gradebooks/${gradebookId}/validate`, {});
+        const partnerIssue = validation.issues?.find(issue => issue.code === 'MAPEH_PARTNER_INCOMPLETE');
+        if (partnerIssue) {
+          showError(partnerIssue.message);
+          return false;
+        }
+      }
+      return valid;
     } catch (error) {
-      showError(error.message);
+      const gradebook=fullGradebook?.gradebook;
+      const context = {
+        ...(gradebook?.learning_area ? { learningArea: activeMapehArea?.label || 'MAPEH learning area' } : {}),
+        term: gradebook?.quarter,
+      };
+      if (error.finalizationIssues) {
+        return {
+          ...error.finalizationIssues,
+          message: gradebook?.learning_area
+            ? formatMapehFinalizeIssue(error.message, context.learningArea, gradebook.quarter)
+            : error.message,
+          context,
+        };
+      }
+      const message=gradebook?.learning_area
+        ? formatMapehFinalizeIssue(error.message,activeMapehArea?.label||'learning area',gradebook.quarter)
+        : error.message;
+      showError(message);
       return false;
     }
   };
@@ -527,7 +555,7 @@ export default function Grading() {
       const refreshed = await api.get(`/gradebooks/${gradebookId}`);
       setFullGradebook(refreshed);
     } catch (err) {
-      showError(err.message);
+      if (err.code !== 'INCOMPLETE_GRADEBOOK') showError(err.message);
       throw err;
     } finally {
       setSaving(false);
@@ -605,7 +633,7 @@ export default function Grading() {
   };
 
   // 9. Export & Print Handlers
-  const handleExportXlsx = async (allTerms = false) => {
+  const handleExportXlsx = async (allTerms = false, throughTerm = null) => {
     if (!gradebookId || !fullGradebook) return;
     if (isDirty) return showError('Save your scores before exporting the class record.');
 
@@ -615,7 +643,7 @@ export default function Grading() {
     }
 
     const gb = fullGradebook.gradebook;
-    const filename = `ClassRecord-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-${allTerms ? 'AllTerms' : `Term${gb.quarter}`}.xlsx`;
+    const filename = `ClassRecord-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-${throughTerm === 2 ? 'Terms1-2' : allTerms ? 'AllTerms' : `Term${gb.quarter}`}.xlsx`;
     try {
       const q = new URLSearchParams({
         region,
@@ -623,26 +651,19 @@ export default function Grading() {
         school_id: schoolId,
         all_terms: String(allTerms)
       });
+      if (throughTerm) q.set('through_term', String(throughTerm));
       await api.download(`/gradebooks/${gradebookId}/report.xlsx?${q.toString()}`, filename);
     } catch (err) {
       showError(err.message);
     }
   };
 
-  const handlePrintReport = async () => {
-    if (!gradebookId) return;
-    if (isDirty) return showError('Save your scores before printing the class record.');
-    try {
-      await api.printHtml(`/gradebooks/${gradebookId}/report/print`);
-    } catch (err) {
-      showError(err.message);
-    }
-  };
-
   const gb = fullGradebook?.gradebook;
+  const activeMapehAreaId = isReviewer ? (gb?.learning_area || 'legacy') : mapehArea;
+  const activeMapehArea = MAPEH_AREAS.find((area) => area.id === activeMapehAreaId);
   const sheetLoading = structureLoading || loading;
   const sheetData = sheetLoading ? null : fullGradebook;
-  const isEditable = gb && ['Draft', 'Submitted'].includes(gb.status) && currentRole === 'teacher';
+  const isEditable = gb && !gb.is_legacy_readonly && ['Draft', 'Submitted'].includes(gb.status) && currentRole === 'teacher';
   const changeContext = (setter, value) => {
     if (saving) return;
     if (isDirty) {
@@ -685,46 +706,106 @@ export default function Grading() {
         No subject is assigned to your account for this school year. Ask an administrator to assign your subject in Administration → Subject Teaching Assignments.
       </div>}
 
+      {(isReviewer ? gb?.subject_name?.trim().toUpperCase()==='MAPEH' : Boolean(learningArea)) && <section className="card-static mapeh-area-selector" aria-labelledby="mapeh-area-heading">
+        <div className="mapeh-area-selector__header">
+          <div>
+            <h3 id="mapeh-area-heading">MAPEH learning areas</h3>
+            <p className="muted-small">Choose an area to open its gradebook.</p>
+          </div>
+          <p className="mapeh-area-selector__current" aria-live="polite">
+            <span>Current gradebook</span>
+            <strong>{activeMapehArea?.label || 'Legacy MAPEH record'}</strong>
+          </p>
+        </div>
+        <div className="mapeh-area-selector__options" role="group" aria-label="Select a MAPEH learning area">{MAPEH_AREAS.map(area=>{
+          const isActive = activeMapehAreaId === area.id;
+          return <button type="button" className={`btn-secondary mapeh-area-selector__option${isActive ? ' is-active' : ''}`} key={area.id}
+          aria-pressed={isActive}
+          onClick={()=>{
+            if(isReviewer){const match=existingGradebooks.find(book=>sameMapehContext(book,gb,area.id));if(match)changeContext(setAdminGradebookId,String(match.id));else showError('This learning-area record has not been created yet.');}
+            else changeContext(setMapehArea,area.id);
+          }}>{area.label}{isActive && <span className="mapeh-area-selector__badge" aria-hidden="true">Current</span>}</button>;
+        })}</div>
+        {gb?.is_legacy_readonly && <p className="notice">Preserved legacy MAPEH record. Scores and grading rules are read-only; new learning areas start empty.</p>}
+        {gb?.learning_area && <p className="muted-small">WW 20% · PT 60% · Exams 20%. Each requested term export requires both learning areas complete and finalized.</p>}
+      </section>}
+
       {activeTab === 'adjustments' && canReviewAdjustments && <GlobalAdjustmentsTab onRefresh={updateAdminPendingCount} />}
 
       {(activeTab === 'gradebook' || activeTab === 'metrics') && (
         <>
-          {isReviewer && <div className="card-static mb-4">
-            <label className="mb-2 block">
-              <span className="field-label">Find a class record</span>
-              <input className="input-field" type="search" value={adminGradebookSearch}
-                aria-label="Search teacher class records"
-                placeholder="Search by school year, term, grade, section, subject, or teacher"
-                onChange={(event) => {
-                  setAdminGradebookSearch(event.target.value);
-                  setAdminGradebookId('');
-                  setFullGradebook(null);
-                  setGradebookId(null);
-                  setLoading(false);
-                }} />
+          {isReviewer && <section className="card-static admin-gradebook-picker mb-4" aria-labelledby="admin-gradebook-picker-title">
+            <div className="admin-gradebook-picker__header">
+              <div>
+                <h2 id="admin-gradebook-picker-title">Class records</h2>
+                <p>Choose a record to review its grades. Each subject and term has its own record.</p>
+              </div>
+              {!existingGradebooksLoading && !existingGradebooksError && <span className="admin-gradebook-picker__count" aria-live="polite">
+                {filteredGradebookCount} {includeHistoricalGradebooks ? 'saved' : 'current'} {filteredGradebookCount === 1 ? 'record' : 'records'}
+              </span>}
+            </div>
+            <label className="admin-gradebook-picker__search">
+              <span className="field-label">Search class records</span>
+              <span className="admin-gradebook-picker__search-control">
+                <Search size={18} aria-hidden="true" />
+                <input className="input-field" type="search" value={adminGradebookSearch}
+                  aria-label="Search class records"
+                  placeholder="Teacher, subject, grade, section, term, or school year"
+                  onChange={(event) => {
+                    setAdminGradebookSearch(event.target.value);
+                    setAdminGradebookId('');
+                    setFullGradebook(null);
+                    setGradebookId(null);
+                    setLoading(false);
+                  }} />
+              </span>
             </label>
-            <label>
-              <span className="field-label">Teacher class record</span>
-              <select className="input-field" value={adminGradebookId} disabled={existingGradebooksLoading || Boolean(existingGradebooksError) || filteredGradebookCount === 0}
-                onChange={(event) => {
-                  const id = event.target.value;
-                  setAdminGradebookId(id);
-                  setFullGradebook(null);
-                  setGradebookId(null);
-                  setLoading(Boolean(id));
-                }}>
-                <option value="">{existingGradebooksLoading ? 'Loading class records…' : existingGradebooksError ? 'Class records could not be loaded' : 'Select a class record'}</option>
-                {groupedAdminGradebooks.map((group) => <optgroup key={group.label} label={group.label}>
-                  {group.books.map((book) => <option key={book.id} value={book.id}>
-                    Grade {normalizeGradeName(book.grade_name)} · Section {book.section_name} — {book.subject_name} · {book.teacher_name} · {book.status}
-                  </option>)}
-                </optgroup>)}
-              </select>
-            </label>
-            {!existingGradebooksLoading && !existingGradebooksError && <p className="muted-small mt-2" aria-live="polite">
-              Showing {filteredGradebookCount} {includeHistoricalGradebooks ? 'saved' : 'current'} class records. One record is saved for each subject, grade and section, and term, so the same class may appear in multiple terms.
+            {existingGradebooksLoading && <p className="admin-gradebook-picker__message" role="status">Loading class records…</p>}
+            {!existingGradebooksLoading && !existingGradebooksError && filteredGradebookCount > 0 && <div className="admin-gradebook-picker__list" aria-label="Available class records">
+              {groupedAdminGradebooks.map((group) => <section className="admin-gradebook-picker__group" key={group.label} aria-label={group.label}>
+                <div className="admin-gradebook-picker__group-heading">
+                  <h3>{group.label}</h3>
+                  <span>{group.books.length} {group.books.length === 1 ? 'record' : 'records'}</span>
+                </div>
+                <div className="admin-gradebook-picker__records">
+                  {group.books.map((book) => {
+                    const selected = String(book.id) === adminGradebookId;
+                    const status = String(book.status || 'Status unavailable');
+                    const statusClass = status.toLowerCase() === 'finalized' ? 'is-finalized' : status.toLowerCase() === 'draft' ? 'is-draft' : 'is-unknown';
+                    const area = book.learning_area === 'music_arts' ? 'Music and Arts'
+                      : book.learning_area === 'pe_health' ? 'PE and Health'
+                        : book.is_legacy_readonly ? 'Legacy record' : '';
+                    return <button type="button" key={book.id}
+                      className={`admin-gradebook-record${selected ? ' is-selected' : ''}`}
+                      aria-pressed={selected}
+                      onClick={() => {
+                        setAdminGradebookId(String(book.id));
+                        setFullGradebook(null);
+                        setGradebookId(null);
+                        setLoading(true);
+                      }}>
+                      <span className="admin-gradebook-record__topline">
+                        <strong>{book.subject_name || 'Subject unavailable'}</strong>
+                        <span className={`admin-gradebook-record__status ${statusClass}`}>{status}</span>
+                      </span>
+                      <span className="admin-gradebook-record__details">
+                        <span>Grade {normalizeGradeName(book.grade_name) || '—'} · Section {book.section_name || 'Unassigned'}</span>
+                        <span>Teacher: {book.teacher_name || 'Unassigned'}</span>
+                      </span>
+                      {(area || selected) && <span className="admin-gradebook-record__footer">
+                        {area && <span className="admin-gradebook-record__area">{area}</span>}
+                        {selected && <span className="admin-gradebook-record__viewing">Viewing</span>}
+                      </span>}
+                    </button>;
+                  })}
+                </div>
+              </section>)}
+            </div>}
+            {!existingGradebooksLoading && !existingGradebooksError && existingGradebooks.length === 0 && <p className="admin-gradebook-picker__message">
+              {includeHistoricalGradebooks ? 'No saved class records are available.' : 'No current class records are available. Include older records to browse saved history.'}
             </p>}
-            <label className="checkbox-field mt-2">
+            {!existingGradebooksLoading && !existingGradebooksError && existingGradebooks.length > 0 && filteredGradebookCount === 0 && <p className="admin-gradebook-picker__message">No records match that search. Try a teacher, subject, section, or term.</p>}
+            <label className="checkbox-field admin-gradebook-picker__history">
               <input type="checkbox" checked={includeHistoricalGradebooks}
                 onChange={(event) => {
                   setIncludeHistoricalGradebooks(event.target.checked);
@@ -735,12 +816,10 @@ export default function Grading() {
                   setGradebookId(null);
                   setLoading(false);
                 }} />
-              <span>Include older or inactive class records</span>
+              <span>Include older or inactive records</span>
             </label>
-            {existingGradebooksError && <p className="notice notice-danger mt-2" role="alert">Could not load teacher class records: {existingGradebooksError}</p>}
-            {!existingGradebooksLoading && !existingGradebooksError && existingGradebooks.length === 0 && <p className="text-muted mt-2">{includeHistoricalGradebooks ? 'No saved class records are available.' : 'No current class records match the active academic setup. Include older records to browse saved history.'}</p>}
-            {!existingGradebooksLoading && !existingGradebooksError && existingGradebooks.length > 0 && filteredGradebookCount === 0 && <p className="text-muted mt-2">No class records match that search.</p>}
-          </div>}
+            {existingGradebooksError && <p className="notice notice-danger mt-2" role="alert">Could not load class records: {existingGradebooksError}</p>}
+          </section>}
 
           {/* Loading indicator */}
           {activeTab === 'metrics' && sheetLoading && (
@@ -779,7 +858,7 @@ export default function Grading() {
 
                   {/* Interactive Spreadsheet Sheet */}
                   <GradingSheet
-                    key={isReviewer ? `admin:${adminGradebookId}` : `${schoolYearId}:${quarter}:${gradeId}:${sectionId}:${subjectId}`}
+                    key={isReviewer ? `admin:${adminGradebookId}` : `${schoolYearId}:${quarter}:${gradeId}:${sectionId}:${subjectId}:${learningArea}`}
                     gradebook={sheetData?.gradebook}
                     students={sheetData?.students || []}
                     components={sheetData?.components || []}
@@ -851,10 +930,13 @@ export default function Grading() {
                     adjustmentCount={teacherAdjustmentCount}
                     onToggleValidation={() => setShowValidation((prev) => !prev)}
                     onExportXlsx={handleExportXlsx}
-                    onExportAllTerms={() => handleExportXlsx(true)}
-                    onPrintReport={handlePrintReport}
+                    onExportAllTerms={() => Number(fullGradebook.gradebook.quarter) === 2 ? handleExportXlsx(false, 2) : handleExportXlsx(true)}
                     disabled={loading || saving}
                     onValidateFinalize={handleValidateFinalize}
+                    finalizationContext={{
+                      ...(gb?.learning_area ? { learningArea: activeMapehArea?.label || 'MAPEH learning area' } : {}),
+                      term: gb?.quarter,
+                    }}
                   />}
                 </>
               )}

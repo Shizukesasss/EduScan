@@ -1,5 +1,4 @@
 import React from 'react';
-import { Users, CheckCircle2, AlertCircle, TrendingUp, Award, BarChart3 } from 'lucide-react';
 
 const DESCRIPTORS = [
   { key: '90-100', label: 'Outstanding', range: '90–100', color: 'var(--color-success, #16a34a)', barClass: 'dist-bar-outstanding' },
@@ -34,39 +33,25 @@ export default function GradebookSummary({ statistics, passingGrade = 75 }) {
           <p className="eyebrow">Class Performance Metrics</p>
           <h2>Summary & Distribution</h2>
         </div>
-        <BarChart3 size={22} className="text-muted" />
       </div>
 
-      {/* KPI Cards Grid */}
       <div className="summary-stats-grid">
-        {/* Total Learners */}
-        <div className="stat-card">
-          <div className="stat-card-header">
-            <span className="stat-label">Total Learners</span>
-            <Users size={18} className="stat-icon" />
-          </div>
-          <div className="stat-value">{learners}</div>
-          <div className="stat-meta">
-            <span className="stat-badge">{completionRate}% evaluated</span>
+        <div className="summary-stat">
+          <div className="stat-label">Total Learners</div>
+          <div className="summary-stat-value">{learners}</div>
+          <div className="summary-stat-meta">
+            <span className="summary-stat-badge">{completionRate}% evaluated</span>
           </div>
         </div>
 
-        {/* Completion Status */}
-        <div className="stat-card">
-          <div className="stat-card-header">
-            <span className="stat-label">Scoring Status</span>
-            {incomplete === 0 ? (
-              <CheckCircle2 size={18} className="stat-icon text-success" />
-            ) : (
-              <AlertCircle size={18} className="stat-icon text-warning" />
-            )}
-          </div>
-          <div className="stat-value">
+        <div className="summary-stat">
+          <div className="stat-label">Scoring Status</div>
+          <div className="summary-stat-value">
             <span className="text-success">{complete}</span>
             <span className="stat-subdivider">/</span>
             <span className={incomplete > 0 ? 'text-warning' : 'text-muted'}>{learners}</span>
           </div>
-          <div className="stat-meta">
+          <div className="summary-stat-meta">
             {incomplete > 0 ? (
               <span className="text-warning-bold">{incomplete} learner(s) incomplete</span>
             ) : (
@@ -75,16 +60,12 @@ export default function GradebookSummary({ statistics, passingGrade = 75 }) {
           </div>
         </div>
 
-        {/* Passing Rate */}
-        <div className="stat-card">
-          <div className="stat-card-header">
-            <span className="stat-label">Passing Rate</span>
-            <Award size={18} className="stat-icon text-primary" />
-          </div>
-          <div className="stat-value">
+        <div className="summary-stat">
+          <div className="stat-label">Passing Rate</div>
+          <div className="summary-stat-value">
             {passingRate != null ? `${passingRate}%` : '—'}
           </div>
-          <div className="stat-meta">
+          <div className="summary-stat-meta">
             <span className="text-success">{passed} passed</span>
             {below_passing > 0 && (
               <span className="text-danger"> &middot; {below_passing} below {passingGrade}</span>
@@ -92,16 +73,12 @@ export default function GradebookSummary({ statistics, passingGrade = 75 }) {
           </div>
         </div>
 
-        {/* Class Average & Range */}
-        <div className="stat-card">
-          <div className="stat-card-header">
-            <span className="stat-label">Class Average</span>
-            <TrendingUp size={18} className="stat-icon text-info" />
-          </div>
-          <div className="stat-value font-mono">
+        <div className="summary-stat">
+          <div className="stat-label">Class Average</div>
+          <div className="summary-stat-value font-mono">
             {average != null ? average.toFixed(1) : '—'}
           </div>
-          <div className="stat-meta">
+          <div className="summary-stat-meta">
             {highest != null && lowest != null ? (
               <span>Range: <strong className="font-mono">{lowest}</strong> – <strong className="font-mono">{highest}</strong></span>
             ) : (
@@ -111,16 +88,14 @@ export default function GradebookSummary({ statistics, passingGrade = 75 }) {
         </div>
       </div>
 
-      {/* DepEd Grade Distribution Scale */}
       <div className="grade-distribution-section">
         <div className="distribution-header">
-          <span className="field-label">DepEd Grading Scale Distribution (DO 8, s. 2015)</span>
+          <span className="field-label">DepEd Grading Scale Distribution (DO 15, s. 2026)</span>
           <span className="text-muted text-sm">{complete} evaluated grades</span>
         </div>
 
-        {/* Stacked Progress Bar */}
         {complete > 0 && (
-          <div className="distribution-stacked-bar" role="progressbar" aria-label="Grade distribution">
+          <div className="distribution-stacked-bar" role="img" aria-label={`Grade distribution across ${complete} evaluated grades`}>
             {DESCRIPTORS.map((d) => {
               const count = distribution[d.key] || 0;
               const pct = (count / complete) * 100;
@@ -137,7 +112,6 @@ export default function GradebookSummary({ statistics, passingGrade = 75 }) {
           </div>
         )}
 
-        {/* Distribution Legend & Counts */}
         <div className="distribution-legend-grid">
           {DESCRIPTORS.map((d) => {
             const count = distribution[d.key] || 0;

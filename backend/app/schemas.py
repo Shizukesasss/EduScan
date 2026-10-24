@@ -540,6 +540,7 @@ class GradeLevelPayload(BaseModel):
 
 class SectionPayload(BaseModel):
     id: int | None = None
+    school_year_id: int | None = None
     grade_level_id: int
     name: str = Field(min_length=1, max_length=80)
     adviser_user_id: int | None = None
@@ -561,6 +562,7 @@ class SubjectPayload(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     category: str = Field(default="JHS", max_length=20)
     is_elective: bool = False
+    allowed_grades: list[int] | None = None
     elective_track: str | None = Field(default=None, max_length=40)
     active: bool = True
 
@@ -570,6 +572,15 @@ class SubjectTeachingAssignmentPayload(BaseModel):
     subject_id: int
     teacher_user_id: int
     section_ids: list[int] = Field(default_factory=list, max_length=200)
+
+
+class DedicatedDemoAdvisoryPayload(BaseModel):
+    school_year_id: int = Field(gt=0)
+
+
+class DemoTeacherSetupPayload(BaseModel):
+    school_year_id: int
+    section_ids: list[int] = Field(min_length=1, max_length=200)
 
 
 class InterventionPayload(BaseModel):

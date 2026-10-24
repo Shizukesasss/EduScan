@@ -22,7 +22,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth import create_token
 from app.database import Base, get_db
 from app.main import app
-from app.models import AttendanceCorrection, AttendanceEvent, CalendarException, ClassSchedule, ExcusedAbsence, GradeLevel, Person, SchoolSection, User
+from app.models import AttendanceCorrection, AttendanceEvent, CalendarException, ClassSchedule, ExcusedAbsence, GradeLevel, Person, SchoolSection, SchoolYear, SectionAdviserAssignment, User
 from app.services.attendance import MANILA, close_due_attendance, list_rows, raw_row, record_gate_match, reset_day
 from app.services.settings_store import set_json
 from app.services import reports
@@ -40,7 +40,11 @@ class AttendanceSyncTest(unittest.TestCase):
         self.grade = GradeLevel(name="10")
         self.db.add_all([self.admin, self.teacher, self.student, self.personnel, self.grade])
         self.db.flush()
-        self.db.add(SchoolSection(grade_level_id=self.grade.id, name="Rizal", adviser_user_id=self.teacher.id))
+        section = SchoolSection(grade_level_id=self.grade.id, name="Rizal", adviser_user_id=self.teacher.id)
+        year = SchoolYear(name="2026-2027", starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
+        self.db.add_all([section, year])
+        self.db.flush()
+        self.db.add(SectionAdviserAssignment(school_year_id=year.id, section_id=section.id, teacher_user_id=self.teacher.id))
         self.db.commit()
         set_json(self.db, "attendance", {"duplicate_cooldown_seconds": 0, "auto_close_enabled": False})
         self.day = date(2026, 10, 13)

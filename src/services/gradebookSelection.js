@@ -6,7 +6,7 @@ export function groupAdminGradebooks(gradebooks, searchValue = '') {
     .filter((book) => !query || [
       book.school_year_name, book.grading_period_name, `Term ${book.quarter}`, `Q${book.quarter}`,
       `Grade ${normalizeGradeName(book.grade_name)}`, `Section ${book.section_name}`,
-      book.grade_name, book.section_name, book.subject_name, book.teacher_name, book.status,
+      book.grade_name, book.section_name, book.subject_name, book.learning_area, book.teacher_name, book.status,
     ].some((value) => String(value || '').toLocaleLowerCase().includes(query)))
     .sort((a, b) => String(b.school_year_name).localeCompare(String(a.school_year_name), undefined, { numeric: true })
       || Number(a.quarter) - Number(b.quarter)

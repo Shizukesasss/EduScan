@@ -62,7 +62,7 @@ class Gradebook(Base):
     __table_args__ = (
         UniqueConstraint(
             "school_year_id", "grading_period_id", "grade_level_id",
-            "section_id", "subject_id",
+            "section_id", "subject_id", "learning_area",
             name="uq_gradebook_context",
         ),
     )
@@ -84,6 +84,8 @@ class Gradebook(Base):
     teacher_name: Mapped[str] = mapped_column(String(180), default="")
     # Legacy class_key for backward compatibility
     class_key: Mapped[str | None] = mapped_column(String(240), unique=True, nullable=True, index=True)
+    learning_area: Mapped[str] = mapped_column(String(20), default="", server_default="", nullable=False)
+    is_legacy_readonly: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     # Workflow
     status: Mapped[str] = mapped_column(String(30), default="Draft", index=True)
     passing_grade: Mapped[int] = mapped_column(Integer, default=75)

@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { auth } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
+import FinalizeValidationDialog from './FinalizeValidationDialog';
 
 export default function GradebookActions({
   gradebook,
@@ -17,14 +18,14 @@ export default function GradebookActions({
   onToggleValidation,
   onExportXlsx,
   onExportAllTerms,
-  onPrintReport,
   disabled = false,
   onValidateFinalize,
+  finalizationContext,
 }) {
   const userRole = auth.role();
-  const canEdit = userRole === 'teacher';
+  const canEdit = userRole === 'teacher' && !gradebook?.is_legacy_readonly;
   const isRecordsOfficer = userRole === 'records_officer';
-  const canReopen = isRecordsOfficer;
+  const canReopen = isRecordsOfficer && !gradebook?.is_legacy_readonly;
 
   const status = gradebook?.status || 'Draft';
   const isDraft = status === 'Draft';
@@ -36,6 +37,9 @@ export default function GradebookActions({
   const [isConfirmed, setIsConfirmed] = useState(false);
   const [actionReason, setActionReason] = useState('');
   const [acting, setActing] = useState(false);
+  const [validatingFinalize, setValidatingFinalize] = useState(false);
+  const [finalizationIssue, setFinalizationIssue] = useState(null);
+  const finalizeButtonRef = useRef(null);
   const { showError } = useToast();
 
   const openActionDialog = (type) => {
@@ -63,9 +67,31 @@ export default function GradebookActions({
       else if (activeDialog === 'reopen') await onReopen?.(defaultReason);
       setActiveDialog(null);
     } catch (err) {
-      showError(err.message || 'Action failed');
+      if (activeDialog === 'finalize' && err.code === 'INCOMPLETE_GRADEBOOK') {
+        setActiveDialog(null);
+        setFinalizationIssue({ message: err.message, context: finalizationContext });
+      } else {
+        showError(err.message || 'Action failed');
+      }
     } finally {
       setActing(false);
+    }
+  };
+
+  const handleFinalizeClick = async () => {
+    if (validatingFinalize || disabled || isSaving) return;
+    setValidatingFinalize(true);
+    try {
+      const validation = onValidateFinalize ? await onValidateFinalize() : true;
+      if (validation !== true) {
+        if (validation && typeof validation === 'object') setFinalizationIssue(validation);
+        return;
+      }
+      openActionDialog('finalize');
+    } catch (err) {
+      showError(err.message || 'Could not validate this gradebook.');
+    } finally {
+      setValidatingFinalize(false);
     }
   };
 
@@ -76,16 +102,14 @@ export default function GradebookActions({
           {/* Primary Workflow: Finalize */}
           {canEdit && (isDraft || isSubmitted) && (
             <button
+              ref={finalizeButtonRef}
               type="button"
               className="btn btn-success action-primary-workflow"
-              onClick={() => {
-                if (onValidateFinalize && !onValidateFinalize()) return;
-                openActionDialog('finalize');
-              }}
-              disabled={disabled || isSaving}
+              onClick={handleFinalizeClick}
+              disabled={disabled || isSaving || validatingFinalize}
               title="Finalize grades (computes official term ratings)"
             >
-              <span className="font-bold">FINALIZE</span>
+              <span className="font-bold">{validatingFinalize ? 'CHECKING…' : 'FINALIZE'}</span>
             </button>
           )}
 
@@ -115,7 +139,7 @@ export default function GradebookActions({
           )}
 
           {/* Admin Workflow */}
-          {isRecordsOfficer && isFinalized && (
+          {isRecordsOfficer && !gradebook?.is_legacy_readonly && isFinalized && (
             <button
               type="button"
               className="btn btn-secondary"
@@ -164,24 +188,25 @@ export default function GradebookActions({
             disabled={disabled || isSaving || (!isFinalized && !isLocked)}
             title={(!isFinalized && !isLocked) ? "Gradebook must be Finalized before exporting" : "Download Excel spreadsheet (XLSX)"}
           >
-            <span>Export XLSX</span>
+            <span>Export Term {gradebook?.quarter} XLSX</span>
           </button>}
-          {isRecordsOfficer && <button
+          {(isRecordsOfficer || userRole === 'teacher') && !gradebook?.is_legacy_readonly && [2, 3].includes(Number(gradebook?.quarter)) && <button
             type="button"
             className="btn btn-secondary"
             onClick={onExportAllTerms}
             disabled={disabled || isSaving || (!isFinalized && !isLocked)}
-            title="Export Terms 1, 2, and 3 in one workbook. All three must be complete and finalized or locked."
+            title={`Export Terms 1 through ${gradebook.quarter} in one workbook. All included terms must be complete and finalized or locked.`}
           >
-            <span>Export All 3 Terms XLSX</span>
+            <span>{Number(gradebook.quarter) === 2 ? 'Export 2 Terms XLSX' : 'Export All 3 Terms XLSX'}</span>
           </button>}
 
-          {!canEdit && userRole !== 'admin' && <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onPrintReport} title="Open printable class record">Print</button>}
           <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onOpenAudit} title="View full audit log of all changes">
             <span>Audit Log</span>
           </button>
         </div>
       </div>
+
+      <FinalizeValidationDialog issue={finalizationIssue} onClose={() => setFinalizationIssue(null)} returnFocusRef={finalizeButtonRef} />
 
       {/* Workflow Action Confirmation Dialog */}
       {activeDialog && (

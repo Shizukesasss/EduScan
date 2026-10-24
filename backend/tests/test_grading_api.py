@@ -82,7 +82,7 @@ class GradingApiTest(unittest.TestCase):
 
     def assert_exports_match_gradebook(self, gb_id):
         snapshot = self.client.get(f'/api/gradebooks/{gb_id}', headers=self.teacher_headers).json()
-        for headers in (self.teacher_headers, self.other_teacher_headers, self.admin_headers):
+        for headers in (self.other_teacher_headers, self.admin_headers):
             self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx?all_terms=true', headers=headers).status_code, 403)
         self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}', headers=self.admin_headers).json(), snapshot)
         for role, headers in (('teacher', self.teacher_headers), ('records officer', self.records_headers)):
@@ -318,9 +318,19 @@ class GradingApiTest(unittest.TestCase):
         self.assertTrue(all(student['reported_grade'] is None for student in unfinished['students']))
         validation = self.client.post(f'/api/gradebooks/{gb_id}/validate', headers=self.teacher_headers)
         self.assertFalse(validation.json()['valid'])
+        incomplete_issue = next(issue for issue in validation.json()['issues'] if issue['code'] == 'INCOMPLETE_LEARNERS')
+        self.assertIn('DELA CRUZ, JUAN', incomplete_issue['message'])
+        self.assertIn('Quiz 2', incomplete_issue['message'])
+        self.assertIn('SANTOS, MARIA', incomplete_issue['message'])
+        self.assertIn('Periodical Exam', incomplete_issue['message'])
         blocked = self.client.post(f'/api/gradebooks/{gb_id}/finalize', headers=self.teacher_headers,
                                    json={'reason': 'Try to finalize the unfinished record'})
         self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertEqual(blocked.json()['detail']['code'], 'INCOMPLETE_GRADEBOOK')
+        self.assertIn('DELA CRUZ, JUAN', blocked.json()['detail']['message'])
+        self.assertIn('Quiz 2', blocked.json()['detail']['message'])
+        self.assertIn('SANTOS, MARIA', blocked.json()['detail']['message'])
+        self.assertIn('Periodical Exam', blocked.json()['detail']['message'])
         draft_export = self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx', headers=self.teacher_headers)
         self.assertEqual(draft_export.status_code, 409, draft_export.text)
         restored = self.client.put(f'/api/gradebooks/{gb_id}/scores', headers=self.teacher_headers, json=scores_payload)

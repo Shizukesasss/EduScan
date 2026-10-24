@@ -1,3 +1,4 @@
+import PaginatedBody from '../Common/PaginatedBody';
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Eye, History, RefreshCw, ScanFace, Trash2, UserPlus, X } from 'lucide-react';
 import { api } from '../../api/client';
@@ -59,7 +60,7 @@ export default function BiometricEnrollmentManager({ onModelChanged }) {
       <div className="notice notice-blue"><ScanFace size={18} /><span>Every create, re-enrollment, and deletion records the authorized account, timestamp, reason, sample counts, and resulting LBPH model version.</span></div>
       <p className="section-copy">Registered people without samples have an <strong>Enroll face</strong> button. Use <strong>Re-enroll</strong> to replace an existing person's samples. Capture that person's own face; their school identity is preserved.</p>
       {loadError && <div className="notice notice-danger" role="alert"><AlertTriangle size={18} /><span>{loadError} Click Refresh to try loading the enrolled-person list again.</span></div>}
-      <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Person</th><th>Group</th><th>Samples</th><th>Quality</th><th>Last capture</th><th>Actions</th></tr></thead><tbody>
+      <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Person</th><th>Group</th><th>Samples</th><th>Quality</th><th>Last capture</th><th>Actions</th></tr></thead><PaginatedBody>
         {!loading && !loadError && enrollments.length === 0 && <tr><td colSpan="6" className="empty-cell">No facial enrollments yet.</td></tr>}
         {loading && <tr><td colSpan="6" className="empty-cell">Loading encrypted enrollment metadata…</td></tr>}
         {enrollments.map((row) => <tr key={row.person_id}>
@@ -74,16 +75,16 @@ export default function BiometricEnrollmentManager({ onModelChanged }) {
             <button type="button" className="btn-link danger-link" onClick={() => setDeleting(row)} disabled={loading || !row.sample_count}><Trash2 size={15} /> Delete enrollment</button>
           </div></td>
         </tr>)}
-      </tbody></table></div>
+      </PaginatedBody></table></div>
     </section>
 
     <section className="card-static">
       <div className="section-heading"><div><p className="eyebrow">Append-only accountability record</p><h2>Facial enrollment audit log</h2></div><History size={24} /></div>
       {auditError && <div className="notice notice-warning" role="alert"><AlertTriangle size={18} /><span>{auditError} The enrolled-person list above is loaded separately.</span></div>}
-      <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Date & time</th><th>Person</th><th>Action</th><th>Authorized actor</th><th>Samples before → after</th><th>Reason</th><th>Resulting model</th></tr></thead><tbody>
+      <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Date & time</th><th>Person</th><th>Action</th><th>Authorized actor</th><th>Samples before → after</th><th>Reason</th><th>Resulting model</th></tr></thead><PaginatedBody>
         {!loading && !auditError && audit.length === 0 && <tr><td colSpan="7" className="empty-cell">No enrollment changes have been recorded yet.</td></tr>}
         {audit.map((event) => <tr key={event.id}><td>{formatDateTime(event.created_at)}</td><td><strong>{event.person_name}</strong><small className="table-subline">{event.external_id}</small></td><td><span className={`tag ${event.action === 'deleted' ? 'tag-danger' : event.action === 'updated' ? 'tag-warning' : 'tag-success'}`}>{event.action}</span></td><td>{event.actor_name}<small className="table-subline">{event.actor_role}</small></td><td>{event.before.sample_count} → {event.after.sample_count}</td><td>{event.reason}</td><td className="model-version">{event.model_version || 'No active model'}</td></tr>)}
-      </tbody></table></div>
+      </PaginatedBody></table></div>
     </section>
 
     {creating && <StudentRegistrationModal onClose={() => setCreating(false)} onSaved={(result) => changed(result.assisted_registration ? 'School record saved for staff-assisted attendance. No face samples were captured.' : 'Facial enrollment created and recorded in the audit log.')} />}
@@ -102,7 +103,7 @@ function EnrollmentDetails({ enrollment, onClose }) {
     <div className="modal-header"><div><p className="eyebrow">Read-only enrollment record</p><h2><ScanFace size={23} /> {enrollment.full_name}</h2></div><button className="icon-btn" onClick={onClose}><X size={21} /><span className="control-label">Close</span></button></div>
     <div className="metric-grid"><div className="metric-card"><span>School / employee ID</span><strong>{enrollment.external_id}</strong></div><div className="metric-card"><span>Encrypted samples</span><strong>{enrollment.sample_count}</strong></div><div className="metric-card"><span>Average quality</span><strong>{enrollment.average_quality}%</strong></div><div className="metric-card"><span>Last capture</span><strong className="detail-date">{formatDateTime(enrollment.last_captured_at)}</strong></div></div>
     <p className="section-copy">Encrypted face crops cannot be previewed from EduScan. This prevents the management screen from becoming a biometric image gallery.</p>
-    <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Sample reference</th><th>Quality score</th><th>Captured</th></tr></thead><tbody>{enrollment.samples.map((sample) => <tr key={sample.id}><td>{sample.id.slice(0, 8)}…</td><td>{sample.quality_score}%</td><td>{formatDateTime(sample.created_at)}</td></tr>)}</tbody></table></div>
+    <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Sample reference</th><th>Quality score</th><th>Captured</th></tr></thead><PaginatedBody>{enrollment.samples.map((sample) => <tr key={sample.id}><td>{sample.id.slice(0, 8)}…</td><td>{sample.quality_score}%</td><td>{formatDateTime(sample.created_at)}</td></tr>)}</PaginatedBody></table></div>
     <div className="modal-actions"><button className="btn-primary" onClick={onClose}>Done</button></div>
   </div></div>;
 }

@@ -60,6 +60,8 @@ def align_open_gradebook(db, book, actor, policies):
     from .class_record_export import subject_template, assessment_groups
     from .grading import add_gradebook_audit
     from .reports import _assessment_category
+    if book.is_legacy_readonly or book.learning_area:
+        raise ValueError('MAPEH legacy records and learning-area policies cannot be aligned by this tool.')
     if book.status in {'Finalized', 'Locked'}:
         raise ValueError(f'Finalized record {book.id} requires an explicit teacher reopening before policy alignment.')
     kind, _ = subject_template(book.subject.name)

@@ -257,7 +257,7 @@ def _combined_arts_health(workbook, terms, sheets, students, cached):
     sheet.freeze_panes = 'C5'
 
 
-def export_adaptive(db, book, full, region, division, school_id, allowed_teacher_id=None, all_terms=False):
+def export_adaptive(db, book, full, region, division, school_id, allowed_teacher_id=None, all_terms=False, through_term=None):
     from .reports import _complete_finalized_record, _write_class_record_workbook, new_report_path, EXPORT_DIR, _safe_name
     if allowed_teacher_id is not None and book.teacher_user_id != allowed_teacher_id:
         raise HTTPException(403, 'This saved class record belongs to another teacher.')
@@ -283,7 +283,7 @@ def export_adaptive(db, book, full, region, division, school_id, allowed_teacher
         except HTTPException:
             return None
         return ('PE and H' if 'HEALTH' in subject.upper() else 'M and A') if kind == 'mapeh' else None
-    combined = not all_terms and area(gb['subject_name']) is not None
+    combined = not (all_terms or through_term) and area(gb['subject_name']) is not None
     query = select(Gradebook).where(Gradebook.school_year_id == book.school_year_id, Gradebook.grade_level_id == book.grade_level_id,
                                    Gradebook.section_id == book.section_id,
                                    Gradebook.grading_period.has(GradingPeriod.deleted_at.is_(None)), Gradebook.subject.has(Subject.deleted_at.is_(None)))
@@ -291,8 +291,10 @@ def export_adaptive(db, book, full, region, division, school_id, allowed_teacher
         query = query.where(Gradebook.subject_id == book.subject_id)
     if allowed_teacher_id is not None:
         query = query.where(Gradebook.teacher_user_id == allowed_teacher_id)
-    if all_terms:
-        query = query.where(Gradebook.teacher_user_id == book.teacher_user_id, Gradebook.quarter.in_((1, 2, 3)))
+    periods = tuple(range(1, (through_term or 3) + 1)) if all_terms or through_term else (book.quarter,)
+    query = query.where(Gradebook.quarter.in_(periods))
+    if all_terms or through_term:
+        query = query.where(Gradebook.teacher_user_id == book.teacher_user_id)
     terms = {}
     for sibling in db.scalars(query.order_by(Gradebook.quarter)).all():
         learning_area = area(sibling.subject_name) if combined else ''
@@ -307,8 +309,8 @@ def export_adaptive(db, book, full, region, division, school_id, allowed_teacher
         terms[key] = term
     if not any(term['gradebook']['id'] == book.id for term in terms.values()):
         raise HTTPException(409, 'The selected class record no longer belongs to a current subject and grading period.')
-    if all_terms and set(terms) != {(1, ''), (2, ''), (3, '')}:
-        raise HTTPException(409, 'All three terms must be complete and finalized or locked for this teacher, subject, section, and school year before exporting together.')
+    if (all_terms or through_term) and set(terms) != {(period, '') for period in periods}:
+        raise HTTPException(409, 'All requested terms must be complete and finalized or locked for this teacher, subject, section, and school year before exporting together.')
     cached, sheets = {}, {}
     for key, term in terms.items():
         sheet_name = f'Term {key[0]} {key[1]}' if combined else None
@@ -319,7 +321,7 @@ def export_adaptive(db, book, full, region, division, school_id, allowed_teacher
         for row in sheet:
             if any(cell.data_type == 'f' and len(cell.value) > 8192 for cell in row):
                 raise HTTPException(409, 'This assessment setup exceeds the Excel formula length limit.')
-    period_name = 'AllTerms' if all_terms else f"Term{gb['quarter']}"
+    period_name = 'Terms1-2' if through_term == 2 else 'AllTerms' if all_terms else f"Term{gb['quarter']}"
     target = new_report_path(EXPORT_DIR, f"ClassRecord-{_safe_name(gb['school_year_name'])}-{period_name}-Grade{_safe_name(gb['grade_name'])}-{_safe_name(gb['section_name'])}-{_safe_name(gb['subject_name'])}.xlsx")
     with TemporaryDirectory(dir=target.parent) as directory:
         source = Path(directory) / 'gradebook.xlsx'

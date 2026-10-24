@@ -1,3 +1,4 @@
+import PaginatedBody from '../Common/PaginatedBody';
 import React, { useState } from 'react';
 import { X, Search } from 'lucide-react';
 
@@ -94,7 +95,7 @@ export default function AuditHistory({ audit = [], onClose }) {
                   <th>Stated Reason</th>
                 </tr>
               </thead>
-              <tbody>
+              <PaginatedBody resetKey={search}>
                 {filtered.length === 0 ? (
                   <tr>
                     <td colSpan="6" className="empty-cell">
@@ -168,7 +169,7 @@ export default function AuditHistory({ audit = [], onClose }) {
                     );
                   })
                 )}
-              </tbody>
+              </PaginatedBody>
             </table>
           </div>
         </div>

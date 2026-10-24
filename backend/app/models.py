@@ -16,6 +16,7 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(30), index=True)
     full_name: Mapped[str] = mapped_column(String(160))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=True)
     failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(
@@ -154,6 +155,17 @@ class Subject(Base):
     category: Mapped[str] = mapped_column(String(20), default="JHS")
     is_elective: Mapped[bool] = mapped_column(Boolean, default=False)
     elective_track: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    allowed_grades_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    @property
+    def allowed_grades(self):
+        import json
+        return json.loads(self.allowed_grades_json) if self.allowed_grades_json else [7, 8, 9, 10]
+
+    @allowed_grades.setter
+    def allowed_grades(self, value):
+        import json
+        self.allowed_grades_json = json.dumps(value) if value is not None else None
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -175,6 +187,31 @@ class SubjectTeachingAssignment(Base):
     subject: Mapped[Subject] = relationship()
     section: Mapped[SchoolSection] = relationship()
     teacher: Mapped[User] = relationship()
+
+
+class SectionAdviserAssignment(Base):
+    """Adviser history keyed by section and school year, independent of teaching."""
+    __tablename__ = 'section_adviser_assignments'
+    __table_args__ = (
+        UniqueConstraint('school_year_id', 'section_id', name='uq_adviser_year_section'),
+        UniqueConstraint('school_year_id', 'teacher_user_id', name='uq_adviser_year_teacher'),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    school_year_id: Mapped[int] = mapped_column(ForeignKey('school_years.id'), index=True)
+    section_id: Mapped[int] = mapped_column(ForeignKey('school_sections.id'), index=True)
+    teacher_user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class DemoTeacherSetupBatch(Base):
+    __tablename__ = 'demo_teacher_setup_batches'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    school_year_id: Mapped[int] = mapped_column(ForeignKey('school_years.id'))
+    created_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    proposal_json: Mapped[str] = mapped_column(Text)
+    state_digest: Mapped[str] = mapped_column(String(64))
+    applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class CalendarException(Base):
