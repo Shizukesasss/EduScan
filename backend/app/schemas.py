@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
 
 import re
 import unicodedata
@@ -115,6 +115,7 @@ class PersonCreate(BaseModel):
     middle_name: str | None = Field(default=None, max_length=80)
     name_extension: str | None = Field(default=None, max_length=20)
     sex: str
+    date_of_birth: date | None = None
     role: str
     grade: str | None = None
     section: str | None = None
@@ -173,6 +174,14 @@ class PersonCreate(BaseModel):
     def valid_sex(cls, value: str) -> str:
         if value not in {"Male", "Female"}:
             raise ValueError("Sex must be Male or Female for SF2 placement")
+        return value
+
+    @field_validator("date_of_birth")
+    @classmethod
+    def valid_date_of_birth(cls, value: date | None) -> date | None:
+        manila_date = datetime.now(timezone(timedelta(hours=8))).date()
+        if value is not None and value > manila_date:
+            raise ValueError("Date of birth cannot be in the future")
         return value
 
     @field_validator("role")
@@ -406,7 +415,7 @@ class GradeComponentPayload(BaseModel):
 class GradebookPayload(BaseModel):
     class_key: str
     school_year: str = Field(default="2026-2027", min_length=4, max_length=30)
-    quarter: int = Field(default=1, ge=1, le=4)
+    term_order: int = Field(default=1, ge=1, le=4)
     subject: str = Field(default="Unspecified", min_length=2, max_length=120)
     grade: str = Field(min_length=1, max_length=30)
     section: str = Field(min_length=1, max_length=80)
@@ -526,7 +535,6 @@ class GradingPeriodPayload(BaseModel):
     id: int | None = None
     school_year_id: int
     name: str = Field(min_length=2, max_length=80)
-    quarter: int = Field(ge=1, le=4)
     starts_on: date
     ends_on: date
     active: bool = True
@@ -581,6 +589,12 @@ class DedicatedDemoAdvisoryPayload(BaseModel):
 class DemoTeacherSetupPayload(BaseModel):
     school_year_id: int
     section_ids: list[int] = Field(min_length=1, max_length=200)
+
+
+class AnnexGCommentPayload(BaseModel):
+    enrollment_id: int = Field(gt=0)
+    term_order: int = Field(ge=1, le=3)
+    comment: str = Field(max_length=2000)
 
 
 class InterventionPayload(BaseModel):

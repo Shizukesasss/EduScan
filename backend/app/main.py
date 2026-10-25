@@ -31,7 +31,8 @@ from .models import (
     AttendanceCorrection, AttendanceEvent, AttendanceResetAudit, BiometricAuditEvent, BiometricModel, BiometricSample, CalendarException,
     BackupRun, ClassSchedule, ExcusedAbsence, GeneratedReport, GradeChangeAudit, GradeComponent, GradebookState,
     GradeLevel, GradeScore, GradingPeriod, Intervention, LegalHold, Person, PersonnelSchedule, RecognitionReview,
-    RecordDisposalAudit, RetentionExecution, RosterImportAudit, SchoolSection, SchoolYear, SmsOutbox,
+    RecordDisposalAudit, RetentionExecution, RosterImportAudit, LearnerEnrollment, AnnexGTermComment,
+    SchoolSection, SchoolYear, SmsOutbox,
     Subject, SubjectTeachingAssignment, SystemAuditEvent, User,
 )
 from .schemas import (
@@ -43,7 +44,7 @@ from .schemas import (
     InterventionPayload, LoginRequest, LoginResponse, PasswordChangePayload, PersonCreate, PersonnelSchedulePayload, RecognitionResult,
     RecordDisposalPayload, SchedulePayload, SchoolYearPayload, SectionPayload, SmsSettingsPayload, SubjectPayload,
     SubjectTeachingAssignmentPayload,
-    UserCreate, UserUpdate, SchoolHeadPayload,
+    UserCreate, UserUpdate, SchoolHeadPayload, AnnexGCommentPayload,
 )
 from .services.attendance import attendance_event_query, close_day, latest_day_reset, list_rows, record_gate_match, reset_day, save_correction
 from .services.audit import add_audit, model_snapshot
@@ -56,9 +57,12 @@ from .services.gate_exports import update_gate_export
 from .services.gate_defaults import configure_fast_gate
 from .services.disposal import dispose_person_records
 from .services.roster import import_roster
+from .services.annex_g import (import_annex_g_enrollments, backfill_annex_g_dobs,
+                               build_annex_g_section, render_annex_g_html)
 from .services.scheduler import attendance_scheduler
 from .services import grading as grading_service
 from .services.grading import gradebook_summary
+from .services.grading_engine import reporting_method_for_school_year
 from .services.academic_context import elective_track_for_subject, is_junior_high, is_senior_high
 from .models_grading import (
     AssessmentItem, GradeAdjustmentRequest, GradeCriteriaAdjustmentRequest, Gradebook, GradebookAuditEntry,
@@ -70,9 +74,10 @@ from .schemas_grading import (
     GradingPolicyCreate, GradingPolicyUpdate,
 )
 from .services.reports import (
-    attendance_report_html, generate_attendance_range_xlsx, generate_grade_report_xlsx,
+    REPORT_DIR, attendance_report_html, generate_attendance_range_xlsx, generate_grade_report_xlsx,
     grade_report_html, register_report, generate_gradebook_report_xlsx, gradebook_report_html, official_sf2_preview
 )
+from .services.export_files import new_report_path
 from .services.retention import execute_retention, public_preview, retention_policy, retention_preview
 from .services.settings_store import get_json, get_secret, set_json, set_secret
 from .services.sf2 import sf2_pending_attendance, sf2_students, generate_sf2, generate_temporary_log, save_template, template_path
@@ -121,13 +126,13 @@ def seed_reference_data(db: Session) -> None:
                                  ends_on=date(start_year + 1, 3, 31), active=True)
         db.add(school_year)
         db.flush()
-        quarter_starts = (date(start_year, 6, 1), date(start_year, 8, 16), date(
+        term_starts = (date(start_year, 6, 1), date(start_year, 8, 16), date(
             start_year, 10, 16), date(start_year + 1, 1, 2))
-        quarter_ends = (date(start_year, 8, 15), date(start_year, 10, 15), date(
+        term_ends = (date(start_year, 8, 15), date(start_year, 10, 15), date(
             start_year, 12, 20), date(start_year + 1, 3, 31))
-        for quarter in range(1, 5):
-            db.add(GradingPeriod(school_year_id=school_year.id, name=f"Quarter {quarter}", quarter=quarter,
-                                 starts_on=quarter_starts[quarter - 1], ends_on=quarter_ends[quarter - 1], active=True))
+        for term_order in range(1, 5):
+            db.add(GradingPeriod(school_year_id=school_year.id, name=f"Term {term_order}", term_order=term_order,
+                                 starts_on=term_starts[term_order - 1], ends_on=term_ends[term_order - 1], active=True))
     grade = db.scalar(select(GradeLevel).where(GradeLevel.name == "10"))
     if not grade:
         grade = GradeLevel(name="10", active=True)
@@ -140,7 +145,8 @@ def seed_reference_data(db: Session) -> None:
     db.commit()
 
 
-def person_json(person: Person, db: Session, include_private: bool = True) -> dict:
+def person_json(person: Person, db: Session, include_private: bool = True,
+                include_sensitive: bool = False) -> dict:
     count = db.scalar(select(func.count(BiometricSample.id)).where(
         BiometricSample.person_id == person.id)) or 0
     return {
@@ -153,6 +159,7 @@ def person_json(person: Person, db: Session, include_private: bool = True) -> di
         "enrollment_end_date": person.enrollment_end_date, "transfer_school": person.transfer_school,
         "biometric_consent": person.biometric_consent, "active": person.active,
         "sample_count": count, "enrolled": count >= settings.min_samples,
+        **({"date_of_birth": person.date_of_birth} if include_sensitive else {}),
     }
 
 
@@ -534,6 +541,8 @@ def _new_person_record(payload: PersonCreate, db: Session, actor: User) -> Perso
     if payload.role == "Student" and (not payload.grade or not payload.section):
         raise HTTPException(
             status_code=422, detail="Student grade and section are required")
+    if payload.role == "Student" and payload.date_of_birth is None:
+        raise HTTPException(status_code=422, detail="Student date of birth is required")
     if payload.role == "Student" and not db.scalar(select(SchoolSection.id).join(GradeLevel).where(
         GradeLevel.name == payload.grade,
         GradeLevel.deleted_at.is_(None),
@@ -564,7 +573,7 @@ def create_person(payload: PersonCreate, db: Session = Depends(get_db), actor: U
     person = _new_person_record(payload, db, actor)
     db.commit()
     db.refresh(person)
-    return person_json(person, db)
+    return person_json(person, db, include_sensitive=True)
 
 
 @app.patch("/api/persons/{person_id}")
@@ -573,6 +582,8 @@ def update_person(person_id: int, payload: PersonCreate, db: Session = Depends(g
     person = db.get(Person, person_id)
     if not person:
         raise HTTPException(status_code=404, detail="Person was not found")
+    if payload.role == "Student" and person.role != "Student" and payload.date_of_birth is None:
+        raise HTTPException(status_code=422, detail="Student date of birth is required")
     duplicate_id = db.scalar(select(Person).where(
         Person.external_id == payload.external_id, Person.id != person_id))
     duplicate_lrn = db.scalar(select(Person).where(
@@ -599,7 +610,7 @@ def update_person(person_id: int, payload: PersonCreate, db: Session = Depends(g
     add_audit(db, actor, "Update", "Person", person.id,
               f"School record updated for {person.full_name}", before, model_snapshot(person))
     db.commit()
-    return person_json(person, db)
+    return person_json(person, db, include_sensitive=True)
 
 
 @app.get("/api/admin/persons")
@@ -613,7 +624,7 @@ def admin_persons(db: Session = Depends(get_db), _: User = Depends(require_roles
             name_counts[key] = name_counts.get(key, 0) + 1
     result = []
     for person in people:
-        item = person_json(person, db)
+        item = person_json(person, db, include_sensitive=True)
         key = re.sub(r"[^a-z0-9]", "", person.full_name.casefold())
         item["possible_duplicate"] = person.active and person.role == "Student" and name_counts.get(
             key, 0) > 1
@@ -659,7 +670,7 @@ def set_person_active(person_id: int, active: bool = Form(...), db: Session = De
     add_audit(db, actor, "Activate" if active else "Deactivate", "Person", person.id,
               f"School record {'activated' if active else 'deactivated'} for {person.full_name}", before, model_snapshot(person))
     db.commit()
-    return person_json(person, db)
+    return person_json(person, db, include_sensitive=True)
 
 
 @app.delete("/api/admin/persons/{person_id}/records")
@@ -700,7 +711,197 @@ def roster_imports(db: Session = Depends(get_db), _: User = Depends(require_role
     return [{"id": item.id, "filename": item.filename, "file_sha256": item.file_sha256,
              "approved_reference": item.approved_reference, "inserted_count": item.inserted_count,
              "updated_count": item.updated_count, "skipped_count": item.skipped_count,
+             "import_mode": item.import_mode,
              "actor_name": item.actor_name, "created_at": item.created_at} for item in items]
+
+
+@app.post("/api/admin/annex-g/enrollments/import")
+async def annex_g_enrollment_import(file: UploadFile = File(...), approved_reference: str = Form(...),
+                                    dry_run: bool = Form(True), db: Session = Depends(get_db),
+                                    user: User = Depends(require_roles("admin"))) -> dict:
+    filename = file.filename or "enrollments.xlsx"
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=422, detail="Upload an approved .xlsx enrollment roster")
+    return import_annex_g_enrollments(db, await file.read(), filename, approved_reference, user, dry_run)
+
+
+@app.post("/api/admin/annex-g/dobs/import")
+async def annex_g_dob_import(file: UploadFile = File(...), approved_reference: str = Form(...),
+                             dry_run: bool = Form(True), db: Session = Depends(get_db),
+                             user: User = Depends(require_roles("admin"))) -> dict:
+    filename = file.filename or "learner-dates-of-birth.xlsx"
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=422, detail="Upload an approved .xlsx DOB source")
+    return backfill_annex_g_dobs(db, await file.read(), filename, approved_reference, user, dry_run)
+
+
+def _annex_g_enrollment(db: Session, enrollment_id: int) -> LearnerEnrollment:
+    enrollment = db.get(LearnerEnrollment, enrollment_id)
+    if not enrollment or enrollment.person.role != "Student":
+        raise HTTPException(status_code=404, detail="Verified learner placement was not found")
+    return enrollment
+
+
+def _annex_g_access(db: Session, user: User, enrollment: LearnerEnrollment) -> None:
+    if user.role in {"admin", "records_officer"}:
+        return
+    adviser = adviser_for_section(db, enrollment.school_year_id, enrollment.section_id)
+    if user.role != "teacher" or not adviser or adviser.id != user.id:
+        raise HTTPException(status_code=403, detail="This school-year section is not assigned to you as adviser")
+
+
+@app.get("/api/annex-g/options")
+def annex_g_options(db: Session = Depends(get_db),
+                    user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> dict:
+    if user.role == "teacher":
+        contexts = {}
+        assignments = db.scalars(select(SectionAdviserAssignment).join(
+            SchoolYear, SchoolYear.id == SectionAdviserAssignment.school_year_id,
+        ).where(SectionAdviserAssignment.teacher_user_id == user.id, SchoolYear.deleted_at.is_(None))).all()
+        for assignment in assignments:
+            section = db.get(SchoolSection, assignment.section_id)
+            if not section or section.grade_level.name not in {"7", "8", "9", "10"}:
+                continue
+            contexts.setdefault(assignment.school_year_id, {"id": assignment.school_year_id,
+                "name": db.get(SchoolYear, assignment.school_year_id).name, "sections": {}})["sections"][section.id] = {
+                    "id": section.id, "grade": section.grade_level.name, "section": section.name}
+    else:
+        contexts = {}
+        years = db.scalars(select(SchoolYear).where(SchoolYear.deleted_at.is_(None))).all()
+        sections = db.scalars(select(SchoolSection).join(GradeLevel).where(
+            GradeLevel.name.in_(["7", "8", "9", "10"]), GradeLevel.deleted_at.is_(None),
+            SchoolSection.deleted_at.is_(None))).all()
+        for year in years:
+            contexts[year.id] = {"id": year.id, "name": year.name,
+                "sections": {item.id: {"id": item.id, "grade": item.grade_level.name,
+                                       "section": item.name} for item in sections}}
+    for item in contexts.values():
+        item["sections"] = sorted(item["sections"].values(), key=lambda row: (int(row["grade"]), row["section"]))
+        item["terms"] = db.scalars(select(GradingPeriod.term_order).where(
+            GradingPeriod.school_year_id == item["id"], GradingPeriod.deleted_at.is_(None),
+            GradingPeriod.term_order.in_([1, 2, 3])).order_by(GradingPeriod.term_order)).all()
+    return {"school_years": sorted(contexts.values(), key=lambda row: row["name"], reverse=True),
+            "can_import": user.role == "admin", "can_release": user.role == "records_officer"}
+
+
+@app.get("/api/annex-g/section")
+def annex_g_section(school_year_id: int = Query(gt=0), grade: str = Query(), section: str = Query(),
+                    term_order: int = Query(ge=1, le=3), db: Session = Depends(get_db),
+                    user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> dict:
+    year = db.get(SchoolYear, school_year_id)
+    grade_name = grading_service.normalize_grade_name(grade)
+    grade_record = db.scalar(select(GradeLevel).where(GradeLevel.name == grade_name))
+    section_record = db.scalar(select(SchoolSection).where(SchoolSection.grade_level_id == (grade_record.id if grade_record else -1),
+        SchoolSection.name == section))
+    if not year or not grade_record or not section_record:
+        raise HTTPException(status_code=404, detail="School-year section was not found")
+    if user.role == "teacher":
+        adviser = adviser_for_section(db, year.id, section_record.id)
+        if not adviser or adviser.id != user.id:
+            raise HTTPException(status_code=403, detail="This school-year section is not assigned to you as adviser")
+    report = build_annex_g_section(db, year.id, grade_name, section_record.name, term_order)
+    adviser = adviser_for_section(db, year.id, section_record.id)
+    released = []
+    for item in db.scalars(select(GeneratedReport).where(GeneratedReport.report_type == "Annex G")
+                           .order_by(GeneratedReport.created_at.desc()).limit(500)).all():
+        params = json.loads(item.parameters_json)
+        if params.get("school_year_id") == year.id and params.get("section_id") == section_record.id and params.get("term_order") == term_order:
+            released.append(report_json(item))
+    return {**report, "adviser_name": adviser.full_name if adviser else "",
+            "released_reports": released}
+
+
+@app.put("/api/annex-g/comments")
+def save_annex_g_comment(payload: AnnexGCommentPayload, db: Session = Depends(get_db),
+                         user: User = Depends(require_roles("teacher"))) -> dict:
+    enrollment = _annex_g_enrollment(db, payload.enrollment_id)
+    _annex_g_access(db, user, enrollment)
+    if not db.scalar(select(GradingPeriod.id).where(GradingPeriod.school_year_id == enrollment.school_year_id,
+            GradingPeriod.term_order == payload.term_order, GradingPeriod.deleted_at.is_(None))):
+        raise HTTPException(status_code=409, detail="That term is not configured for this school year")
+    comment = db.scalar(select(AnnexGTermComment).where(
+        AnnexGTermComment.enrollment_id == enrollment.id,
+        AnnexGTermComment.term_order == payload.term_order))
+    if comment:
+        comment.comment = payload.comment.strip()
+        comment.saved_by = user.id
+        comment.saved_by_name = user.full_name
+    else:
+        comment = AnnexGTermComment(enrollment_id=enrollment.id, term_order=payload.term_order,
+            comment=payload.comment.strip(), saved_by=user.id, saved_by_name=user.full_name)
+        db.add(comment)
+    db.commit()
+    return {"enrollment_id": enrollment.id, "term_order": comment.term_order,
+            "comment": comment.comment, "saved_by_name": comment.saved_by_name,
+            "updated_at": comment.updated_at}
+
+
+@app.get("/api/annex-g/preview/{enrollment_id}", response_class=HTMLResponse)
+def annex_g_preview(enrollment_id: int, term_order: int = Query(ge=1, le=3),
+                    db: Session = Depends(get_db),
+                    user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> HTMLResponse:
+    enrollment = _annex_g_enrollment(db, enrollment_id)
+    _annex_g_access(db, user, enrollment)
+    report = build_annex_g_section(db, enrollment.school_year_id, enrollment.grade_level.name,
+                                   enrollment.section.name, term_order)
+    return HTMLResponse(render_annex_g_html(report, enrollment.id))
+
+
+@app.post("/api/annex-g/release/{enrollment_id}")
+def release_annex_g(enrollment_id: int, term_order: int = Query(ge=1, le=3),
+                    db: Session = Depends(get_db),
+                    user: User = Depends(require_roles("records_officer"))) -> dict:
+    enrollment = _annex_g_enrollment(db, enrollment_id)
+    report = build_annex_g_section(db, enrollment.school_year_id, enrollment.grade_level.name,
+                                   enrollment.section.name, term_order)
+    learner = next((row for row in report["learners"] if row["enrollment_id"] == enrollment.id), None)
+    if not learner:
+        raise HTTPException(status_code=409, detail="The learner is outside the selected report roster")
+    blockers = list(dict.fromkeys(report["blockers"] + learner["blockers"]))
+    if blockers:
+        raise HTTPException(status_code=409, detail={"message": "Resolve these Annex G items before release.",
+                                                     "blockers": blockers})
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{report['school_year']}-Grade{report['grade']}-{report['section']}-Term{term_order}-{enrollment.person.external_id}").strip("-._")
+    source = new_report_path(REPORT_DIR.parent, f"Annex-G-{stem}.html")
+    source.write_text(render_annex_g_html(report, enrollment.id), encoding="utf-8")
+    try:
+        parameters = {"school_year_id": enrollment.school_year_id, "grade": report["grade"],
+                      "section": report["section"], "section_id": enrollment.section_id,
+                      "term_order": term_order, "enrollment_id": enrollment.id}
+        for previous in db.scalars(select(GeneratedReport).where(GeneratedReport.report_type == "Annex G",
+                GeneratedReport.status == "Released").order_by(GeneratedReport.created_at.desc())).all():
+            old = json.loads(previous.parameters_json)
+            if old.get("enrollment_id") == enrollment.id and old.get("term_order") == term_order:
+                previous.status = "Superseded"
+        registered = register_report(db, source, "Annex G", parameters, user)
+        registered.status = "Released"
+        registered.reviewed_by = user.id
+        registered.reviewed_by_name = user.full_name
+        registered.review_note = "Released by Records Officer"
+        registered.reviewed_at = datetime.utcnow()
+        add_audit(db, user, "Release", "GeneratedReport", registered.id,
+                  f"Annex G released for Grade {report['grade']} {report['section']}, Term {term_order}",
+                  after={"parameters": parameters, "sha256": registered.file_sha256})
+        db.commit()
+        return report_json(registered)
+    finally:
+        source.unlink(missing_ok=True)
+        source.parent.rmdir()
+
+
+@app.get("/api/annex-g/releases/{report_id}", response_class=HTMLResponse)
+def annex_g_released_file(report_id: str, db: Session = Depends(get_db),
+                          user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> HTMLResponse:
+    item = db.get(GeneratedReport, report_id)
+    if not item or item.report_type != "Annex G" or item.status not in {"Released", "Superseded"}:
+        raise HTTPException(status_code=404, detail="Released Annex G report was not found")
+    parameters = json.loads(item.parameters_json)
+    enrollment = _annex_g_enrollment(db, int(parameters["enrollment_id"]))
+    _annex_g_access(db, user, enrollment)
+    path = Path(item.file_path)
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != item.file_sha256:
+        raise HTTPException(status_code=409, detail="Released report integrity check failed")
+    return HTMLResponse(path.read_text(encoding="utf-8"))
 
 
 @app.get("/api/admin/backups")
@@ -1545,7 +1746,7 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
         SchoolYear.starts_on.desc())).all()
     periods = db.scalars(select(GradingPeriod).join(SchoolYear).where(
         GradingPeriod.deleted_at.is_(None), SchoolYear.deleted_at.is_(None)).order_by(
-        GradingPeriod.school_year_id.desc(), GradingPeriod.quarter)).all()
+        GradingPeriod.school_year_id.desc(), GradingPeriod.term_order)).all()
     grades = db.scalars(select(GradeLevel).where(GradeLevel.deleted_at.is_(None)).order_by(
         GradeLevel.name)).all()
     sections = db.scalars(select(SchoolSection).join(GradeLevel).where(
@@ -1574,7 +1775,7 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
     return {
         "school_years": [{"id": item.id, "name": item.name, "starts_on": item.starts_on, "ends_on": item.ends_on, "active": item.active} for item in years],
         "grading_periods": [{"id": item.id, "school_year_id": item.school_year_id, "school_year": item.school_year.name,
-                             "name": item.name, "quarter": item.quarter, "starts_on": item.starts_on,
+                             "name": item.name, "term_order": item.term_order, "starts_on": item.starts_on,
                              "ends_on": item.ends_on, "active": item.active} for item in periods],
         "grade_levels": [{"id": item.id, "name": item.name, "active": item.active} for item in grades],
         "sections": [{"id": item.id, "grade_level_id": item.grade_level_id, "grade": item.grade_level.name,
@@ -1606,12 +1807,19 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
     }
 
 
-def _matching_deleted_reference(db: Session, model, payload):
+def _term_order_from_name(name: str) -> int:
+    orders = set(re.findall(r"\bterm\s*([1-4])\b", name, re.IGNORECASE))
+    if len(orders) != 1:
+        raise HTTPException(422, "Name the grading period with its term number, for example TERM 1.")
+    return int(orders.pop())
+
+
+def _matching_deleted_reference(db: Session, model, payload, term_order: int | None = None):
     """Reuse a soft-deleted row when its unique academic key is entered again."""
     if model is SchoolYear or model is GradeLevel:
         condition = model.name == payload.name
     elif model is GradingPeriod:
-        condition = (model.school_year_id == payload.school_year_id) & (model.quarter == payload.quarter)
+        condition = (model.school_year_id == payload.school_year_id) & (model.term_order == term_order)
     elif model is SchoolSection:
         condition = (model.grade_level_id == payload.grade_level_id) & (model.name == payload.name)
     elif model is Subject:
@@ -1627,21 +1835,22 @@ def _matching_deleted_reference(db: Session, model, payload):
     return matches[0] if matches else None
 
 
-def _save_reference(db: Session, model, payload, actor: User, exclude: set[str] = {"id"}, commit: bool = True) -> dict:
+def _save_reference(db: Session, model, payload, actor: User, exclude: set[str] = {"id"}, commit: bool = True,
+                    extra_values: dict | None = None) -> dict:
     item = db.get(model, payload.id) if payload.id else model()
     restoring = False
     if payload.id and not item:
         raise HTTPException(
             status_code=404, detail="Reference record was not found")
     if not payload.id:
-        item = _matching_deleted_reference(db, model, payload) or item
+        item = _matching_deleted_reference(db, model, payload, (extra_values or {}).get("term_order")) or item
         restoring = getattr(item, "deleted_at", None) is not None
     if getattr(item, "deleted_at", None) is not None and not restoring:
         raise HTTPException(status_code=409, detail="Restore this deleted item before editing it")
     before = model_snapshot(item) if payload.id or restoring else {}
     if restoring:
         item.deleted_at = None
-    for key, value in payload.model_dump(exclude=exclude).items():
+    for key, value in {**payload.model_dump(exclude=exclude), **(extra_values or {})}.items():
         setattr(item, key, value)
     try:
         db.add(item)
@@ -1674,7 +1883,11 @@ def save_grading_period(payload: GradingPeriodPayload, db: Session = Depends(get
     if payload.ends_on <= payload.starts_on or not parent_year or parent_year.deleted_at is not None:
         raise HTTPException(
             status_code=422, detail="Grading-period dates or school year are invalid")
-    return _save_reference(db, GradingPeriod, payload, actor)
+    existing = db.get(GradingPeriod, payload.id) if payload.id else None
+    if payload.id and not existing:
+        raise HTTPException(404, "Reference record was not found")
+    term_order = existing.term_order if existing else _term_order_from_name(payload.name)
+    return _save_reference(db, GradingPeriod, payload, actor, extra_values={"term_order": term_order})
 
 
 @app.post("/api/admin/grade-levels")
@@ -2043,7 +2256,7 @@ def release_legal_hold(hold_id: str, payload: LegalHoldReleasePayload, db: Sessi
 @app.get("/api/audit")
 def system_audit(entity_type: str | None = None, action: str | None = None,
                  limit: int = Query(default=500, ge=1, le=2000), db: Session = Depends(get_db),
-                 _: User = Depends(require_roles("admin", "records_officer", "privacy_officer"))) -> list[dict]:
+                 user: User = Depends(require_roles("admin", "records_officer", "privacy_officer"))) -> list[dict]:
     query = select(SystemAuditEvent)
     if entity_type:
         query = query.where(SystemAuditEvent.entity_type == entity_type)
@@ -2051,11 +2264,19 @@ def system_audit(entity_type: str | None = None, action: str | None = None,
         query = query.where(SystemAuditEvent.action == action)
     items = db.scalars(query.order_by(
         SystemAuditEvent.created_at.desc()).limit(limit)).all()
-    return [{"id": item.id, "action": item.action, "entity_type": item.entity_type,
-             "entity_id": item.entity_id, "summary": item.summary,
-             "before": json.loads(item.before_json), "after": json.loads(item.after_json),
-             "actor_name": item.actor_name, "actor_role": item.actor_role,
-             "created_at": item.created_at} for item in items]
+    result = []
+    for item in items:
+        before, after = json.loads(item.before_json), json.loads(item.after_json)
+        if user.role != "admin":
+            for snapshot in (before, after):
+                if isinstance(snapshot, dict):
+                    snapshot.pop("date_of_birth", None)
+        result.append({"id": item.id, "action": item.action, "entity_type": item.entity_type,
+                       "entity_id": item.entity_id, "summary": item.summary,
+                       "before": before, "after": after,
+                       "actor_name": item.actor_name, "actor_role": item.actor_role,
+                       "created_at": item.created_at})
+    return result
 
 
 @app.get("/api/sms/outbox")
@@ -2330,13 +2551,13 @@ def gradebook_data(class_key: str, db: Session) -> dict:
         grouped_statuses.setdefault(str(score.person_id), {})[
             str(score.component_id)] = score.status
     rules = get_json(db, f"gradebook:{class_key}:rules", {"passing_grade": 75, "school_year": "2026-2027",
-                                                          "quarter": 1, "subject": "Unspecified"})
+                                                          "term_order": 1, "subject": "Unspecified"})
     state = db.get(GradebookState, class_key)
     return {
         "class_key": class_key,
         "passing_grade": state.passing_grade if state else rules.get("passing_grade", 75),
         "school_year": state.school_year if state else rules.get("school_year", "2026-2027"),
-        "quarter": state.quarter if state else rules.get("quarter", 1),
+        "term_order": state.term_order if state else rules.get("term_order", rules.get("quarter", 1)),
         "subject": state.subject if state else rules.get("subject", "Unspecified"),
         "grade": state.grade if state else rules.get("grade", ""),
         "section": state.section if state else rules.get("section", ""),
@@ -2376,7 +2597,7 @@ def save_gradebook(class_key: str, payload: GradebookPayload, db: Session = Depe
     year = db.scalar(select(SchoolYear).where(
         SchoolYear.name == payload.school_year, SchoolYear.active.is_(True), SchoolYear.deleted_at.is_(None)))
     if not year or not db.scalar(select(GradingPeriod.id).where(
-        GradingPeriod.school_year_id == year.id, GradingPeriod.quarter == payload.quarter,
+        GradingPeriod.school_year_id == year.id, GradingPeriod.term_order == payload.term_order,
         GradingPeriod.active.is_(True), GradingPeriod.deleted_at.is_(None),
     )):
         raise HTTPException(
@@ -2460,11 +2681,11 @@ def save_gradebook(class_key: str, payload: GradebookPayload, db: Session = Depe
                               status="Scored", updated_by=user.id))
     db.flush()
     set_json(db, f"gradebook:{class_key}:rules", {"passing_grade": payload.passing_grade,
-             "school_year": payload.school_year, "quarter": payload.quarter, "subject": payload.subject,
+             "school_year": payload.school_year, "term_order": payload.term_order, "subject": payload.subject,
                                                   "grade": payload.grade, "section": payload.section}, commit=False)
     state = existing_state or GradebookState(class_key=class_key)
     state.school_year = payload.school_year
-    state.quarter = payload.quarter
+    state.term_order = payload.term_order
     state.subject = payload.subject
     state.grade = payload.grade
     state.section = payload.section
@@ -2473,7 +2694,7 @@ def save_gradebook(class_key: str, payload: GradebookPayload, db: Session = Depe
     db.add(state)
     after = gradebook_data(class_key, db)
     db.add(GradeChangeAudit(id=str(uuid.uuid4()), class_key=class_key, school_year=payload.school_year,
-                            quarter=payload.quarter, subject=payload.subject, reason=payload.change_reason.strip(),
+                            term_order=payload.term_order, subject=payload.subject, reason=payload.change_reason.strip(),
                             actor_user_id=user.id, actor_name=user.full_name, actor_role=user.role,
                             before_json=json.dumps(before, default=str), after_json=json.dumps(after, default=str)))
     db.commit()
@@ -2544,7 +2765,7 @@ def gradebook_report_xlsx(class_key: str, grade: str = "", section: str = "", db
     ensure_legacy_gradebook_access(db, user, class_key)
     path = generate_grade_report_xlsx(db, class_key)
     report = register_report(db, path, "Grading Summary", {"class_key": class_key, "grade": state.grade, "section": state.section,
-                                                           "school_year": state.school_year, "quarter": state.quarter,
+                                                           "school_year": state.school_year, "term_order": state.term_order,
                                                            "subject": state.subject}, user)
     return FileResponse(report.file_path, filename=report.filename,
                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -2566,7 +2787,7 @@ def gradebook_audit(class_key: str, grade: str = "", section: str = "", db: Sess
     ensure_legacy_gradebook_access(db, user, class_key, grade, section)
     items = db.scalars(select(GradeChangeAudit).where(GradeChangeAudit.class_key == class_key)
                        .order_by(GradeChangeAudit.created_at.desc()).limit(200)).all()
-    return [{"id": item.id, "school_year": item.school_year, "quarter": item.quarter,
+    return [{"id": item.id, "school_year": item.school_year, "term_order": item.term_order,
              "subject": item.subject, "reason": item.reason, "actor_name": item.actor_name,
              "actor_role": item.actor_role, "before": json.loads(item.before_json),
              "after": json.loads(item.after_json), "created_at": item.created_at} for item in items]
@@ -2606,6 +2827,7 @@ def list_grading_policies(
             "school_year": p.school_year,
             "grade_levels": p.grade_levels,
             "subject_category": p.subject_category,
+            "reporting_method": p.reporting_method,
             "component_definitions": json.loads(p.component_definitions_json or "[]"),
             "transmutation_table": json.loads(p.transmutation_table_json) if p.transmutation_table_json else None,
             "rounding_decimal_places": p.rounding_decimal_places,
@@ -2627,6 +2849,14 @@ def create_grading_policy(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("teacher")),
 ):
+    reporting_method = reporting_method_for_school_year(payload.school_year)
+    transmutation_table = payload.transmutation_table
+    if reporting_method == "direct":
+        transmutation_table = None
+    elif reporting_method == "adjusted_2026" and not transmutation_table:
+        from .services.class_record_export import template_table
+        from .services.reports import TEMPLATES_DIR
+        transmutation_table = template_table(TEMPLATES_DIR / "SUBJECT CLASS RECORDS" / "ENGLISH - Grade 7-10 Class Record.xlsx")
     p = GradingPolicy(
         name=payload.name.strip(),
         description=payload.description.strip(),
@@ -2635,11 +2865,11 @@ def create_grading_policy(
         subject_category=payload.subject_category.strip(),
         component_definitions_json=json.dumps(
             [c.model_dump() for c in payload.component_definitions]),
-        transmutation_table_json=json.dumps(
-            payload.transmutation_table) if payload.transmutation_table else None,
+        transmutation_table_json=json.dumps(transmutation_table) if transmutation_table else None,
+        reporting_method=reporting_method,
         rounding_decimal_places=payload.rounding_decimal_places,
-        rounding_final_decimal_places=payload.rounding_final_decimal_places,
-        rounding_method=payload.rounding_method,
+        rounding_final_decimal_places=0 if reporting_method == "direct" else payload.rounding_final_decimal_places,
+        rounding_method="half_up" if reporting_method == "direct" else payload.rounding_method,
         passing_grade=payload.passing_grade,
         status="Active",
         created_by=user.id,
@@ -2653,6 +2883,7 @@ def create_grading_policy(
         "name": p.name,
         "version": p.version,
         "status": p.status,
+        "reporting_method": p.reporting_method,
     }
 
 
@@ -2673,6 +2904,7 @@ def get_grading_policy(
         "school_year": p.school_year,
         "grade_levels": p.grade_levels,
         "subject_category": p.subject_category,
+        "reporting_method": p.reporting_method,
         "component_definitions": json.loads(p.component_definitions_json or "[]"),
         "transmutation_table": json.loads(p.transmutation_table_json) if p.transmutation_table_json else None,
         "rounding_decimal_places": p.rounding_decimal_places,
@@ -2711,11 +2943,18 @@ def update_grading_policy(
     p.subject_category = payload.subject_category.strip()
     p.component_definitions_json = json.dumps(
         [c.model_dump() for c in payload.component_definitions])
-    p.transmutation_table_json = json.dumps(
-        payload.transmutation_table) if payload.transmutation_table else None
+    p.reporting_method = reporting_method_for_school_year(payload.school_year)
+    transmutation_table = payload.transmutation_table
+    if p.reporting_method == "direct":
+        transmutation_table = None
+    elif p.reporting_method == "adjusted_2026" and not transmutation_table:
+        from .services.class_record_export import template_table
+        from .services.reports import TEMPLATES_DIR
+        transmutation_table = template_table(TEMPLATES_DIR / "SUBJECT CLASS RECORDS" / "ENGLISH - Grade 7-10 Class Record.xlsx")
+    p.transmutation_table_json = json.dumps(transmutation_table) if transmutation_table else None
     p.rounding_decimal_places = payload.rounding_decimal_places
-    p.rounding_final_decimal_places = payload.rounding_final_decimal_places
-    p.rounding_method = payload.rounding_method
+    p.rounding_final_decimal_places = 0 if p.reporting_method == "direct" else payload.rounding_final_decimal_places
+    p.rounding_method = "half_up" if p.reporting_method == "direct" else payload.rounding_method
     p.passing_grade = payload.passing_grade
     p.status = payload.status
     db.commit()
@@ -2725,7 +2964,7 @@ def update_grading_policy(
 @app.get("/api/gradebooks")
 def list_gradebooks(
     school_year: str = "",
-    quarter: int | None = None,
+    term_order: int | None = None,
     grade: str = "",
     section: str = "",
     subject: str = "",
@@ -2763,8 +3002,8 @@ def list_gradebooks(
         )
     if school_year:
         query = query.where(Gradebook.school_year_name == school_year)
-    if quarter:
-        query = query.where(Gradebook.quarter == quarter)
+    if term_order:
+        query = query.where(Gradebook.term_order == term_order)
     if grade:
         query = query.where(Gradebook.grade_name == grade)
     if section:
@@ -2789,7 +3028,7 @@ def list_gradebooks(
             "section_id": b.section_id,
             "subject_id": b.subject_id,
             "school_year_name": b.school_year_name,
-            "quarter": b.quarter,
+            "term_order": b.term_order,
             "grade_name": b.grade_name,
             "section_name": b.section_name,
             "subject_name": b.subject_name,
@@ -3385,7 +3624,7 @@ def gradebook_report_xlsx_new(
         ensure_gradebook_access(db, user, book)
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
-    if through_term and book.quarter != 2:
+    if through_term and book.term_order != 2:
         raise HTTPException(422, 'Select Term 2 to export Terms 1–2 together.')
     if book.status not in {"Finalized", "Locked"}:
         raise HTTPException(status_code=409, detail="Finalize the complete class record before exporting XLSX")
@@ -3396,7 +3635,7 @@ def gradebook_report_xlsx_new(
                                         allowed_teacher_id=user.id if user.role == 'teacher' else None, all_terms=all_terms, through_term=through_term)
     report = register_report(db, path, "Grading Summary", {
         "gradebook_id": book.id, "grade": book.grade_name, "section": book.section_name,
-        "school_year": book.school_year_name, "quarter": book.quarter, "subject": book.subject_name,
+        "school_year": book.school_year_name, "term_order": book.term_order, "subject": book.subject_name,
         "all_terms": all_terms,
         "through_term": through_term,
     }, user)

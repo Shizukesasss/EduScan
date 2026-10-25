@@ -21,7 +21,9 @@ export default function GradingSheet({
   passingGrade,
   transmutationTable,
   roundingDecimalPlaces = 2,
+  roundingFinalDecimalPlaces = 0,
   roundingMethod = 'half_up',
+  reportingMethod = 'legacy',
   disabled,
   loading = false,
   emptyMessage,
@@ -107,12 +109,14 @@ export default function GradingSheet({
         transmutationTable,
         passingGrade,
         roundingDecimalPlaces,
+        roundingFinalDecimalPlaces,
         roundingMethod,
+        reportingMethod,
       });
 
       return { ...student, liveScores, liveStatuses, componentCalcs, calc };
     });
-  }, [liveGradebook, components, transmutationTable, passingGrade, roundingDecimalPlaces, roundingMethod]);
+  }, [liveGradebook, components, transmutationTable, passingGrade, roundingDecimalPlaces, roundingFinalDecimalPlaces, roundingMethod, reportingMethod]);
 
   // Filter + sort
   const displayedStudents = useMemo(() => {
@@ -202,8 +206,8 @@ export default function GradingSheet({
   };
 
   // Derived header values
-  const quarterLabel = gradebook?.grading_period_name || (gradebook?.quarter
-    ? gradingPeriodLabel(gradebook.quarter)
+  const termLabel = gradebook?.grading_period_name || (gradebook?.term_order
+    ? gradingPeriodLabel(gradebook.term_order)
     : 'TERM');
   const statusCfg = STATUS_CONFIG[gradebook?.status] || STATUS_CONFIG.Draft;
 
@@ -259,7 +263,7 @@ export default function GradingSheet({
         <table className="deped-meta-table">
           <tbody>
             <tr>
-              <th className="deped-meta-quarter">{selectors.quarter || quarterLabel}</th>
+              <th className="deped-meta-quarter">{selectors.termOrder || termLabel}</th>
               <th>GRADE &amp; SECTION:</th>
               <td>
                 <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>

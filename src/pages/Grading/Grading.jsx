@@ -33,7 +33,7 @@ export default function Grading() {
 
   // Selector state
   const [schoolYearId, setSchoolYearId] = useState('');
-  const [quarter, setQuarter] = useState(1);
+  const [termOrder, setTermOrder] = useState(1);
   const [gradeId, setGradeId] = useState('');
   const [sectionId, setSectionId] = useState('');
   const [subjectId, setSubjectId] = useState('');
@@ -219,7 +219,7 @@ export default function Grading() {
 
   const availablePeriods = useMemo(() => (structure.grading_periods || [])
     .filter(period => period.school_year_id === Number(schoolYearId))
-    .sort((a, b) => a.quarter - b.quarter), [structure.grading_periods, schoolYearId]);
+    .sort((a, b) => a.term_order - b.term_order), [structure.grading_periods, schoolYearId]);
 
   const sortedGradeLevels = useMemo(() => {
     return [...(structure.grade_levels || [])].sort((a, b) => {
@@ -277,10 +277,10 @@ export default function Grading() {
   // Match the selected academic period for the current school year.
   const gradingPeriodId = useMemo(() => {
     const period = (structure.grading_periods || []).find(
-      (p) => p.school_year_id === Number(schoolYearId) && p.quarter === Number(quarter)
+      (p) => p.school_year_id === Number(schoolYearId) && p.term_order === Number(termOrder)
     );
     return period ? period.id : null;
-  }, [structure.grading_periods, schoolYearId, quarter]);
+  }, [structure.grading_periods, schoolYearId, termOrder]);
 
   const learningArea=mapehAreaContext((structure.subjects||[]).find(s=>s.id===Number(subjectId)),mapehArea);
   const contextKey = `${schoolYearId}:${gradingPeriodId}:${gradeId}:${sectionId}:${subjectId}:${learningArea}`;
@@ -523,19 +523,19 @@ export default function Grading() {
       const gradebook=fullGradebook?.gradebook;
       const context = {
         ...(gradebook?.learning_area ? { learningArea: activeMapehArea?.label || 'MAPEH learning area' } : {}),
-        term: gradebook?.quarter,
+        term: gradebook?.term_order,
       };
       if (error.finalizationIssues) {
         return {
           ...error.finalizationIssues,
           message: gradebook?.learning_area
-            ? formatMapehFinalizeIssue(error.message, context.learningArea, gradebook.quarter)
+            ? formatMapehFinalizeIssue(error.message, context.learningArea, gradebook.term_order)
             : error.message,
           context,
         };
       }
       const message=gradebook?.learning_area
-        ? formatMapehFinalizeIssue(error.message,activeMapehArea?.label||'learning area',gradebook.quarter)
+        ? formatMapehFinalizeIssue(error.message,activeMapehArea?.label||'learning area',gradebook.term_order)
         : error.message;
       showError(message);
       return false;
@@ -643,7 +643,7 @@ export default function Grading() {
     }
 
     const gb = fullGradebook.gradebook;
-    const filename = `ClassRecord-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-${throughTerm === 2 ? 'Terms1-2' : allTerms ? 'AllTerms' : `Term${gb.quarter}`}.xlsx`;
+    const filename = `ClassRecord-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-${throughTerm === 2 ? 'Terms1-2' : allTerms ? 'AllTerms' : `Term${gb.term_order}`}.xlsx`;
     try {
       const q = new URLSearchParams({
         region,
@@ -858,7 +858,7 @@ export default function Grading() {
 
                   {/* Interactive Spreadsheet Sheet */}
                   <GradingSheet
-                    key={isReviewer ? `admin:${adminGradebookId}` : `${schoolYearId}:${quarter}:${gradeId}:${sectionId}:${subjectId}:${learningArea}`}
+                    key={isReviewer ? `admin:${adminGradebookId}` : `${schoolYearId}:${termOrder}:${gradeId}:${sectionId}:${subjectId}:${learningArea}`}
                     gradebook={sheetData?.gradebook}
                     students={sheetData?.students || []}
                     components={sheetData?.components || []}
@@ -867,7 +867,9 @@ export default function Grading() {
                     passingGrade={sheetData?.gradebook?.passing_grade || 75}
                     transmutationTable={sheetData?.policy?.transmutation_table}
                     roundingDecimalPlaces={sheetData?.policy?.rounding_decimal_places ?? 2}
+                    roundingFinalDecimalPlaces={sheetData?.policy?.rounding_final_decimal_places ?? 0}
                     roundingMethod={sheetData?.policy?.rounding_method ?? 'half_up'}
+                    reportingMethod={sheetData?.policy?.reporting_method ?? 'legacy'}
                     disabled={sheetLoading || saving || !isEditable}
                     emptyMessage={isReviewer ? 'Select an existing class record above to view its grades.' : undefined}
                     loading={sheetLoading}
@@ -883,16 +885,16 @@ export default function Grading() {
                           const nextYearId = Number(e.target.value);
                           if (changeContext(setSchoolYearId, nextYearId)) {
                             const nextPeriod = (structure.grading_periods || []).find(period => period.school_year_id === nextYearId);
-                            if (nextPeriod) setQuarter(nextPeriod.quarter);
+                            if (nextPeriod) setTermOrder(nextPeriod.term_order);
                           }
                         }}>
                           {sortedSchoolYears.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                         </select>
                       ),
-                      quarter: (
-                        <select className="deped-header-select" value={quarter} onChange={(e) => changeContext(setQuarter, Number(e.target.value))}>
+                      termOrder: (
+                        <select className="deped-header-select" value={termOrder} onChange={(e) => changeContext(setTermOrder, Number(e.target.value))}>
                           {availablePeriods.length === 0 && <option value="">No periods available</option>}
-                          {availablePeriods.map((period) => <option key={period.id} value={period.quarter}>{period.name}</option>)}
+                          {availablePeriods.map((period) => <option key={period.id} value={period.term_order}>{period.name}</option>)}
                         </select>
                       ),
                       grade: (
@@ -930,12 +932,12 @@ export default function Grading() {
                     adjustmentCount={teacherAdjustmentCount}
                     onToggleValidation={() => setShowValidation((prev) => !prev)}
                     onExportXlsx={handleExportXlsx}
-                    onExportAllTerms={() => Number(fullGradebook.gradebook.quarter) === 2 ? handleExportXlsx(false, 2) : handleExportXlsx(true)}
+                    onExportAllTerms={() => Number(fullGradebook.gradebook.term_order) === 2 ? handleExportXlsx(false, 2) : handleExportXlsx(true)}
                     disabled={loading || saving}
                     onValidateFinalize={handleValidateFinalize}
                     finalizationContext={{
                       ...(gb?.learning_area ? { learningArea: activeMapehArea?.label || 'MAPEH learning area' } : {}),
-                      term: gb?.quarter,
+                      term: gb?.term_order,
                     }}
                   />}
                 </>

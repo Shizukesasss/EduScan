@@ -3,10 +3,16 @@ from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 from app.services import reports
-from app.services.class_record_export import subject_template
+from app.services.class_record_export import _direct_template_grade_formula, subject_template
 
 
 class JHSTemplateRoutingTests(unittest.TestCase):
+    def test_direct_export_formula_rounds_initial_grade_without_helper_table(self):
+        self.assertEqual(
+            _direct_template_grade_formula('AB', 18),
+            'IF(AB18="","",ROUND(MAX(0,MIN(100,AB18)),0))',
+        )
+
     def test_new_jhs_elective_uses_core_template(self):
         self.assertEqual(subject_template('Research Elective', is_elective=True),
                          ('core', 'ENGLISH - Grade 7-10 Class Record.xlsx'))

@@ -18,6 +18,11 @@ class MapehAreasTests(unittest.TestCase):
   self.assertEqual(self.f.db.scalar(select(func.count(StudentScore.id))),0)
  def test_invalid_area_rejected(self):
   with self.assertRaises(ValueError):self.area('unknown')
+ def test_future_area_policy_uses_direct_reporting(self):
+  from app.services.mapeh_learning_areas import area_policy
+  policy=area_policy(self.f.db,'2027-2028',self.f.admin)
+  self.assertEqual(policy.reporting_method,'direct')
+  self.assertIsNone(policy.transmutation_table_json)
  def test_legacy_all_service_mutations_rejected(self):
   x=self.f;book=x.create(x.general);book.is_legacy_readonly=True;x.db.commit()
   for operation in (lambda:grading.save_gradebook_scores(x.db,book.id,x.teacher,{},'test'),lambda:grading.reopen_gradebook(x.db,book.id,x.admin,'test'),lambda:grading.finalize_gradebook(x.db,book.id,x.teacher,'test')):
@@ -57,7 +62,7 @@ class MapehAreasTests(unittest.TestCase):
   from datetime import date
   from app.services.mapeh_learning_areas import preview_mapeh_activation,apply_mapeh_activation
   x=self.f;old=x.create(x.general)
-  for term in (2,3):x.db.add(GradingPeriod(school_year_id=x.year.id,quarter=term,name=f'Term {term}',starts_on=date(2026,9,1),ends_on=date(2027,3,31)))
+  for term in (2,3):x.db.add(GradingPeriod(school_year_id=x.year.id,term_order=term,name=f'Term {term}',starts_on=date(2026,9,1),ends_on=date(2027,3,31)))
   x.db.add(SubjectTeachingAssignment(school_year_id=x.year.id,subject_id=x.subject.id,section_id=x.section.id,teacher_user_id=x.teacher.id,active=True));x.db.commit()
   with self.assertRaises(ValueError):apply_mapeh_activation(x.db,preview_mapeh_activation(x.db)['hash'],x.teacher)
   result=apply_mapeh_activation(x.db,preview_mapeh_activation(x.db)['hash'],x.admin);x.db.commit()

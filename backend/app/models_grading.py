@@ -25,10 +25,9 @@ class GradingPolicy(Base):
     component structure (e.g. Written Works 30%, Performance Tasks 50%,
     Quarterly Assessment 20%) as a JSON array.
 
-    The ``transmutation_table_json`` field stores the piecewise transmutation
-    lookup as a JSON array of ``{"min": float, "max": float, "value": int}``
-    entries.  When ``null``, no transmutation is applied and the initial grade
-    is used directly.
+    The ``transmutation_table_json`` field stores the piecewise conversion
+    lookup as a JSON array. ``reporting_method`` determines whether the table
+    is used, direct rounding is used, or the legacy fallback remains active.
     """
     __tablename__ = "grading_policies"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -38,6 +37,7 @@ class GradingPolicy(Base):
     school_year: Mapped[str] = mapped_column(String(30), index=True)
     grade_levels: Mapped[str] = mapped_column(Text, default="")  # comma-separated, e.g. "7,8,9,10"
     subject_category: Mapped[str] = mapped_column(String(80), default="General")  # e.g. General, MAPEH, TLE, SHS-Core
+    reporting_method: Mapped[str] = mapped_column(String(30), default="legacy", server_default="legacy")
     component_definitions_json: Mapped[str] = mapped_column(Text, default="[]")
     transmutation_table_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     rounding_decimal_places: Mapped[int] = mapped_column(Integer, default=2)
@@ -53,7 +53,7 @@ class GradingPolicy(Base):
 
 
 class Gradebook(Base):
-    """A single gradebook for one teacher's subject-section-quarter combination.
+    """A single gradebook for one teacher's subject-section-term combination.
 
     Status lifecycle: Draft → Submitted → Finalized → Locked.
     Reopening (by admin/records_officer) returns to Draft with a reason.
@@ -77,7 +77,7 @@ class Gradebook(Base):
     teacher_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     # Denormalized display fields for convenience
     school_year_name: Mapped[str] = mapped_column(String(30), default="")
-    quarter: Mapped[int] = mapped_column(Integer, default=1)
+    term_order: Mapped[int] = mapped_column(Integer, default=1)
     grade_name: Mapped[str] = mapped_column(String(30), default="")
     section_name: Mapped[str] = mapped_column(String(80), default="")
     subject_name: Mapped[str] = mapped_column(String(120), default="")

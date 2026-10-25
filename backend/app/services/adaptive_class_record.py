@@ -32,7 +32,7 @@ def _round(expression, policy):
 def _term_sheet(workbook, full, cached, sheet_name=None):
     from .reports import _headers, _title
     gb, policy = full['gradebook'], full['policy']
-    sheet = workbook.create_sheet(sheet_name or f"Term {gb['quarter']}")
+    sheet = workbook.create_sheet(sheet_name or f"Term {gb['term_order']}")
     components = normalize_component_weights(full['components'])
     components = [{**component, 'items': [item for item in component['items'] if item.get('active')]}
                   for component in components]
@@ -42,9 +42,9 @@ def _term_sheet(workbook, full, cached, sheet_name=None):
     final_column = 6 + sum(len(component['items']) + 3 for component in components)
     if final_column + 2 > 16384:
         raise HTTPException(409, 'This assessment setup exceeds the Excel column limit.')
-    _title(sheet, 'CLASS RECORD', f"{gb['subject_name']} · {gb['school_year_name']} · Term {gb['quarter']}", final_column)
+    _title(sheet, 'CLASS RECORD', f"{gb['subject_name']} · {gb['school_year_name']} · Term {gb['term_order']}", final_column)
     # Metadata is literal text, including subjects whose names begin with '='.
-    _text(sheet, 2, 1, f"{gb['subject_name']} · {gb['school_year_name']} · Term {gb['quarter']}")
+    _text(sheet, 2, 1, f"{gb['subject_name']} · {gb['school_year_name']} · Term {gb['term_order']}")
     details = [('School', 'San Jose National High School'), ('Grade & section', f"Grade {gb['grade_name']} — {gb['section_name']}"),
                ('Teacher', gb['teacher_name']), ('School head', gb.get('school_head') or 'Not configured')]
     for row, (label, value) in enumerate(details, 3):
@@ -97,6 +97,9 @@ def _term_sheet(workbook, full, cached, sheet_name=None):
     for index in range(len(components)):
         sheet.column_dimensions[get_column_letter(raw_col + 1 + index)].hidden = True
     table = policy.get('transmutation_table') or []
+    reporting_method = policy.get('reporting_method', 'legacy')
+    if reporting_method == 'adjusted_2026' and not table:
+        raise HTTPException(409, 'The saved adjusted gradebook is missing its approved conversion table.')
     template_exams = any(component.get('component_type') == 'Term Examinations' for component in components)
     chunk_size = max(1, min(16, 64 // len(components))) if template_exams else 40
     if raw_col + len(components) + max(0, (len(table) - 1) // chunk_size) > 16384:
@@ -104,11 +107,14 @@ def _term_sheet(workbook, full, cached, sheet_name=None):
     if template_exams:
         table = sorted(table, key=lambda entry: float(entry['min']), reverse=True)
     table_row = 15 + len(students)
-    _text(sheet, table_row - 1, 1, f"Grade conversion · rounding: {policy['rounding_method']} ({policy['rounding_decimal_places']} decimals)")
-    _headers(sheet, table_row, ['Minimum initial grade', 'Maximum initial grade', 'Term grade'])
-    for index, entry in enumerate(table, table_row + 1):
-        for col, key in enumerate(('min', 'max', 'value'), 1):
-            sheet.cell(index, col, float(entry[key]))
+    if reporting_method == 'direct':
+        _text(sheet, table_row - 1, 1, f"Direct reporting · {policy['rounding_method']} to {policy['rounding_final_decimal_places']} decimals")
+    else:
+        _text(sheet, table_row - 1, 1, f"Grade conversion · rounding: {policy['rounding_method']} ({policy['rounding_decimal_places']} decimals)")
+        _headers(sheet, table_row, ['Minimum initial grade', 'Maximum initial grade', 'Term grade'])
+        for index, entry in enumerate(table, table_row + 1):
+            for col, key in enumerate(('min', 'max', 'value'), 1):
+                sheet.cell(index, col, float(entry[key]))
     for row, student in enumerate(students, 12):
         for col, value in enumerate((row - 11, student['full_name'], student.get('lrn') or student['external_id'], student['sex']), 1):
             _text(sheet, row, col, value)
@@ -151,8 +157,10 @@ def _term_sheet(workbook, full, cached, sheet_name=None):
         guards.append(f'ABS(SUM({weights})-1)<=0.0001')
         sheet.cell(row, raw_col, f'=IF(AND({",".join(guards)}),SUM({",".join(expressions)}),"")')
         sheet.cell(row, initial_col, f'=IF({raw_ref}="","",{_round(raw_ref, policy)})')
-        grade_input = f'MAX(0,MIN(100,{raw_ref if template_exams else initial_ref}))'
-        if table:
+        grade_input = f'MAX(0,MIN(100,{raw_ref if template_exams or reporting_method == "direct" else initial_ref}))'
+        if reporting_method == 'direct':
+            converted = f'ROUND({grade_input},{policy["rounding_final_decimal_places"]})'
+        elif table:
             # Keep first-matching-range semantics without array formulas or Excel's nesting limit.
             converted = '""' if template_exams else f'IF({grade_input}>=100,100,"")'
             for chunk in reversed(range(0, len(table), chunk_size)):
@@ -174,19 +182,25 @@ def _term_sheet(workbook, full, cached, sheet_name=None):
                     sheet.cell(row, helper_column, f'=IF({initial_ref}="","",{converted})')
                     sheet.column_dimensions[helper].hidden = True
                     converted = f'{helper}{row}'
-        else:
+        elif reporting_method == 'legacy':
             converted = f'IF({grade_input}>=100,100,IF({grade_input}>=60,INT(({grade_input}-60+0.000000001)/1.6)+75,INT(({grade_input}+0.000000001)/4)+60))'
+        else:
+            converted = '""'
         sheet.cell(row, grade_col, f'=IF({initial_ref}="","",{converted})')
         calculated = calculate_student_grade(scores, components, {component['id']: component['items'] for component in components},
                                              policy.get('transmutation_table'), gb['passing_grade'], policy['rounding_decimal_places'],
-                                             policy['rounding_final_decimal_places'], policy['rounding_method'])
+                                             policy['rounding_final_decimal_places'], policy['rounding_method'],
+                                             reporting_method=reporting_method)
         if calculated['initial_grade'] != student['initial_grade'] or calculated['reported_grade'] != student['reported_grade']:
             raise HTTPException(409, 'Export calculations do not match the saved gradebook. No grades were changed.')
         for block_index, (block, detail, result) in enumerate(zip(blocks, calculated['component_details'], calculated['component_grades'])):
             caches[f'{get_column_letter(raw_col + 1 + block_index)}{row}'] = detail['percentage']
             for col, value in ((block[3], detail['total_earned']), (block[4], result['percentage']), (block[5], result['weighted_score'])):
                 caches[f'{get_column_letter(col)}{row}'] = value
-        caches[raw_ref] = float(sum(Decimal(str(detail['percentage'])) * Decimal(str(detail['weight'])) / 100 for detail in calculated['component_details']))
+        caches[raw_ref] = calculated['raw_initial_grade'] if reporting_method != 'legacy' else float(
+            sum(Decimal(str(detail['percentage'])) * Decimal(str(detail['weight'])) / 100
+                for detail in calculated['component_details'])
+        )
         caches[initial_ref] = calculated['initial_grade']
         caches[f'{get_column_letter(grade_col)}{row}'] = calculated['reported_grade']
     for cells in sheet.iter_rows(min_row=10, max_row=11, max_col=grade_col):
@@ -291,19 +305,19 @@ def export_adaptive(db, book, full, region, division, school_id, allowed_teacher
         query = query.where(Gradebook.subject_id == book.subject_id)
     if allowed_teacher_id is not None:
         query = query.where(Gradebook.teacher_user_id == allowed_teacher_id)
-    periods = tuple(range(1, (through_term or 3) + 1)) if all_terms or through_term else (book.quarter,)
-    query = query.where(Gradebook.quarter.in_(periods))
+    periods = tuple(range(1, (through_term or 3) + 1)) if all_terms or through_term else (book.term_order,)
+    query = query.where(Gradebook.term_order.in_(periods))
     if all_terms or through_term:
         query = query.where(Gradebook.teacher_user_id == book.teacher_user_id)
     terms = {}
-    for sibling in db.scalars(query.order_by(Gradebook.quarter)).all():
+    for sibling in db.scalars(query.order_by(Gradebook.term_order)).all():
         learning_area = area(sibling.subject_name) if combined else ''
         if combined and learning_area is None:
             continue
         term = full if sibling.id == book.id else get_gradebook_full(db, sibling.id)
         if not _complete_finalized_record(term):
             continue
-        key = (sibling.quarter, learning_area)
+        key = (sibling.term_order, learning_area)
         if key in terms:
             raise HTTPException(409, 'Multiple finalized records match this subject and term. Resolve the assignment before exporting.')
         terms[key] = term
@@ -321,7 +335,7 @@ def export_adaptive(db, book, full, region, division, school_id, allowed_teacher
         for row in sheet:
             if any(cell.data_type == 'f' and len(cell.value) > 8192 for cell in row):
                 raise HTTPException(409, 'This assessment setup exceeds the Excel formula length limit.')
-    period_name = 'Terms1-2' if through_term == 2 else 'AllTerms' if all_terms else f"Term{gb['quarter']}"
+    period_name = 'Terms1-2' if through_term == 2 else 'AllTerms' if all_terms else f"Term{gb['term_order']}"
     target = new_report_path(EXPORT_DIR, f"ClassRecord-{_safe_name(gb['school_year_name'])}-{period_name}-Grade{_safe_name(gb['grade_name'])}-{_safe_name(gb['section_name'])}-{_safe_name(gb['subject_name'])}.xlsx")
     with TemporaryDirectory(dir=target.parent) as directory:
         source = Path(directory) / 'gradebook.xlsx'

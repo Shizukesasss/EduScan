@@ -144,7 +144,7 @@ class AttendanceSyncTest(unittest.TestCase):
         })
         self.assertEqual(invalid.status_code, 422, invalid.text)
         created = self.client.post("/api/persons", headers=self.admin_headers, json={
-            "external_id": "NEW-STUDENT", "surname": "New", "first_name": "Learner", "sex": "Female", "role": "Student", "grade": "10", "section": "Rizal", "biometric_consent": False})
+            "external_id": "NEW-STUDENT", "surname": "New", "first_name": "Learner", "sex": "Female", "date_of_birth": "2012-01-01", "role": "Student", "grade": "10", "section": "Rizal", "biometric_consent": False})
         self.assertEqual(created.status_code, 200, created.text)
         row = next(row for row in self.api_rows() if row["person_id"] == created.json()["id"])
         self.assertEqual(row["status"], "No scan")

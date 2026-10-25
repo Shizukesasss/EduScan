@@ -4,12 +4,12 @@ export function groupAdminGradebooks(gradebooks, searchValue = '') {
   const query = searchValue.trim().toLocaleLowerCase();
   const matching = gradebooks
     .filter((book) => !query || [
-      book.school_year_name, book.grading_period_name, `Term ${book.quarter}`, `Q${book.quarter}`,
+      book.school_year_name, book.grading_period_name, `Term ${book.term_order}`,
       `Grade ${normalizeGradeName(book.grade_name)}`, `Section ${book.section_name}`,
       book.grade_name, book.section_name, book.subject_name, book.learning_area, book.teacher_name, book.status,
     ].some((value) => String(value || '').toLocaleLowerCase().includes(query)))
     .sort((a, b) => String(b.school_year_name).localeCompare(String(a.school_year_name), undefined, { numeric: true })
-      || Number(a.quarter) - Number(b.quarter)
+      || Number(a.term_order) - Number(b.term_order)
       || String(a.grade_name).localeCompare(String(b.grade_name), undefined, { numeric: true })
       || String(a.section_name).localeCompare(String(b.section_name))
       || String(a.subject_name).localeCompare(String(b.subject_name))
@@ -17,7 +17,7 @@ export function groupAdminGradebooks(gradebooks, searchValue = '') {
   const groups = new Map();
 
   matching.forEach((book) => {
-    const label = `${book.school_year_name} · ${book.grading_period_name || `Term ${book.quarter}`}`;
+    const label = `${book.school_year_name} · ${book.grading_period_name || `Term ${book.term_order}`}`;
     if (!groups.has(label)) groups.set(label, []);
     groups.get(label).push(book);
   });

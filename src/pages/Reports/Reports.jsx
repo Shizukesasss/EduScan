@@ -3,12 +3,13 @@ import { useCallback, useEffect, useState } from 'react';
 import { Download, FileClock, FileSpreadsheet, Printer } from 'lucide-react';
 import SF2ReportGenerator from '../../components/Teacher/SF2ReportGenerator';
 import ReleasedSF2Reports from '../../components/Teacher/ReleasedSF2Reports';
+import AnnexGWorkspace from '../../components/Reports/AnnexGWorkspace';
 import MySchedules from '../Teacher/MySchedules';
 import { api, auth, localDate } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 
 export default function Reports() {
-  return auth.role() === 'teacher' ? <div className="page-stack"><MySchedules /><ReleasedSF2Reports /></div> : <AdminReports />;
+  return auth.role() === 'teacher' ? <div className="page-stack"><AnnexGWorkspace /><MySchedules /><ReleasedSF2Reports /></div> : <AdminReports />;
 }
 
 function AdminReports() {
@@ -73,6 +74,8 @@ function AdminReports() {
   };
 
   return <div className="page-stack">
+
+    <AnnexGWorkspace />
 
     {canGenerate && <><section className="card-static">
       <div className="section-heading"><div><p className="eyebrow">Selected reporting period</p><h2>{daily ? 'Daily attendance and movement summary' : 'Attendance and movement summary'}</h2></div><FileSpreadsheet size={24} /></div>

@@ -16,15 +16,15 @@ class ExportTermScopeTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.tearDown)
 
-    def make_book(self, quarter):
+    def make_book(self, term_order):
         f = self.fixture
-        period = GradingPeriod(school_year_id=f.year.id, quarter=quarter, name=f'Term {quarter}',
+        period = GradingPeriod(school_year_id=f.year.id, term_order=term_order, name=f'Term {term_order}',
                                starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
         f.db.add(period)
         f.db.commit()
         book = f.create(f.specific, grading_period_id=period.id)
         book.teacher_user_id, book.teacher_name, book.status = f.teacher.id, f.teacher.full_name, 'Finalized'
-        if quarter == 2:
+        if term_order == 2:
             f.db.add(SubjectTeachingAssignment(school_year_id=f.year.id, section_id=f.section.id,
                 subject_id=f.subject.id, teacher_user_id=f.teacher.id, active=True))
         f.db.commit()
@@ -34,9 +34,9 @@ class ExportTermScopeTests(unittest.TestCase):
         f = self.fixture
         full = {'students': [{}], 'statistics': {'incomplete': 0}}
         with TemporaryDirectory(dir=Path(fixtures.TEST_DIR.name)) as directory:
-            for quarter, scope in ((2, {'through_term': 2}), (3, {'all_terms': True})):
-                book = self.make_book(quarter)
-                path = Path(directory) / f'term-{quarter}.xlsx'
+            for term_order, scope in ((2, {'through_term': 2}), (3, {'all_terms': True})):
+                book = self.make_book(term_order)
+                path = Path(directory) / f'term-{term_order}.xlsx'
                 path.write_bytes(b'isolated export')
                 report = SimpleNamespace(file_path=str(path), filename=path.name)
                 with self.subTest(scope=scope), \
@@ -73,7 +73,7 @@ class ExportTermScopeTests(unittest.TestCase):
 
     def test_two_terms_requires_selected_term_two(self):
         db = Mock()
-        db.get.return_value = SimpleNamespace(quarter=1)
+        db.get.return_value = SimpleNamespace(term_order=1)
         with patch('app.main.ensure_gradebook_access'), self.assertRaises(HTTPException) as denied:
             gradebook_report_xlsx_new(1, through_term=2, db=db, user=SimpleNamespace(role='records_officer'))
         self.assertEqual(denied.exception.status_code, 422)

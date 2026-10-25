@@ -20,11 +20,18 @@ from app.services.grading_engine import (
     determine_grade_status,
     generate_calculation_breakdown,
     round_value,
+    reporting_method_for_school_year,
     validate_gradebook,
 )
 
 
 class TestRoundValue(unittest.TestCase):
+
+    def test_school_year_switches_from_adjusted_to_direct_reporting(self):
+        self.assertEqual(reporting_method_for_school_year("2026-2027"), "adjusted_2026")
+        self.assertEqual(reporting_method_for_school_year("2027-2028"), "direct")
+        self.assertEqual(reporting_method_for_school_year("2025-2026"), "legacy")
+        self.assertEqual(reporting_method_for_school_year("invalid"), "legacy")
 
     def test_half_up_rounds_correctly(self):
         self.assertEqual(round_value(85.555, 2, "half_up"), 85.56)
@@ -351,6 +358,29 @@ class TestFullStudentCalculation(unittest.TestCase):
 
                     self.assertEqual(result["initial_grade"], 71.18)
                     self.assertEqual(result["reported_grade"], expected_grade)
+
+    def test_direct_reporting_rounds_raw_grade_without_transmutation(self):
+        components = [{"id": 1, "name": "Overall", "weight": 100, "component_type": "Written Work"}]
+        items = {1: [{"id": 10, "max_score": 100}]}
+        result = calculate_student_grade(
+            [{"item_id": 10, "score": 74.5, "status": "Scored"}], components, items,
+            transmutation_table=[{"min": 0, "max": 100, "value": 88}],
+            reporting_method="direct",
+        )
+        self.assertEqual(result["reported_grade"], 75)
+
+    def test_adjusted_reporting_requires_the_saved_table(self):
+        scores = [
+            {"item_id": item_id, "score": max_score, "status": "Scored"}
+            for component_items in self.items_by_component.values()
+            for item_id, max_score in ((item["id"], item["max_score"]) for item in component_items)
+        ]
+        result = calculate_student_grade(
+            scores, self.components, self.items_by_component,
+            transmutation_table=None,
+            reporting_method="adjusted_2026",
+        )
+        self.assertIsNone(result["reported_grade"])
 
 
 class TestValidation(unittest.TestCase):

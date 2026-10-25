@@ -65,6 +65,7 @@ class GradingPolicyResponse(BaseModel):
     school_year: str
     grade_levels: str
     subject_category: str
+    reporting_method: str = "legacy"
     component_definitions: list[dict]
     transmutation_table: list[dict] | None
     rounding_decimal_places: int
@@ -225,7 +226,7 @@ class GradeAdjustmentNotificationsRead(BaseModel):
 class GradebookSummaryResponse(BaseModel):
     id: int
     school_year_name: str
-    quarter: int
+    term_order: int
     grade_name: str
     section_name: str
     subject_name: str

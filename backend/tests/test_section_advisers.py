@@ -58,7 +58,7 @@ class SectionAdviserTests(unittest.TestCase):
         f.db.add_all([next_year, replacement])
         f.db.flush()
         assign_section_adviser(f.db, next_year.id, f.section.id, replacement.id)
-        f.db.add(GradebookState(class_key='historical', grade=f.grade.name, section=f.section.name, school_year=next_year.name, quarter=1, subject='Core'))
+        f.db.add(GradebookState(class_key='historical', grade=f.grade.name, section=f.section.name, school_year=next_year.name, term_order=1, subject='Core'))
         f.db.flush()
         ensure_legacy_gradebook_access(f.db, replacement, 'historical')
         with self.assertRaises(HTTPException) as denied:
@@ -76,7 +76,9 @@ class SectionAdviserTests(unittest.TestCase):
         f.db.commit()
         with f.engine.begin() as connection:
             connection.execute(text('CREATE TABLE schema_migrations (version VARCHAR(80) PRIMARY KEY, description VARCHAR(255), applied_at TIMESTAMP)'))
-            for version, description in MIGRATIONS[:-1]:
+            for version, description in MIGRATIONS:
+                if version == '0022_annual_advisers_demo_setup':
+                    continue
                 connection.execute(text('INSERT INTO schema_migrations VALUES (:v,:d,CURRENT_TIMESTAMP)'), {'v':version,'d':description})
         self.assertEqual(run_migrations(f.engine), ['0022_annual_advisers_demo_setup'])
         self.assertEqual(run_migrations(f.engine), [])
@@ -107,7 +109,9 @@ class SectionAdviserTests(unittest.TestCase):
         f.db.add(second); f.db.commit()
         with f.engine.begin() as connection:
             connection.execute(text('CREATE TABLE schema_migrations (version VARCHAR(80) PRIMARY KEY, description VARCHAR(255), applied_at TIMESTAMP)'))
-            for version, description in MIGRATIONS[:-1]:
+            for version, description in MIGRATIONS:
+                if version == '0022_annual_advisers_demo_setup':
+                    continue
                 connection.execute(text('INSERT INTO schema_migrations VALUES (:v,:d,CURRENT_TIMESTAMP)'), {'v':version,'d':description})
         with self.assertRaisesRegex(ValueError, 'multiple sections'):
             run_migrations(f.engine)
@@ -126,7 +130,9 @@ class SectionAdviserTests(unittest.TestCase):
         f.db.add(archived); f.db.commit()
         with f.engine.begin() as connection:
             connection.execute(text('CREATE TABLE schema_migrations (version VARCHAR(80) PRIMARY KEY, description VARCHAR(255), applied_at TIMESTAMP)'))
-            for version, description in MIGRATIONS[:-1]:
+            for version, description in MIGRATIONS:
+                if version == '0022_annual_advisers_demo_setup':
+                    continue
                 connection.execute(text('INSERT INTO schema_migrations VALUES (:v,:d,CURRENT_TIMESTAMP)'), {'v':version,'d':description})
         run_migrations(f.engine)
         f.db.expire_all()

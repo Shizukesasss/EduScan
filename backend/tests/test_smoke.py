@@ -65,7 +65,7 @@ class EduScanSmokeTest(unittest.TestCase):
     def test_biometric_enrollment_crud_and_audit(self) -> None:
         person = self.client.post("/api/persons", headers=self.headers, json={
             "external_id": "BIO-CRUD-001", "lrn": "999999999991", "surname": "AUDIT", "first_name": "FACE TEST",
-            "sex": "Female", "role": "Student", "grade": "10", "section": "Rizal",
+            "sex": "Female", "date_of_birth": "2012-01-01", "role": "Student", "grade": "10", "section": "Rizal",
             "guardian_phone": "+639171111111", "biometric_consent": True,
         })
         self.assertEqual(person.status_code, 200, person.text)
@@ -152,7 +152,7 @@ class EduScanSmokeTest(unittest.TestCase):
     def test_persistent_attendance_correction_and_gradebook(self) -> None:
         person = self.client.post("/api/persons", headers=self.headers, json={
             "external_id": "SMOKE-001", "lrn": "123456789012", "surname": "TEST", "first_name": "LEARNER A",
-            "sex": "Male", "role": "Student", "grade": "10", "section": "Rizal",
+            "sex": "Male", "date_of_birth": "2012-01-01", "role": "Student", "grade": "10", "section": "Rizal",
             "guardian_phone": "+639171234567", "biometric_consent": True,
         })
         self.assertEqual(person.status_code, 200, person.text)
@@ -186,7 +186,7 @@ class EduScanSmokeTest(unittest.TestCase):
 
         class_key = "10-rizal-mathematics"
         gradebook = self.client.put(f"/api/gradebook/{class_key}", headers=self.teacher_headers, json={
-            "class_key": class_key, "school_year": "2026-2027", "quarter": 1,
+            "class_key": class_key, "school_year": "2026-2027", "term_order": 1,
             "subject": "Mathematics", "grade": "10", "section": "Rizal",
             "change_reason": "Initial verified grading setup", "passing_grade": 75,
             "components": [
@@ -351,7 +351,7 @@ class EduScanSmokeTest(unittest.TestCase):
 
         created = self.client.post("/api/persons", headers=self.headers, json={
             "external_id": "EXTENDED-001", "lrn": "999999999981", "surname": "REENTRY", "first_name": "LEARNER",
-            "sex": "Male", "role": "Student", "grade": "10", "section": "Rizal",
+            "sex": "Male", "date_of_birth": "2012-01-01", "role": "Student", "grade": "10", "section": "Rizal",
             "guardian_phone": "+639181111111", "biometric_consent": False,
         })
         self.assertEqual(created.status_code, 200, created.text)
@@ -388,7 +388,7 @@ class EduScanSmokeTest(unittest.TestCase):
         })
         self.assertEqual(correction.status_code, 200, correction.text)
         gradebook = self.client.put("/api/gradebook/disposal-gradebook", headers=self.teacher_headers, json={
-            "class_key": "disposal-gradebook", "school_year": "2026-2027", "quarter": 1,
+            "class_key": "disposal-gradebook", "school_year": "2026-2027", "term_order": 1,
             "subject": "Mathematics", "grade": "10", "section": "Rizal",
             "change_reason": "Initial authorized score entry",
             "passing_grade": 75, "components": [{"id": "q1", "category": "Quizzes", "label": "Quiz 1", "weight": 100, "max_score": 10}],
@@ -431,7 +431,7 @@ class EduScanSmokeTest(unittest.TestCase):
         people = []
         for external_id, name, sex in (("MULTI-001", "Zulu, Ana", "Female"), ("MULTI-002", "Alpha, Bea", "Female")):
             response = self.client.post("/api/persons", headers=self.headers, json={
-                "external_id": external_id, "lrn": None, "surname": name.split(',')[0], "first_name": name.split(',')[1].strip(), "sex": sex, "role": "Student",
+                "external_id": external_id, "lrn": None, "surname": name.split(',')[0], "first_name": name.split(',')[1].strip(), "sex": sex, "date_of_birth": "2012-01-01", "role": "Student",
                 "grade": "9", "section": "Multi", "guardian_phone": None, "biometric_consent": True,
             })
             self.assertEqual(response.status_code, 200, response.text)
@@ -468,9 +468,9 @@ class EduScanSmokeTest(unittest.TestCase):
             self.assertEqual({match["person"].id for match in matches if match.get("person")}, {item["id"] for item in people})
 
         workbook = Workbook(); sheet = workbook.active
-        sheet.append(["External ID", "Full Name", "Sex", "Role", "Grade", "Section", "LRN"])
-        sheet.append(["ROSTER-002", "BETA, LEARNER", "Male", "Student", "8", "Roster", "888888888882"])
-        sheet.append(["ROSTER-001", "ALPHA, LEARNER", "Male", "Student", "8", "Roster", "888888888881"])
+        sheet.append(["External ID", "Full Name", "Sex", "Role", "Grade", "Section", "LRN", "Date of Birth"])
+        sheet.append(["ROSTER-002", "BETA, LEARNER", "Male", "Student", "8", "Roster", "888888888882", date(2012, 1, 1)])
+        sheet.append(["ROSTER-001", "ALPHA, LEARNER", "Male", "Student", "8", "Roster", "888888888881", date(2012, 1, 1)])
         roster_stream = io.BytesIO(); workbook.save(roster_stream); roster_data = roster_stream.getvalue()
         files = {"file": ("approved-roster.xlsx", roster_data, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
         preview = self.client.post("/api/admin/roster/import", headers=self.headers, files=files,
@@ -534,7 +534,7 @@ class EduScanSmokeTest(unittest.TestCase):
         ]
         for payload in payloads:
             response = self.client.post("/api/persons", headers=self.headers, json={
-                **payload, "role": "Student", "grade": "11-T", "section": "Advisory",
+                **payload, "role": "Student", "date_of_birth": "2012-01-01", "grade": "11-T", "section": "Advisory",
                 "guardian_phone": None, "biometric_consent": False,
             })
             self.assertEqual(response.status_code, 200, response.text)
@@ -564,7 +564,7 @@ class EduScanSmokeTest(unittest.TestCase):
             response = self.client.post("/api/persons", headers=self.headers, json={
                 "external_id": external_id, "lrn": f"77777777777{external_id[-1]}",
                 "surname": external_id, "first_name": "LEARNER", "sex": "Male", "role": "Student",
-                "grade": "11-T", "section": section_name, "guardian_phone": None,
+                "date_of_birth": "2012-01-01", "grade": "11-T", "section": section_name, "guardian_phone": None,
                 "biometric_consent": False,
             })
             self.assertEqual(response.status_code, 200, response.text)

@@ -56,6 +56,29 @@ test('decimal-safe calculation preserves exact transmutation boundaries', () => 
   }
 });
 
+test('direct reporting rounds the initial grade and ignores transmutation tables', () => {
+  const components = [{ id: 1, name: 'Overall', component_type: 'Written Work', weight: 100,
+    items: [{ id: 1, max_score: 100 }] }];
+  const table = [{ min: 0, max: 100, value: 88 }];
+  const calculate = score => calculateStudentGrade({
+    studentScores: [{ itemId: 1, score, status: 'Scored' }], components,
+    transmutationTable: table, reportingMethod: 'direct',
+  });
+
+  assert.equal(calculate(74.49).reportedGrade, 74);
+  assert.equal(calculate(74.5).reportedGrade, 75);
+});
+
+test('adjusted reporting never falls back when its saved conversion table is missing', () => {
+  const result = calculateStudentGrade({
+    studentScores: [{ itemId: 1, score: 100, status: 'Scored' }],
+    components: [{ id: 1, name: 'Overall', component_type: 'Written Work', weight: 100,
+      items: [{ id: 1, max_score: 100 }] }],
+    reportingMethod: 'adjusted_2026',
+  });
+  assert.equal(result.reportedGrade, null);
+});
+
 test('prefixed grades and SHS category variants remain selectable', () => {
   assert.equal(normalizeGradeName(' Grade 11 '), '11');
   assert.equal(isSeniorHighGrade('Grade 12'), true);

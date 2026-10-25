@@ -20,7 +20,7 @@ class MapehAreaExportTests(unittest.TestCase):
   for term in (1,2,3):
    period=x.period
    if term>1:
-    period=GradingPeriod(school_year_id=x.year.id,quarter=term,name=f'Term {term}',starts_on=date(2026,6,1),ends_on=date(2027,3,31));x.db.add(period);x.db.commit()
+    period=GradingPeriod(school_year_id=x.year.id,term_order=term,name=f'Term {term}',starts_on=date(2026,6,1),ends_on=date(2027,3,31));x.db.add(period);x.db.commit()
    for area in ('music_arts','pe_health'):
     b=x.create(learning_area=area,grading_period_id=period.id)
     for c in b.components:
@@ -85,7 +85,7 @@ class MapehAreaExportTests(unittest.TestCase):
   x=self.fixture(7)
   periods={1:x.period}
   for term in (2,3):
-   period=GradingPeriod(school_year_id=x.year.id,quarter=term,name=f'Term {term}',starts_on=date(2026,6,1),ends_on=date(2027,3,31))
+   period=GradingPeriod(school_year_id=x.year.id,term_order=term,name=f'Term {term}',starts_on=date(2026,6,1),ends_on=date(2027,3,31))
    x.db.add(period);x.db.commit();periods[term]=period
   for term,period in periods.items():
    music=x.create(learning_area='music_arts',grading_period_id=period.id)

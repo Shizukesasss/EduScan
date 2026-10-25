@@ -1,13 +1,18 @@
+import { calculateAge, manilaTodayIso } from '../../services/personAge';
+
 const studentStatuses = ['Regular', 'Transferred In', 'Transferred Out', 'Dropped Out', 'Withdrawn', 'Graduated', 'Other'];
 const staffStatuses = ['Appointed', 'Transferred In', 'Transferred Out', 'Resigned', 'Retired', 'Contract Ended', 'Other'];
 const departures = new Set(['Transferred Out', 'Dropped Out', 'Withdrawn', 'Graduated', 'Resigned', 'Retired', 'Contract Ended', 'Other']);
 
-export default function EnrollmentFields({ form, onChange }) {
+export default function EnrollmentFields({ form, onChange, dateOfBirthRequired = false }) {
   const student = form.role === 'Student';
+  const age = calculateAge(form.date_of_birth);
   const status = form.enrollment_status || (student ? 'Regular' : 'Appointed');
   const options = student ? studentStatuses : form.enrollment_status === 'Regular' ? [...staffStatuses, 'Regular'] : staffStatuses;
   const departed = departures.has(status);
   return <>
+    <label><span className="field-label">Date of birth{student && dateOfBirthRequired ? ' (required)' : ''}</span><input title="Choose a date on or before today" className="input-field" type="date" max={manilaTodayIso()} required={student && dateOfBirthRequired} value={form.date_of_birth || ''} onChange={event => onChange('date_of_birth', event.target.value)} /></label>
+    <label><span className="field-label">Calculated age</span><input className="input-field" type="number" value={age ?? ''} readOnly aria-label="Calculated age in years" /><span className="muted-small">Calculated from date of birth.</span></label>
     <label><span className="field-label">{student ? 'Enrollment status' : 'Employment status'}</span><select className="input-field" value={status} onChange={event => onChange('enrollment_status', event.target.value)}>{[...options].sort().map(value => <option key={value}>{value}</option>)}</select></label>
     <label><span className="field-label">{student ? 'Enrollment / transfer-in date' : 'Appointment / transfer-in date'}</span><input title="Choose a calendar date" className="input-field" type="date" required={['Appointed', 'Transferred In'].includes(status)} value={form.enrollment_start_date || ''} onChange={event => onChange('enrollment_start_date', event.target.value)} /></label>
     {(departed || form.enrollment_end_date) && <label><span className="field-label">{student ? 'Last day enrolled' : 'Last day on duty'}</span><input title="Choose a calendar date" className="input-field" type="date" required={departed} min={form.enrollment_start_date || undefined} value={form.enrollment_end_date || ''} onChange={event => onChange('enrollment_end_date', event.target.value)} /></label>}

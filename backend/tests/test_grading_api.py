@@ -93,7 +93,7 @@ class GradingApiTest(unittest.TestCase):
                 formulas = load_workbook(BytesIO(exported.content))
                 values = load_workbook(BytesIO(exported.content), data_only=True)
                 try:
-                    term_name = f"Term {snapshot['gradebook']['quarter']}"
+                    term_name = f"Term {snapshot['gradebook']['term_order']}"
                     sheet = values[term_name]
                     headings = {cell.value: cell.column for cell in sheet[10]}
                     for heading in ('INITIAL GRADE', 'TERM GRADE'):
@@ -179,12 +179,25 @@ class GradingApiTest(unittest.TestCase):
         get_resp = self.client.get(f"/api/grading-policies/{policy_id}", headers=self.admin_headers)
         self.assertEqual(get_resp.status_code, 200)
         self.assertEqual(get_resp.json()["name"], "SHS TVL Track Policy")
+        self.assertEqual(get_resp.json()["reporting_method"], "adjusted_2026")
+        self.assertTrue(get_resp.json()["transmutation_table"])
 
         # Update
         good_policy["description"] = "Updated TVL policy description"
         good_policy["status"] = "Active"
         update_resp = self.client.put(f"/api/grading-policies/{policy_id}", headers=self.teacher_headers, json=good_policy)
         self.assertEqual(update_resp.status_code, 200)
+
+        future_policy = {**good_policy, "name": "Direct Reporting Test", "school_year": "2027-2028",
+                         "rounding_method": "floor", "rounding_final_decimal_places": 2,
+                         "transmutation_table": [{"min": 0, "max": 100, "value": 88}]}
+        future_resp = self.client.post("/api/grading-policies", headers=self.teacher_headers, json=future_policy)
+        self.assertEqual(future_resp.status_code, 200, future_resp.text)
+        future_details = self.client.get(f"/api/grading-policies/{future_resp.json()['id']}", headers=self.admin_headers).json()
+        self.assertEqual(future_details["reporting_method"], "direct")
+        self.assertIsNone(future_details["transmutation_table"])
+        self.assertEqual(future_details["rounding_method"], "half_up")
+        self.assertEqual(future_details["rounding_final_decimal_places"], 0)
 
     def test_03_gradebook_lifecycle_scores_and_calculations(self) -> None:
         # 1. Fetch academic structure
@@ -200,7 +213,7 @@ class GradingApiTest(unittest.TestCase):
         # Add 2 test students in this grade/section
         s1 = self.client.post("/api/persons", headers=self.admin_headers, json={
             "external_id": "TEST-STU-001", "lrn": "111111111111", "surname": "DELA CRUZ", "first_name": "JUAN",
-            "sex": "Male", "role": "Student", "grade": gl["name"], "section": sec["name"],
+            "sex": "Male", "date_of_birth": "2012-01-01", "role": "Student", "grade": gl["name"], "section": sec["name"],
             "guardian_phone": "+639170000001", "biometric_consent": False,
         })
         self.assertEqual(s1.status_code, 200, s1.text)
@@ -208,7 +221,7 @@ class GradingApiTest(unittest.TestCase):
 
         s2 = self.client.post("/api/persons", headers=self.admin_headers, json={
             "external_id": "TEST-STU-002", "lrn": "111111111112", "surname": "SANTOS", "first_name": "MARIA",
-            "sex": "Female", "role": "Student", "grade": gl["name"], "section": sec["name"],
+            "sex": "Female", "date_of_birth": "2012-01-01", "role": "Student", "grade": gl["name"], "section": sec["name"],
             "guardian_phone": "+639170000002", "biometric_consent": False,
         })
         self.assertEqual(s2.status_code, 200, s2.text)
@@ -511,7 +524,7 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(other_teacher_structure['sections'], [])
         self.assertEqual(other_teacher_structure['grade_levels'], [])
         section = structure['sections'][0]
-        period = next(row for row in structure['grading_periods'] if row['quarter'] == 3)
+        period = next(row for row in structure['grading_periods'] if row['term_order'] == 3)
         context = {'school_year_id': period['school_year_id'], 'grading_period_id': period['id'],
                    'grade_level_id': section['grade_level_id'], 'section_id': section['id'], 'subject_id': structure['subjects'][0]['id']}
         books_before = self.client.get('/api/gradebooks', headers=self.admin_headers).json()
@@ -561,7 +574,7 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(saved.status_code, 200, saved.text)
         for action in ('submit', 'finalize'):
             result = self.client.post(f'/api/gradebooks/{book_id}/{action}', headers=self.teacher_headers,
-                                     json={'reason': 'Teacher verified complete quarter results'})
+                                     json={'reason': 'Teacher verified complete term results'})
             self.assertEqual(result.status_code, 200, result.text)
         item = components[0]['items'][0]
         learner_id = data['students'][0]['person_id']
@@ -603,7 +616,7 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(self.client.put(f'/api/gradebooks/{book_id}/scores', headers=self.teacher_headers,
                          json={'scores': scores, 'change_reason': 'Attempt direct edit after finalization'}).status_code, 422)
         locked = self.client.post(f'/api/gradebooks/{book_id}/lock', headers=self.records_headers,
-                                 json={'reason': 'Approved quarter archived by records officer'})
+                                 json={'reason': 'Approved term archived by records officer'})
         self.assertEqual(locked.status_code, 200, locked.text)
         locked_request = self.client.post(f'/api/gradebooks/{book_id}/adjustments', headers=self.teacher_headers, json={**proposal, 'new_score': item['max_score'] - 2})
         self.assertEqual(locked_request.status_code, 200, locked_request.text)

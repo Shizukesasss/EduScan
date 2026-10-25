@@ -81,7 +81,7 @@ class JHSExportParityTests(unittest.TestCase):
             for term in (1, 2, 3):
                 period = fixture.period
                 if term != 1:
-                    period = GradingPeriod(school_year_id=fixture.year.id, quarter=term, name=f'Term {term}',
+                    period = GradingPeriod(school_year_id=fixture.year.id, term_order=term, name=f'Term {term}',
                                            starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
                     fixture.db.add(period)
                     fixture.db.commit()
@@ -117,8 +117,8 @@ class JHSExportParityTests(unittest.TestCase):
                            {'ww': 6, 'pt': 14, 'exam': 20})
                 for full in snapshots:
                     suffix = ' M and A' if kind == 'mapeh' else ''
-                    sheet = values[f'TERM {full["gradebook"]["quarter"]}{suffix}']
-                    included = full['gradebook']['quarter'] in ((1, 2, 3) if export_mode == 3 else (1, 2) if export_mode == 12 else (export_mode,))
+                    sheet = values[f'TERM {full["gradebook"]["term_order"]}{suffix}']
+                    included = full['gradebook']['term_order'] in ((1, 2, 3) if export_mode == 3 else (1, 2) if export_mode == 12 else (export_mode,))
                     if not included:
                         self.assertIsNone(sheet.cell(male_row, 6).value)
                         self.assertIsNone(sheet.cell(female_row, 6).value)

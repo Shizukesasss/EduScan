@@ -36,6 +36,16 @@ const compareFractions = (a, b) => {
 const fractionToNumber = value => Number(value.numerator) / Number(value.denominator);
 const fractionFloor = value => value.numerator / value.denominator;
 
+function roundFraction(value, decimalPlaces = 0, method = 'half_up') {
+  const factor = 10n ** BigInt(decimalPlaces);
+  const scaled = value.numerator * factor;
+  let rounded = scaled / value.denominator;
+  const remainder = scaled % value.denominator;
+  if (method === 'ceiling' && remainder) rounded++;
+  else if (method === 'half_up' && remainder * 2n >= value.denominator) rounded++;
+  return Number(rounded) / Number(factor);
+}
+
 function applyTransmutationFraction(initialGrade, transmutationTable, useLowerBounds) {
   const zero = decimalFraction(0);
   const hundred = decimalFraction(100);
@@ -221,7 +231,7 @@ export function determineStatus(reportedGrade, passingGrade = 75, allComplete = 
  * @param {number} params.passingGrade
  * @returns {object} Full calculation result
  */
-export function calculateStudentGrade({ studentScores, components, transmutationTable = null, passingGrade = 75, roundingDecimalPlaces = 2, roundingMethod = 'half_up' }) {
+export function calculateStudentGrade({ studentScores, components, transmutationTable = null, passingGrade = 75, roundingDecimalPlaces = 2, roundingFinalDecimalPlaces = 0, roundingMethod = 'half_up', reportingMethod = 'legacy' }) {
   const scoreByItem = new Map(studentScores.map(s => [s.itemId, s]));
 
   const componentResults = components.map(comp => {
@@ -244,18 +254,29 @@ export function calculateStudentGrade({ studentScores, components, transmutation
 
   const weighted = calculateWeightedGrade(componentResults, roundingDecimalPlaces, roundingMethod);
   const templateExams = components.some(component => component.component_type === 'Term Examinations');
-  const rawInitial = templateExams ? componentResults.reduce((sum, component, index) => component.percentageFraction
+  const rawInitial = reportingMethod !== 'legacy' || templateExams ? componentResults.reduce((sum, component, index) => component.percentageFraction
     ? addFractions(sum, divideFractions(
       multiplyFractions(component.percentageFraction, decimalFraction(weighted.componentGrades[index].weight)),
       decimalFraction(100),
     )) : sum, decimalFraction(0)) : decimalFraction(weighted.initialGrade);
-  const reportedGrade = weighted.initialGrade != null
-    ? applyTransmutationFraction(rawInitial, transmutationTable, templateExams)
-    : null;
+  let reportedGrade = null;
+  if (weighted.initialGrade != null) {
+    if (reportingMethod === 'direct') {
+      const bounded = compareFractions(rawInitial, decimalFraction(0)) < 0 ? decimalFraction(0)
+        : compareFractions(rawInitial, decimalFraction(100)) > 0 ? decimalFraction(100) : rawInitial;
+      reportedGrade = roundFraction(bounded, roundingFinalDecimalPlaces, roundingMethod);
+    } else if (reportingMethod === 'adjusted_2026') {
+      reportedGrade = transmutationTable?.length
+        ? applyTransmutationFraction(rawInitial, transmutationTable, true) : null;
+    } else {
+      reportedGrade = applyTransmutationFraction(rawInitial, transmutationTable, templateExams);
+    }
+  }
   const status = determineStatus(reportedGrade, passingGrade, weighted.complete);
 
   return {
     initialGrade: weighted.initialGrade,
+    rawInitialGrade: weighted.initialGrade == null ? null : fractionToNumber(rawInitial),
     reportedGrade,
     status,
     complete: weighted.complete,

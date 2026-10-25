@@ -58,7 +58,7 @@ class ElectiveGradeTests(unittest.TestCase):
             f.db.commit()
             self.assertEqual(before, fixtures.grading.get_gradebook_full(f.db, book.id))
             self.assertEqual(f.create(f.general).id, book.id)
-            period = fixtures.GradingPeriod(school_year_id=f.year.id, quarter=2, name='Term 2', starts_on=fixtures.date(2026, 6, 1), ends_on=fixtures.date(2027, 3, 31))
+            period = fixtures.GradingPeriod(school_year_id=f.year.id, term_order=2, name='Term 2', starts_on=fixtures.date(2026, 6, 1), ends_on=fixtures.date(2027, 3, 31))
             f.db.add(period)
             f.db.commit()
             with self.assertRaisesRegex(ValueError, 'not allowed'):

@@ -42,6 +42,7 @@ class Person(Base):
     middle_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
     name_extension: Mapped[str | None] = mapped_column(String(20), nullable=True)
     sex: Mapped[str] = mapped_column(String(10))
+    date_of_birth: Mapped[date | None] = mapped_column(Date, nullable=True)
     role: Mapped[str] = mapped_column(String(40), index=True)
     grade: Mapped[str | None] = mapped_column(String(20), nullable=True)
     section: Mapped[str | None] = mapped_column(String(80), nullable=True)
@@ -108,12 +109,12 @@ class SchoolYear(Base):
 class GradingPeriod(Base):
     __tablename__ = "grading_periods"
     __table_args__ = (UniqueConstraint("school_year_id",
-                      "quarter", name="uq_school_year_quarter"),)
+                      "term_order", name="uq_school_year_quarter"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     school_year_id: Mapped[int] = mapped_column(
         ForeignKey("school_years.id"), index=True)
     name: Mapped[str] = mapped_column(String(80))
-    quarter: Mapped[int] = mapped_column(Integer)
+    term_order: Mapped[int] = mapped_column(Integer)
     starts_on: Mapped[date] = mapped_column(Date)
     ends_on: Mapped[date] = mapped_column(Date)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -423,7 +424,7 @@ class GradeChangeAudit(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     class_key: Mapped[str] = mapped_column(String(240), index=True)
     school_year: Mapped[str] = mapped_column(String(30))
-    quarter: Mapped[int] = mapped_column(Integer)
+    term_order: Mapped[int] = mapped_column(Integer)
     subject: Mapped[str] = mapped_column(String(120))
     reason: Mapped[str] = mapped_column(Text)
     actor_user_id: Mapped[int] = mapped_column(
@@ -440,7 +441,7 @@ class GradebookState(Base):
     __tablename__ = "gradebook_states"
     class_key: Mapped[str] = mapped_column(String(240), primary_key=True)
     school_year: Mapped[str] = mapped_column(String(30), index=True)
-    quarter: Mapped[int] = mapped_column(Integer, index=True)
+    term_order: Mapped[int] = mapped_column(Integer, index=True)
     subject: Mapped[str] = mapped_column(String(120), index=True)
     grade: Mapped[str] = mapped_column(String(30), index=True)
     section: Mapped[str] = mapped_column(String(80), index=True)
@@ -603,10 +604,47 @@ class RosterImportAudit(Base):
     inserted_count: Mapped[int] = mapped_column(Integer)
     updated_count: Mapped[int] = mapped_column(Integer)
     skipped_count: Mapped[int] = mapped_column(Integer)
+    import_mode: Mapped[str] = mapped_column(String(30), default="roster", server_default="roster", index=True)
     actor_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     actor_name: Mapped[str] = mapped_column(String(180))
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, index=True)
+
+
+class LearnerEnrollment(Base):
+    """Verified learner placement in one section for an effective school-year interval."""
+    __tablename__ = "learner_enrollments"
+    __table_args__ = (
+        UniqueConstraint("person_id", "school_year_id", "starts_on", name="uq_learner_enrollment_start"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    person_id: Mapped[int] = mapped_column(ForeignKey("persons.id"), index=True)
+    school_year_id: Mapped[int] = mapped_column(ForeignKey("school_years.id"), index=True)
+    grade_level_id: Mapped[int] = mapped_column(ForeignKey("grade_levels.id"), index=True)
+    section_id: Mapped[int] = mapped_column(ForeignKey("school_sections.id"), index=True)
+    starts_on: Mapped[date] = mapped_column(Date)
+    ends_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    source_reference: Mapped[str] = mapped_column(String(300))
+    source_sha256: Mapped[str] = mapped_column(String(64))
+    imported_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    imported_by_name: Mapped[str] = mapped_column(String(180))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    person: Mapped[Person] = relationship()
+    school_year: Mapped[SchoolYear] = relationship()
+    grade_level: Mapped[GradeLevel] = relationship()
+    section: Mapped[SchoolSection] = relationship()
+
+
+class AnnexGTermComment(Base):
+    __tablename__ = "annex_g_term_comments"
+    __table_args__ = (UniqueConstraint("enrollment_id", "term_order", name="uq_annex_g_comment_term"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    enrollment_id: Mapped[int] = mapped_column(ForeignKey("learner_enrollments.id", ondelete="CASCADE"), index=True)
+    term_order: Mapped[int] = mapped_column(Integer)
+    comment: Mapped[str] = mapped_column(Text, default="")
+    saved_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    saved_by_name: Mapped[str] = mapped_column(String(180))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class RecordDisposalAudit(Base):

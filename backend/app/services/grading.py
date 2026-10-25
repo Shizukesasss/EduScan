@@ -27,6 +27,7 @@ from ..models_grading import (
 from .grading_engine import (
     DEFAULT_TRANSMUTATION_TABLE, apply_transmutation, build_default_transmutation_table,
     calculate_student_grade, generate_calculation_breakdown, round_value,
+    reporting_method_for_school_year,
     validate_gradebook as engine_validate,
     normalize_component_weights,
 )
@@ -127,12 +128,17 @@ def get_gradebook_by_class_key(db: Session, class_key: str) -> Gradebook | None:
     )
 
 
-def gradebook_roster_query(book: Gradebook):
-    return select(Person).where(
-        Person.role == "Student", Person.active.is_(True),
-        func.lower(func.trim(Person.grade)).in_(grade_name_aliases(book.grade_name)),
-        func.lower(func.trim(Person.section)) == book.section_name.strip().lower(),
-    ).order_by(Person.full_name, Person.external_id)
+def gradebook_roster_query(book: Gradebook, roster_person_ids: list[int] | None = None):
+    query = select(Person).where(Person.role == "Student")
+    if roster_person_ids is None:
+        query = query.where(
+            Person.active.is_(True),
+            func.lower(func.trim(Person.grade)).in_(grade_name_aliases(book.grade_name)),
+            func.lower(func.trim(Person.section)) == book.section_name.strip().lower(),
+        )
+    else:
+        query = query.where(Person.id.in_(roster_person_ids))
+    return query.order_by(Person.full_name, Person.external_id)
 
 
 def teacher_grading_section_ids(db: Session, user: User) -> set[int]:
@@ -220,7 +226,8 @@ def validate_score_value(item: AssessmentItem, score: float | None, status: str)
     return value
 
 
-def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=True) -> dict | None:
+def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=True,
+                       roster_person_ids: list[int] | None = None) -> dict | None:
     """Load a gradebook with all components, items, scores, and calculations."""
     book = db.scalar(
         select(Gradebook)
@@ -233,7 +240,7 @@ def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=
         return None
 
     # Load students for this grade/section
-    students = db.scalars(gradebook_roster_query(book)).all()
+    students = db.scalars(gradebook_roster_query(book, roster_person_ids)).all()
 
     # Collect all assessment item IDs
     all_item_ids = []
@@ -304,6 +311,7 @@ def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=
     rounding_dp = policy.rounding_decimal_places if policy else 2
     rounding_final_dp = policy.rounding_final_decimal_places if policy else 0
     rounding_method = policy.rounding_method if policy else "half_up"
+    reporting_method = policy.reporting_method if policy else reporting_method_for_school_year(book.school_year or book.school_year_name)
 
     # Calculate grades for each student
     student_rows = []
@@ -319,6 +327,7 @@ def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=
             rounding_decimal_places=rounding_dp,
             rounding_final_decimal_places=rounding_final_dp,
             rounding_method=rounding_method,
+            reporting_method=reporting_method,
         )
 
         # Build per-item score map for the student
@@ -380,7 +389,7 @@ def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=
             "teacher_user_id": book.teacher_user_id,
             "school_year_name": book.school_year_name,
             "school_head": get_json(db, "school.heads", {}).get(str(book.school_year_id), {}).get("full_name", ""),
-            "quarter": book.quarter,
+            "term_order": book.term_order,
             "grade_name": normalize_grade_name(book.grade_name),
             "section_name": book.section_name,
             "subject_name": book.subject_name,
@@ -409,6 +418,7 @@ def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=
         "components": components_data,
         "policy": {
             "transmutation_table": trans_table,
+            "reporting_method": reporting_method,
             "rounding_decimal_places": rounding_dp,
             "rounding_final_decimal_places": rounding_final_dp,
             "rounding_method": rounding_method,
@@ -432,7 +442,7 @@ def mapeh_combined_summary(db, book):
         full = get_gradebook_full(db, sibling.id, include_mapeh_summary=False)
         for student in full['students']:
             row = rows.setdefault(student['person_id'], {'person_id': student['person_id'], 'full_name': student['full_name'], 'terms': {}})
-            term = row['terms'].setdefault(sibling.quarter, {})
+            term = row['terms'].setdefault(sibling.term_order, {})
             term[sibling.learning_area] = student['reported_grade'] if sibling.status in {'Finalized', 'Locked'} else None
     for row in rows.values():
         combined = []
@@ -555,7 +565,7 @@ def create_or_get_gradebook(
         scope = "track" if (subj.category or "JHS").strip().upper().startswith("SHS") else "program"
         raise ValueError(f"This elective is available only to the {required_track} {scope}")
 
-    class_key = f"{sy.name}-q{gp.quarter}-{gl.name}-{sec.name}-{subj.name}".lower().replace(" ", "-")
+    class_key = f"{sy.name}-q{gp.term_order}-{gl.name}-{sec.name}-{subj.name}".lower().replace(" ", "-")
     if learning_area:
         from .mapeh_learning_areas import validate_area
         validate_area(subj, gl.name, learning_area)
@@ -602,7 +612,7 @@ def create_or_get_gradebook(
         book.section_id = section_id
         book.subject_id = subject_id
         book.school_year_name = sy.name
-        book.quarter = gp.quarter
+        book.term_order = gp.term_order
         book.grade_name = gl.name
         book.section_name = sec.name
         book.subject_name = subj.name
@@ -632,7 +642,7 @@ def create_or_get_gradebook(
             ensure_template_policies(db, sy.name, user)
         policy = get_active_policy_for(db, sy.name, gl.name, subject_policy_category(subj.name, subj.category))
 
-    class_key = f"{sy.name}-q{gp.quarter}-{gl.name}-{sec.name}-{subj.name}".lower().replace(" ", "-")
+    class_key = f"{sy.name}-q{gp.term_order}-{gl.name}-{sec.name}-{subj.name}".lower().replace(" ", "-")
     if learning_area:
         from .mapeh_learning_areas import validate_area
         validate_area(subj, gl.name, learning_area)
@@ -647,7 +657,7 @@ def create_or_get_gradebook(
         grading_policy_id=policy.id if policy else None,
         teacher_user_id=assigned_teacher.id if assigned_teacher else None,
         school_year_name=sy.name,
-        quarter=gp.quarter,
+        term_order=gp.term_order,
         grade_name=gl.name,
         section_name=sec.name,
         subject_name=subj.name,
@@ -1466,7 +1476,7 @@ def gradebook_summary(db: Session, class_key: str) -> dict:
     metadata = {
         "class_key": class_key,
         "school_year": state.school_year if state else rules.get("school_year", ""),
-        "quarter": state.quarter if state else rules.get("quarter", 1),
+        "term_order": state.term_order if state else rules.get("term_order", rules.get("quarter", 1)),
         "subject": state.subject if state else rules.get("subject", ""),
         "grade": grade,
         "section": section,

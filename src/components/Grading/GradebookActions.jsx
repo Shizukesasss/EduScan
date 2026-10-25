@@ -188,16 +188,16 @@ export default function GradebookActions({
             disabled={disabled || isSaving || (!isFinalized && !isLocked)}
             title={(!isFinalized && !isLocked) ? "Gradebook must be Finalized before exporting" : "Download Excel spreadsheet (XLSX)"}
           >
-            <span>Export Term {gradebook?.quarter} XLSX</span>
+            <span>Export Term {gradebook?.term_order} XLSX</span>
           </button>}
-          {(isRecordsOfficer || userRole === 'teacher') && !gradebook?.is_legacy_readonly && [2, 3].includes(Number(gradebook?.quarter)) && <button
+          {(isRecordsOfficer || userRole === 'teacher') && !gradebook?.is_legacy_readonly && [2, 3].includes(Number(gradebook?.term_order)) && <button
             type="button"
             className="btn btn-secondary"
             onClick={onExportAllTerms}
             disabled={disabled || isSaving || (!isFinalized && !isLocked)}
-            title={`Export Terms 1 through ${gradebook.quarter} in one workbook. All included terms must be complete and finalized or locked.`}
+            title={`Export Terms 1 through ${gradebook.term_order} in one workbook. All included terms must be complete and finalized or locked.`}
           >
-            <span>{Number(gradebook.quarter) === 2 ? 'Export 2 Terms XLSX' : 'Export All 3 Terms XLSX'}</span>
+            <span>{Number(gradebook.term_order) === 2 ? 'Export 2 Terms XLSX' : 'Export All 3 Terms XLSX'}</span>
           </button>}
 
           <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onOpenAudit} title="View full audit log of all changes">

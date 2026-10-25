@@ -20,6 +20,7 @@ HEADER_ALIASES = {
     "lrn": {"lrn", "learner reference number"},
     "full_name": {"full name", "name", "learner name", "student name"},
     "sex": {"sex", "gender"},
+    "date_of_birth": {"date of birth", "date_of_birth", "dob"},
     "role": {"role", "personnel group", "type"},
     "grade": {"grade", "grade level"},
     "section": {"section"},
@@ -77,7 +78,7 @@ def parse_roster(data: bytes) -> tuple[list[dict], list[dict]]:
         date_error = None
         for index, field in mapped.items():
             value = values[index] if index < len(values) else None
-            if field in {"enrollment_start_date", "enrollment_end_date"}:
+            if field in {"enrollment_start_date", "enrollment_end_date", "date_of_birth"}:
                 try:
                     record[field] = _date_value(value)
                 except ValueError as exc:
@@ -117,6 +118,7 @@ def parse_roster(data: bytes) -> tuple[list[dict], list[dict]]:
             record["assignment"] = record["assignment"] or None
         record["guardian_phone"] = record.get("guardian_phone") or None
         record["transfer_school"] = record.get("transfer_school") or None
+        record["_source_row"] = row_number
         accepted.append(record)
     workbook.close()
     return accepted, errors
@@ -129,16 +131,28 @@ def import_roster(db: Session, data: bytes, filename: str, approved_reference: s
         raise HTTPException(status_code=422, detail="Enter the school approval/document reference for this roster")
     rows, errors = parse_roster(data)
     inserted = updated = skipped = 0
+    missing_birth_date_rows = set()
+    for record in rows:
+        person = db.scalar(select(Person).where(Person.external_id == record["external_id"]))
+        if not person and record.get("lrn"):
+            person = db.scalar(select(Person).where(Person.lrn == record["lrn"]))
+        if record["role"] == "Student" and (not person or person.role != "Student") and not record.get("date_of_birth"):
+            errors.append({"row": record["_source_row"], "errors": ["date of birth is required for a new student record"]})
+            missing_birth_date_rows.add(record["_source_row"])
+    rows = [record for record in rows if record["_source_row"] not in missing_birth_date_rows]
     if dry_run:
         return {"dry_run": True, "valid_rows": len(rows), "invalid_rows": len(errors), "errors": errors[:100]}
     if errors:
         raise HTTPException(status_code=422, detail={"message": "Correct invalid roster rows before import", "errors": errors[:100]})
     for record in rows:
+        record.pop("_source_row", None)
         person = db.scalar(select(Person).where(Person.external_id == record["external_id"]))
         if not person and record.get("lrn"):
             person = db.scalar(select(Person).where(Person.lrn == record["lrn"]))
         if person:
             for field, value in record.items():
+                if field == "date_of_birth" and value is None:
+                    continue
                 setattr(person, field, value)
             person.active = True
             updated += 1

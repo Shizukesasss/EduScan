@@ -28,13 +28,32 @@ def sample_record(method='half_up', exams=False):
                                      table, rounding_method=method)
     student = dict(person_id=1, full_name='Synthetic, Learner', sex='Male', external_id='TEST-001', lrn='TEST-001', scores=scores,
                    score_statuses={key: 'Scored' for key in scores}, **result)
-    return dict(gradebook=dict(quarter=1, subject_name='Custom Subject', school_year_name='2026-2027', grade_name='7', section_name='Jose',
+    return dict(gradebook=dict(term_order=1, subject_name='Custom Subject', school_year_name='2026-2027', grade_name='7', section_name='Jose',
                                teacher_name='Synthetic Teacher', school_head='Synthetic Head', passing_grade=75),
                 policy=dict(transmutation_table=table, rounding_method=method, rounding_decimal_places=2, rounding_final_decimal_places=0),
                 components=components, students=[student])
 
 
 class AdaptiveClassRecordTests(unittest.TestCase):
+    def test_direct_reporting_export_formula_and_cached_grade_match_engine(self):
+        full = sample_record(exams=True)
+        full['policy'].update(reporting_method='direct', transmutation_table=None)
+        student = full['students'][0]
+        scores = [dict(item_id=int(key), score=value, status='Scored') for key, value in student['scores'].items()]
+        items = {component['id']: [item for item in component['items'] if item['active']]
+                 for component in full['components']}
+        result = calculate_student_grade(
+            scores, full['components'], items, reporting_method='direct', rounding_final_decimal_places=0,
+        )
+        student.update(result)
+        cached = {}
+        sheet = _term_sheet(Workbook(), full, cached)
+        grade_col = next(cell.column for cell in sheet[10] if cell.value == 'TERM GRADE')
+        formula = sheet.cell(12, grade_col).value
+        self.assertIn('ROUND(MAX(0,MIN(100,', formula)
+        self.assertNotIn('HELPER!', formula)
+        self.assertEqual(cached['Term 1'][f'{sheet.cell(12, grade_col).column_letter}12'], result['reported_grade'])
+
     def test_all_terms_export_requires_three_complete_records_and_preserves_grades(self):
         from fastapi import HTTPException
         from app.services.adaptive_class_record import export_adaptive
@@ -43,10 +62,10 @@ class AdaptiveClassRecordTests(unittest.TestCase):
         books = []
         for period in (1, 2, 3):
             full = sample_record(exams=True)
-            full['gradebook'].update(id=period, quarter=period, status='Locked' if period == 3 else 'Finalized')
+            full['gradebook'].update(id=period, term_order=period, status='Locked' if period == 3 else 'Finalized')
             full['statistics'] = {'incomplete': 0}
             terms[period] = full
-            books.append(SimpleNamespace(id=period, quarter=period, teacher_user_id=7, school_year_id=1,
+            books.append(SimpleNamespace(id=period, term_order=period, teacher_user_id=7, school_year_id=1,
                                          grade_level_id=1, section_id=1, subject_id=1))
         before = copy.deepcopy(terms)
         db = Mock()
@@ -71,7 +90,7 @@ class AdaptiveClassRecordTests(unittest.TestCase):
                 values.close()
             self.assertEqual(terms, before)
             query = str(db.scalars.call_args.args[0].compile(compile_kwargs={'literal_binds': True}))
-            for constraint in ('teacher_user_id = 7', 'school_year_id = 1', 'section_id = 1', 'subject_id = 1', 'quarter IN (1, 2, 3)'):
+            for constraint in ('teacher_user_id = 7', 'school_year_id = 1', 'section_id = 1', 'subject_id = 1', 'term_order IN (1, 2, 3)'):
                 self.assertIn(constraint, query)
 
             for invalid in ('missing', 'draft', 'incomplete', 'empty', 'duplicate'):

@@ -27,24 +27,30 @@ def partner_gradebook_issue(db, book):
     )).all()
     partner_name = AREAS[partner_area]
     if len(matches) != 1:
-        return f"Complete the matching {partner_name} gradebook for MAPEH Term {book.quarter} before finalizing."
+        return f"Complete the matching {partner_name} gradebook for MAPEH Term {book.term_order} before finalizing."
     from .grading import get_gradebook_full
     full = get_gradebook_full(db, matches[0].id, include_mapeh_summary=False)
     if not full or not full['students'] or full['statistics']['incomplete']:
-        return f"Enter and save complete {partner_name} grades for every learner in MAPEH Term {book.quarter} before finalizing."
+        return f"Enter and save complete {partner_name} grades for every learner in MAPEH Term {book.term_order} before finalizing."
     return None
 
 def area_policy(db, year, actor):
     from .class_record_export import template_table
     from .reports import TEMPLATES_DIR
     from .template_policies import policy_components
+    from .grading_engine import reporting_method_for_school_year
     version = 'MAPEH-Areas-v1'
     policy = db.scalar(select(GradingPolicy).where(GradingPolicy.school_year == year, GradingPolicy.version == version))
     if policy is None:
+        reporting_method = reporting_method_for_school_year(year)
+        table = None if reporting_method == 'direct' else template_table(
+            TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / 'MUSIC AND ARTS AND PE-HEALTH - Grade 7-10 Class Record.xlsx'
+        )
         policy = GradingPolicy(name='MAPEH learning areas 20/60/20', version=version, school_year=year,
             grade_levels='7,8,9,10', subject_category='MAPEH-Areas',
+            reporting_method=reporting_method,
             component_definitions_json=json.dumps(policy_components('mapeh')),
-            transmutation_table_json=json.dumps(template_table(TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / 'MUSIC AND ARTS AND PE-HEALTH - Grade 7-10 Class Record.xlsx')),
+            transmutation_table_json=json.dumps(table) if table else None,
             rounding_decimal_places=2, rounding_final_decimal_places=0, rounding_method='half_up', passing_grade=75,
             status='Active', created_by=actor.id, created_by_name=actor.full_name)
         db.add(policy); db.flush()
@@ -57,7 +63,7 @@ def preview_mapeh_activation(db):
     for book in books:
         if book.subject_name.strip().upper() != 'MAPEH' or not is_junior_high(book.grade_name): continue
         full = get_gradebook_full(db, book.id)
-        rows.append({'id':book.id,'school_year':book.school_year_name,'term':book.quarter,'section':book.section_name,
+        rows.append({'id':book.id,'school_year':book.school_year_name,'term_order':book.term_order,'section':book.section_name,
             'teacher':book.teacher_name,'status':book.status,'policy_id':book.grading_policy_id,
             'legacy_marker':book.is_legacy_readonly,'policy':full['policy'],'components':full['components'],
             'grades':[{'person_id':s['person_id'],'initial':s['initial_grade'],'term':s['reported_grade']} for s in full['students']],
@@ -81,7 +87,7 @@ def preview_mapeh_activation(db):
         if not teacher or not teacher.active or not all(r.active and r.deleted_at is None for r in refs): continue
         from ..models import GradingPeriod
         for period in db.scalars(select(GradingPeriod).where(GradingPeriod.school_year_id==book.school_year_id,
-                GradingPeriod.quarter.in_([1,2,3]),GradingPeriod.active.is_(True),GradingPeriod.deleted_at.is_(None))).all():
+                GradingPeriod.term_order.in_([1,2,3]),GradingPeriod.active.is_(True),GradingPeriod.deleted_at.is_(None))).all():
             for area in AREAS:
                 existing=db.scalar(select(Gradebook).where(Gradebook.school_year_id==book.school_year_id,
                     Gradebook.grading_period_id==period.id,Gradebook.grade_level_id==book.grade_level_id,
@@ -91,7 +97,7 @@ def preview_mapeh_activation(db):
                     continue
                 contexts.append({'school_year_id':book.school_year_id,'grading_period_id':period.id,'grade_level_id':book.grade_level_id,
                     'section_id':book.section_id,'subject_id':book.subject_id,'learning_area':area,'teacher_id':teacher.id,
-                    'teacher':teacher.full_name,'term':period.quarter,'section':book.section_name})
+                    'teacher':teacher.full_name,'term_order':period.term_order,'section':book.section_name})
     digest=hashlib.sha256(json.dumps({'legacy':rows,'planned':contexts,'existing_areas':existing_areas},sort_keys=True,default=str).encode()).hexdigest()
     return {'hash':digest,'legacy_records':rows,'planned_empty_area_contexts':contexts,'existing_area_ids':[r['gradebook']['id'] for r in existing_areas],'live_changes_applied':False}
 

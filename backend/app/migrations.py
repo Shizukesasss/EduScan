@@ -33,6 +33,10 @@ MIGRATIONS = (
     ("0020_admin_schedules_and_report_roles", "Link schedules to accounts and retain report generator roles"),
     ("0021_jhs_elective_allowed_grades", "Add compatible JHS elective grade restrictions"),
     ("0022_annual_advisers_demo_setup", "Annual adviser history and confirmed demo teacher setup"),
+    ("0023_school_year_grading_reporting_mode", "Apply explicit adjusted or direct reporting by school year"),
+    ("0024_replace_quarter_with_term_order", "Rename stored grading period identifiers to term order"),
+    ("0025_person_date_of_birth", "Store person date of birth for calculated age"),
+    ("0026_annex_g_enrollment_and_comments", "Add verified school-year learner placements and Annex G adviser comments"),
 )
 
 
@@ -53,6 +57,14 @@ def _create_index_if_missing(connection, table: str, name: str, columns: str, un
     connection.execute(text(f"CREATE {qualifier}INDEX {name} ON {table} ({columns})"))
 
 
+def _rename_column_if_needed(connection, table: str, old_name: str, new_name: str) -> None:
+    if not inspect(connection).has_table(table):
+        return
+    columns = {item["name"] for item in inspect(connection).get_columns(table)}
+    if old_name in columns and new_name not in columns:
+        connection.execute(text(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}"))
+
+
 def run_migrations(engine: Engine) -> list[str]:
     """Apply idempotent, recorded schema migrations instead of untracked create_all calls."""
     applied_now: list[str] = []
@@ -65,7 +77,35 @@ def run_migrations(engine: Engine) -> list[str]:
         for version, description in MIGRATIONS:
             if version in applied:
                 continue
-            if version == "0022_annual_advisers_demo_setup":
+            if version == "0025_person_date_of_birth":
+                _add_column_if_missing(connection, "persons", "date_of_birth", "DATE NULL")
+            elif version == "0026_annex_g_enrollment_and_comments":
+                Base.metadata.create_all(bind=connection)
+                _add_column_if_missing(connection, "roster_import_audits", "import_mode", "VARCHAR(30) NOT NULL DEFAULT 'roster'")
+                _create_index_if_missing(connection, "roster_import_audits", "ix_roster_import_audits_import_mode", "import_mode")
+            elif version == "0024_replace_quarter_with_term_order":
+                for table in ("grading_periods", "gradebooks", "gradebook_states", "grade_change_audits"):
+                    _rename_column_if_needed(connection, table, "quarter", "term_order")
+            elif version == "0023_school_year_grading_reporting_mode":
+                if inspect(connection).has_table("grading_policies"):
+                    _add_column_if_missing(connection, "grading_policies", "reporting_method", "VARCHAR(30) NOT NULL DEFAULT 'legacy'")
+                    from .services.grading_engine import reporting_method_for_school_year
+                    policies = connection.execute(text(
+                        "SELECT id, school_year, version, transmutation_table_json FROM grading_policies"
+                    )).all()
+                    for policy_id, school_year, policy_version, table_json in policies:
+                        method = reporting_method_for_school_year(school_year)
+                        if method == "adjusted_2026" and (policy_version not in {
+                            "Updated-Excel-3Term-v1", "MAPEH-Areas-v1", "DO015-2026-v1",
+                        } or not table_json):
+                            method = "legacy"
+                        connection.execute(text(
+                            "UPDATE grading_policies SET reporting_method=:method, "
+                            "rounding_method=CASE WHEN :method='direct' THEN 'half_up' ELSE rounding_method END, "
+                            "rounding_final_decimal_places=CASE WHEN :method='direct' THEN 0 ELSE rounding_final_decimal_places END "
+                            "WHERE id=:id"
+                        ), {"method": method, "id": policy_id})
+            elif version == "0022_annual_advisers_demo_setup":
                 _add_column_if_missing(connection, 'users', 'is_demo', 'BOOLEAN NOT NULL DEFAULT FALSE')
                 Base.metadata.tables['section_adviser_assignments'].create(connection, checkfirst=True)
                 Base.metadata.tables['demo_teacher_setup_batches'].create(connection, checkfirst=True)

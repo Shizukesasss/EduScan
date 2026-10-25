@@ -51,7 +51,7 @@ class AuditRepairsTest(unittest.TestCase):
         self.db.flush()
         self.db.add_all([SchoolSection(grade_level_id=self.grade.id, name="Own", adviser_user_id=self.teacher.id),
                          SchoolSection(grade_level_id=self.grade.id, name="Other", adviser_user_id=self.other.id),
-                         GradebookState(class_key="other-book", school_year="2026-2027", quarter=1,
+                         GradebookState(class_key="other-book", school_year="2026-2027", term_order=1,
                                         subject="Mathematics", grade="10", section="Other")])
         self.db.commit()
         def override():
@@ -94,7 +94,7 @@ class AuditRepairsTest(unittest.TestCase):
         year = SchoolYear(name="2026-2027", starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
         student = Person(external_id="OWN-STUDENT", full_name="Own Learner", sex="Male", role="Student", grade="10", section="Own")
         self.db.add_all([year, student, Subject(code="MATH", name="Mathematics")]); self.db.flush()
-        self.db.add(GradingPeriod(school_year_id=year.id, name="Quarter 1", quarter=1, starts_on=year.starts_on, ends_on=year.ends_on))
+        self.db.add(GradingPeriod(school_year_id=year.id, name="Quarter 1", term_order=1, starts_on=year.starts_on, ends_on=year.ends_on))
         self.db.commit()
         payload = self.payload("own-book")
         payload["scores"] = {str(student.id): {"one": 0}}
@@ -121,9 +121,9 @@ class AuditRepairsTest(unittest.TestCase):
 
     def workbook(self, assignment_column=False):
         book = Workbook()
-        book.active.append(["School ID", "Full Name", "Sex", "Role", "Grade", "Section"] + (["Assignment"] if assignment_column else []))
-        book.active.append(["STUDENT-1", "Test Learner", "Male", "Student", "10", "Own"] + ([None] if assignment_column else []))
-        book.active.append(["STAFF-1", "Test Faculty", "Female", "Faculty", None, None] + (["Science"] if assignment_column else []))
+        book.active.append(["School ID", "Full Name", "Sex", "Role", "Grade", "Section", "Date of Birth"] + (["Assignment"] if assignment_column else []))
+        book.active.append(["STUDENT-1", "Test Learner", "Male", "Student", "10", "Own", date(2012, 1, 1)] + ([None] if assignment_column else []))
+        book.active.append(["STAFF-1", "Test Faculty", "Female", "Faculty", None, None, None] + (["Science"] if assignment_column else []))
         stream = io.BytesIO(); book.save(stream); book.close()
         return stream.getvalue()
 

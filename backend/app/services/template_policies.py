@@ -6,6 +6,7 @@ from sqlalchemy import select
 from ..models import SchoolYear
 from ..models_grading import AssessmentItem, GradingPolicy
 from .academic_context import subject_policy_category
+from .grading_engine import reporting_method_for_school_year
 
 VERSION = 'Updated-Excel-3Term-v1'
 
@@ -29,7 +30,8 @@ def policy_components(kind):
 def ensure_template_policies(db, school_year, actor):
     from .class_record_export import template_table
     from .reports import TEMPLATES_DIR
-    db.scalar(select(SchoolYear).where(SchoolYear.name == school_year).with_for_update())
+    year_record = db.scalar(select(SchoolYear).where(SchoolYear.name == school_year).with_for_update())
+    reporting_method = reporting_method_for_school_year(year_record or school_year)
     policies = {}
     for category, kind, filename in (
         ('Languages/AP/EsP', 'core', 'ENGLISH - Grade 7-10 Class Record.xlsx'),
@@ -41,12 +43,15 @@ def ensure_template_policies(db, school_year, actor):
             GradingPolicy.school_year == school_year, GradingPolicy.subject_category == category,
             GradingPolicy.version == VERSION))
         if policy is None:
-            table = [{**row, 'min': round(row['min'], 2), 'max': round(row['max'], 2)}
-                     for row in template_table(TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename)]
+            table = None if reporting_method == 'direct' else [
+                {**row, 'min': round(row['min'], 2), 'max': round(row['max'], 2)}
+                for row in template_table(TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename)
+            ]
             policy = GradingPolicy(name=f'Updated Excel class record — {category}', version=VERSION,
                                    school_year=school_year, grade_levels='7,8,9,10', subject_category=category,
+                                   reporting_method=reporting_method,
                                    component_definitions_json=json.dumps(policy_components(kind)),
-                                   transmutation_table_json=json.dumps(table), rounding_decimal_places=2,
+                                   transmutation_table_json=json.dumps(table) if table else None, rounding_decimal_places=2,
                                    rounding_final_decimal_places=0, rounding_method='half_up', passing_grade=75,
                                    status='Active', created_by=actor.id, created_by_name=actor.full_name)
             db.add(policy)

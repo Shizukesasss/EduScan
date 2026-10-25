@@ -90,7 +90,7 @@ class AtomicEnrollmentTest(unittest.TestCase):
         self.db.add(SchoolSection(grade_level_id=grade.id, name='Jose'))
         self.db.commit()
         self.payload = {'external_id': 'NEW-STUDENT', 'surname': 'Example', 'first_name': 'New',
-                        'sex': 'Male', 'role': 'Student', 'grade': '7', 'section': 'Jose', 'biometric_consent': True}
+                        'sex': 'Male', 'date_of_birth': '2012-01-01', 'role': 'Student', 'grade': '7', 'section': 'Jose', 'biometric_consent': True}
         self.overrides = dict(main.app.dependency_overrides)
         main.app.dependency_overrides[get_db] = lambda: self.db
         main.app.dependency_overrides[current_user] = lambda: self.fixture.admin

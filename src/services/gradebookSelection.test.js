@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { groupAdminGradebooks } from './gradebookSelection.js';
 
 const records = [
-  { id: 1, school_year_name: '2026-2027', grading_period_name: 'Term 2', quarter: 2, grade_name: '7', section_name: 'Manuel', subject_name: 'English', teacher_name: 'Juan dela Cruz', status: 'Draft' },
-  { id: 2, school_year_name: '2026-2027', grading_period_name: 'Term 1', quarter: 1, grade_name: '10', section_name: 'Jose', subject_name: 'Mathematics', teacher_name: 'Maria Santos', status: 'Finalized' },
-  { id: 3, school_year_name: '2026-2027', grading_period_name: 'Term 1', quarter: 1, grade_name: '7', section_name: 'Jose', subject_name: 'English', teacher_name: 'Juan dela Cruz', status: 'Finalized' },
+  { id: 1, school_year_name: '2026-2027', grading_period_name: 'Term 2', term_order: 2, grade_name: '7', section_name: 'Manuel', subject_name: 'English', teacher_name: 'Juan dela Cruz', status: 'Draft' },
+  { id: 2, school_year_name: '2026-2027', grading_period_name: 'Term 1', term_order: 1, grade_name: '10', section_name: 'Jose', subject_name: 'Mathematics', teacher_name: 'Maria Santos', status: 'Finalized' },
+  { id: 3, school_year_name: '2026-2027', grading_period_name: 'Term 1', term_order: 1, grade_name: '7', section_name: 'Jose', subject_name: 'English', teacher_name: 'Juan dela Cruz', status: 'Finalized' },
 ];
 
 test('admin class record search filters fields and groups remaining records by school year and term', () => {

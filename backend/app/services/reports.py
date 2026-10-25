@@ -114,7 +114,7 @@ def generate_grade_report_xlsx(db: Session, class_key: str) -> Path:
     sheet = book.active
     sheet.title = "Grade Summary"
     labels = ["LRN / ID", "Learner", "Initial Grade", "Transmuted Grade", "Result", "Completion"]
-    _title(sheet, "EDUSCAN GRADING SUMMARY", f"SY {metadata['school_year']} · Term {metadata['quarter']} · {metadata['subject']} · Grade {metadata['grade']} {metadata['section']}", len(labels))
+    _title(sheet, "EDUSCAN GRADING SUMMARY", f"SY {metadata['school_year']} · Term {metadata['term_order']} · {metadata['subject']} · Grade {metadata['grade']} {metadata['section']}", len(labels))
     _headers(sheet, 4, labels)
     for row_number, item in enumerate(rows, 5):
         values = [item["lrn"] or item["external_id"], item["full_name"], item["initial_grade"], item["transmuted_grade"], item["status"], "Complete" if item["complete"] else "Incomplete"]
@@ -131,7 +131,7 @@ def generate_grade_report_xlsx(db: Session, class_key: str) -> Path:
     sheet.freeze_panes = "A5"
     for column, width in {"A": 20, "B": 34, "C": 16, "D": 18, "E": 16, "F": 14}.items():
         sheet.column_dimensions[column].width = width
-    target = new_report_path(EXPORT_DIR, f"Grade-Summary-{_safe_name(metadata['school_year'])}-Term{metadata['quarter']}-{_safe_name(metadata['grade'])}-{_safe_name(metadata['section'])}-{_safe_name(metadata['subject'])}.xlsx")
+    target = new_report_path(EXPORT_DIR, f"Grade-Summary-{_safe_name(metadata['school_year'])}-Term{metadata['term_order']}-{_safe_name(metadata['grade'])}-{_safe_name(metadata['section'])}-{_safe_name(metadata['subject'])}.xlsx")
     book.save(target)
     return target
 
@@ -146,7 +146,7 @@ def grade_report_html(db: Session, class_key: str) -> str:
     )
     return _printable_html(
         "EduScan Grading Summary",
-        f"SY {metadata['school_year']} · Term {metadata['quarter']} · {metadata['subject']} · Grade {metadata['grade']} {metadata['section']}",
+        f"SY {metadata['school_year']} · Term {metadata['term_order']} · {metadata['subject']} · Grade {metadata['grade']} {metadata['section']}",
         "<table><thead><tr><th>LRN / ID</th><th>Learner</th><th>Initial</th><th>Transmuted</th><th>Result</th></tr></thead><tbody>" + body + "</tbody></table>"
         f"<h2>Class statistics</h2><p>Learners: {statistics['learners']} · Complete: {statistics['complete']} · Incomplete: {statistics['incomplete']} · "
         f"Passed: {statistics['passed']} · Below rule: {statistics['below_rule']} · Average: {statistics['average'] if statistics['average'] is not None else '—'} · "
@@ -435,7 +435,7 @@ def gradebook_report_html(db: Session, gradebook_id: int) -> str:
     )
     return _printable_html(
         "EduScan Grading Summary",
-        f"SY {gb['school_year_name']} · Term {gb['quarter']} · {gb['subject_name']} · Grade {gb['grade_name']} {gb['section_name']}",
+        f"SY {gb['school_year_name']} · Term {gb['term_order']} · {gb['subject_name']} · Grade {gb['grade_name']} {gb['section_name']}",
         "<table><thead><tr><th>LRN / ID</th><th>Learner</th><th>Initial</th><th>Transmuted</th><th>Result</th></tr></thead><tbody>" + body + "</tbody></table>"
         f"<h2>Class statistics</h2><p>Learners: {statistics['learners']} · Complete: {statistics['complete']} · Incomplete: {statistics['incomplete']} · "
         f"Passed: {statistics['passed']} · Below rule: {statistics['below_passing']} · Average: {statistics['average'] if statistics['average'] is not None else '—'} · "

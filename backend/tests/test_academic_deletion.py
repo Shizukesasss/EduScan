@@ -13,15 +13,17 @@ os.environ["EDUSCAN_SECRET_KEY"] = "isolated-academic-deletion-tests"
 os.environ["ATTENDANCE_SCHEDULER_ENABLED"] = "false"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, inspect, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 from app.auth import create_token
 from app.database import Base, get_db
-from app.main import app, seed_reference_data
+from app.main import academic_structure, app, save_grading_period, seed_reference_data
 from app.migrations import MIGRATIONS, run_migrations
 from app.models import GradeLevel, GradingPeriod, Person, SchoolSection, SchoolYear, Subject, SubjectTeachingAssignment, SystemAuditEvent, User
+from app.schemas import GradingPeriodPayload
 from app.models_grading import AssessmentItem, Gradebook, GradebookComponent, StudentScore
 
 
@@ -43,7 +45,7 @@ class AcademicDeletionTest(unittest.TestCase):
         self.db.add_all([self.admin, self.teacher, self.records, self.grade, self.subject, self.year, self.person])
         self.db.flush()
         self.section = SchoolSection(grade_level_id=self.grade.id, name="Rizal", adviser_user_id=self.teacher.id)
-        self.period = GradingPeriod(school_year_id=self.year.id, name="Q1", quarter=1, starts_on=date(2026, 6, 1), ends_on=date(2026, 8, 31))
+        self.period = GradingPeriod(school_year_id=self.year.id, name="Q1", term_order=1, starts_on=date(2026, 6, 1), ends_on=date(2026, 8, 31))
         self.db.add_all([self.section, self.period])
         self.db.flush()
         self.book = Gradebook(school_year_id=self.year.id, grading_period_id=self.period.id, grade_level_id=self.grade.id,
@@ -193,7 +195,7 @@ class AcademicDeletionTest(unittest.TestCase):
         self.assertEqual(structure['grading_periods'], [])
         self.assertEqual(self.db.get(StudentScore, self.score.id).score, 18)
         rejected = self.client.post('/api/admin/grading-periods', headers=self.headers, json={
-            'school_year_id': self.year.id, 'name': 'New period', 'quarter': 2,
+            'school_year_id': self.year.id, 'name': 'New period',
             'starts_on': '2026-09-01', 'ends_on': '2026-10-01'})
         self.assertEqual(rejected.status_code, 422)
         rejected = self.client.post('/api/gradebooks', headers=self.teacher_headers, json={
@@ -204,6 +206,39 @@ class AcademicDeletionTest(unittest.TestCase):
         self.assertEqual(self.client.get('/api/admin/academic-structure', headers=self.headers).json()['school_years'], [])
         self.assertEqual(self.client.post(f'/api/admin/reference/school-years/{self.year.id}/restore', headers=self.headers).status_code, 200)
         self.assertEqual(len(self.client.get('/api/admin/academic-structure', headers=self.headers).json()['grading_periods']), 1)
+
+    def test_grading_period_order_comes_from_name_and_api_hides_numeric_order(self):
+        payload = GradingPeriodPayload(
+            school_year_id=self.year.id, name='TERM 2',
+            starts_on=date(2026, 9, 1), ends_on=date(2026, 10, 1),
+        )
+        created = save_grading_period(payload, self.db, self.admin)
+        term_two = self.db.get(GradingPeriod, created['id'])
+        self.assertEqual(term_two.term_order, 2)
+
+        with self.assertRaises(HTTPException) as invalid:
+            save_grading_period(GradingPeriodPayload(
+                school_year_id=self.year.id, name='Special Period',
+                starts_on=date(2026, 9, 1), ends_on=date(2026, 10, 1),
+            ), self.db, self.admin)
+        self.assertEqual(invalid.exception.status_code, 422)
+        with self.assertRaises(HTTPException) as ambiguous:
+            save_grading_period(GradingPeriodPayload(
+                school_year_id=self.year.id, name='Term 2 or Term 3',
+                starts_on=date(2026, 9, 1), ends_on=date(2026, 10, 1),
+            ), self.db, self.admin)
+        self.assertEqual(ambiguous.exception.status_code, 422)
+        with self.assertRaises(HTTPException) as duplicate:
+            save_grading_period(payload.model_copy(update={'name': 'Term 2 copy'}), self.db, self.admin)
+        self.assertEqual(duplicate.exception.status_code, 409)
+
+        edited = save_grading_period(payload.model_copy(update={'id': self.period.id, 'name': 'First semester'}), self.db, self.admin)
+        self.assertEqual(edited['id'], self.period.id)
+        self.db.expire_all()
+        self.assertEqual(self.db.get(GradingPeriod, self.period.id).term_order, 1)
+
+        periods = academic_structure('', self.db, self.admin)['grading_periods']
+        self.assertTrue(all('term_order' in row and 'quarter' not in row for row in periods))
 
     def test_period_restore_requires_parent_year_and_separate_deletion_is_preserved(self):
         self.remove('grading-periods', self.period)

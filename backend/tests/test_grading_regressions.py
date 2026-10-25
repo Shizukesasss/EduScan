@@ -56,7 +56,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.subject = Subject(code='SHS-CORE', name='Core Subject', category='SHS-Core')
         self.db.add_all([self.admin, self.teacher, self.year, self.grade, self.subject])
         self.db.flush()
-        self.period = GradingPeriod(school_year_id=self.year.id, quarter=1, name='Q1', starts_on=date(2026, 6, 1), ends_on=date(2026, 8, 31))
+        self.period = GradingPeriod(school_year_id=self.year.id, term_order=1, name='Q1', starts_on=date(2026, 6, 1), ends_on=date(2026, 8, 31))
         self.section = SchoolSection(grade_level_id=self.grade.id, name='Berlin', adviser_user_id=self.teacher.id)
         self.general = GradingPolicy(name='General policy', school_year=self.year.name, grade_levels='7,8,9,10,11,12', subject_category='General', component_definitions_json=definitions())
         self.specific = GradingPolicy(name='SHS policy', school_year=self.year.name, grade_levels='11,12', subject_category='SHS-Core', component_definitions_json=definitions((0.25, 0.5, 0.25), (10, 8, 1)), transmutation_table_json=json.dumps([{'min': 0, 'max': 100, 'value': 88}]), rounding_decimal_places=3, rounding_method='floor')
@@ -328,7 +328,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
 
     def test_legacy_blank_manual_grade_cannot_turn_into_a_passing_finalized_record(self):
         self.grade.name = '11'
-        state = GradebookState(class_key='legacy-incomplete', school_year=self.year.name, quarter=1,
+        state = GradebookState(class_key='legacy-incomplete', school_year=self.year.name, term_order=1,
                               subject='Core Subject', grade='11', section='Berlin')
         manual = GradeComponent(class_key=state.class_key, category='Manual Overall', label='Overall Grade',
                                 weight=100, max_score=100, sequence=0)
@@ -344,7 +344,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
 
     def test_legacy_empty_class_cannot_be_finalized(self):
         self.grade.name = '11'
-        state = GradebookState(class_key='legacy-empty', school_year=self.year.name, quarter=1,
+        state = GradebookState(class_key='legacy-empty', school_year=self.year.name, term_order=1,
                               subject='Core Subject', grade='11', section='Berlin')
         self.db.add(state)
         self.db.commit()
@@ -1142,8 +1142,8 @@ class ClassRecordRegressionTest(unittest.TestCase):
     def test_shs_export_uses_all_three_terms_and_authoritative_results(self):
         first_semester = self.create(self.general)
         self.score_student(first_semester, 90)
-        second = GradingPeriod(school_year_id=self.year.id, quarter=2, name='Term 2', starts_on=date(2026, 9, 1), ends_on=date(2026, 10, 31))
-        third = GradingPeriod(school_year_id=self.year.id, quarter=3, name='Term 3', starts_on=date(2026, 11, 1), ends_on=date(2027, 1, 31))
+        second = GradingPeriod(school_year_id=self.year.id, term_order=2, name='Term 2', starts_on=date(2026, 9, 1), ends_on=date(2026, 10, 31))
+        third = GradingPeriod(school_year_id=self.year.id, term_order=3, name='Term 3', starts_on=date(2026, 11, 1), ends_on=date(2027, 1, 31))
         self.db.add(second)
         self.db.commit()
         second_book = self.create(self.general, grading_period_id=second.id)
@@ -1316,17 +1316,17 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.db.add(officer)
         self.db.commit()
         books = []
-        for quarter in (1, 2, 3):
-            period = self.period if quarter == 1 else GradingPeriod(
-                school_year_id=self.year.id, quarter=quarter, name=f'Term {quarter}',
+        for term_order in (1, 2, 3):
+            period = self.period if term_order == 1 else GradingPeriod(
+                school_year_id=self.year.id, term_order=term_order, name=f'Term {term_order}',
                 starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
             self.db.add(period)
             self.db.commit()
             book = self.create(self.general, grading_period_id=period.id)
             book.teacher_user_id, book.teacher_name = self.teacher.id, self.teacher.full_name
-            self.score_student(book, 60 + quarter * 10)
-            self.score_second_student(book, 65 + quarter * 10)
-            book.status = 'Locked' if quarter == 3 else 'Finalized'
+            self.score_student(book, 60 + term_order * 10)
+            self.score_second_student(book, 65 + term_order * 10)
+            book.status = 'Locked' if term_order == 3 else 'Finalized'
             self.db.commit()
             books.append(book)
         snapshots = {book.id: grading.get_gradebook_full(self.db, book.id) for book in books}
@@ -1340,7 +1340,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
                 self.assertEqual(values.sheetnames, ['INPUT DATA', 'Term 1', 'Term 2', 'Term 3'])
                 for book in books:
                     full = snapshots[book.id]
-                    sheet = values[f'Term {book.quarter}']
+                    sheet = values[f'Term {book.term_order}']
                     headings = {cell.value: cell.column for cell in sheet[10]}
                     learners = {student['external_id']: student for student in full['students']}
                     self.assertEqual(len(learners), 2)
@@ -1388,17 +1388,17 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.subject.name, self.subject.category = 'English', 'JHS'
         self.db.commit()
         books = []
-        for quarter in (1, 2, 3):
-            period = self.period if quarter == 1 else GradingPeriod(
-                school_year_id=self.year.id, quarter=quarter, name=f'Term {quarter}',
+        for term_order in (1, 2, 3):
+            period = self.period if term_order == 1 else GradingPeriod(
+                school_year_id=self.year.id, term_order=term_order, name=f'Term {term_order}',
                 starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
-            if quarter != 1:
+            if term_order != 1:
                 self.db.add(period)
                 self.db.commit()
             book = self.create(self.general, grading_period_id=period.id)
             self.label_export_exams(book)
-            self.score_student(book, 70 if quarter == 1 else 71.18)
-            self.score_second_student(book, 70 if quarter == 1 else 71.18)
+            self.score_student(book, 70 if term_order == 1 else 71.18)
+            self.score_second_student(book, 70 if term_order == 1 else 71.18)
             book.status = 'Finalized'
             books.append(book)
         self.db.commit()
@@ -1410,7 +1410,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
             self.assertEqual(workbook['Term 1']['B12'].value, 'First Student')
             self.assertEqual(workbook['Term 1']['B13'].value, 'Second Student')
             for book in books:
-                sheet = workbook[f'Term {book.quarter}']
+                sheet = workbook[f'Term {book.term_order}']
                 column = next(cell.column for cell in sheet[10] if cell.value == 'TERM GRADE')
                 expected = grading.get_gradebook_full(self.db, book.id)['students'][0]['reported_grade']
                 self.assertEqual(sheet.cell(12, column).value, expected)
@@ -1426,18 +1426,18 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.subject.name, self.subject.category = 'English', 'JHS'
         self.db.commit()
         books = []
-        for quarter in (1, 2, 3):
-            period = self.period if quarter == 1 else GradingPeriod(
-                school_year_id=self.year.id, quarter=quarter, name=f'Term {quarter}',
+        for term_order in (1, 2, 3):
+            period = self.period if term_order == 1 else GradingPeriod(
+                school_year_id=self.year.id, term_order=term_order, name=f'Term {term_order}',
                 starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
-            if quarter != 1:
+            if term_order != 1:
                 self.db.add(period)
                 self.db.commit()
             book = self.create(self.general, grading_period_id=period.id)
             self.label_export_exams(book)
-            self.score_student(book, 70 + quarter)
-            self.score_second_student(book, 70 + quarter)
-            book.status = 'Draft' if quarter == 2 else 'Finalized'
+            self.score_student(book, 70 + term_order)
+            self.score_second_student(book, 70 + term_order)
+            book.status = 'Draft' if term_order == 2 else 'Finalized'
             books.append(book)
         self.db.commit()
         workbook = self.export(books[-1])
@@ -1545,6 +1545,8 @@ class ClassRecordRegressionTest(unittest.TestCase):
         old_policy = self.general.component_definitions_json
         previous_exam = book.components[-1].items[0].id
         policies = ensure_template_policies(self.db, self.year.name, self.admin)
+        self.assertEqual(policies['Math/Science'].reporting_method, 'adjusted_2026')
+        self.assertTrue(policies['Math/Science'].transmutation_table_json)
         align_open_gradebook(self.db, book, self.admin, policies)
         align_open_gradebook(self.db, book, self.admin, policies)
         self.assertEqual([component.weight for component in book.components], [20, 50, 30])
@@ -1573,6 +1575,69 @@ class ClassRecordRegressionTest(unittest.TestCase):
         workbook.close()
         with self.assertRaisesRegex(ValueError, 'Finalized record'):
             align_open_gradebook(self.db, book, self.admin, policies)
+
+    def test_future_template_policies_use_direct_reporting_without_a_conversion_table(self):
+        from app.services.template_policies import ensure_template_policies
+        future_year = SchoolYear(name='2027-2028', starts_on=date(2027, 6, 1), ends_on=date(2028, 3, 31))
+        self.db.add(future_year)
+        self.db.flush()
+        policies = ensure_template_policies(self.db, future_year.name, self.admin)
+        self.assertEqual({policy.reporting_method for policy in policies.values()}, {'direct'})
+        self.assertTrue(all(policy.transmutation_table_json is None for policy in policies.values()))
+
+    def test_direct_reporting_fixed_workbook_formula_and_cache_match_gradebook(self):
+        from app.services.template_policies import ensure_template_policies
+        import openpyxl
+        self.year.name = '2027-2028'
+        self.year.starts_on, self.year.ends_on = date(2027, 6, 1), date(2028, 3, 31)
+        self.grade.name = self.first.grade = self.second.grade = '7'
+        self.subject.name, self.subject.category = 'Mathematics', 'JHS'
+        self.db.commit()
+        policies = ensure_template_policies(self.db, self.year.name, self.admin)
+        book = self.create(policies['Math/Science'])
+        self.score_student(book, 80)
+        self.score_second_student(book, 80)
+        book.status = 'Finalized'
+        self.db.commit()
+
+        full = grading.get_gradebook_full(self.db, book.id)
+        self.assertEqual(full['policy']['reporting_method'], 'direct')
+        self.assertEqual({row['reported_grade'] for row in full['students']}, {80})
+        workbook = self.export(book)
+        values = openpyxl.load_workbook(self.export_path, data_only=True)
+        try:
+            formula = workbook['TERM 1']['AC18'].value
+            self.assertIn('ROUND(MAX(0,MIN(100,AB18)),0)', formula)
+            self.assertNotIn('HELPER!', formula)
+            self.assertEqual(values['TERM 1']['AC18'].value, 80)
+            self.assertEqual(values['TERM 1']['AC69'].value, 80)
+        finally:
+            workbook.close()
+            values.close()
+
+    def test_manual_policy_routes_apply_the_school_year_reporting_mode(self):
+        from app.main import create_grading_policy
+        from app.schemas_grading import GradingPolicyCreate
+        component = [{'name': 'Overall', 'component_type': 'Written Work', 'weight': 100}]
+        current = create_grading_policy(
+            GradingPolicyCreate(name='Current-year test policy', school_year='2026-2027', component_definitions=component),
+            self.db, self.teacher,
+        )
+        current_policy = self.db.get(GradingPolicy, current['id'])
+        self.assertEqual(current_policy.reporting_method, 'adjusted_2026')
+        self.assertTrue(current_policy.transmutation_table_json)
+
+        future = create_grading_policy(
+            GradingPolicyCreate(name='Future-year test policy', school_year='2027-2028', component_definitions=component,
+                                transmutation_table=[{'min': 0, 'max': 100, 'value': 88}],
+                                rounding_method='floor', rounding_final_decimal_places=2),
+            self.db, self.teacher,
+        )
+        future_policy = self.db.get(GradingPolicy, future['id'])
+        self.assertEqual(future_policy.reporting_method, 'direct')
+        self.assertIsNone(future_policy.transmutation_table_json)
+        self.assertEqual(future_policy.rounding_method, 'half_up')
+        self.assertEqual(future_policy.rounding_final_decimal_places, 0)
 
     def test_updated_exam_weighting_and_conversion_match_excel_boundaries(self):
         from app.services.grading_engine import calculate_component_percentage, calculate_student_grade

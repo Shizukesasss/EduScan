@@ -22,7 +22,7 @@ const tabs = [
   ['recovery', 'Backup & recovery'],
 ];
 const emptyPerson = {
-  external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Female', role: 'Student',
+  external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Female', role: 'Student', date_of_birth: '',
   grade: '', section: '', guardian_phone: '',
   enrollment_status: 'Regular', enrollment_note: '', enrollment_start_date: '', enrollment_end_date: '',
   transfer_school: '', biometric_consent: false,
@@ -185,12 +185,13 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
   const [form, setForm] = useState(emptyPerson);
   const [editing, setEditing] = useState(null);
   const [disposal, setDisposal] = useState(null);
+  const editingRole = people.find((item) => item.id === editing)?.role;
   const patch = (field, value) => setForm((c) => ({ ...c, [field]: value, ...(field === 'role' && value !== c.role ? { enrollment_status: value === 'Student' ? 'Regular' : 'Appointed', enrollment_end_date: '' } : {}) }));
   const edit  = (item) => { setEditing(item.id); setForm(Object.fromEntries(Object.keys(emptyPerson).map((k) => [k, item[k] ?? emptyPerson[k]]))); };
   const save  = async (event) => {
     event.preventDefault();
     try {
-      const payload = { ...form, external_id: form.role === 'Student' && !editing ? form.lrn : form.external_id, lrn: form.role === 'Student' ? form.lrn || null : null, middle_name: form.middle_name || null, name_extension: form.name_extension || null, grade: form.grade || null, section: form.section || null, guardian_phone: form.guardian_phone || null, enrollment_note: form.enrollment_note || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null };
+      const payload = { ...form, external_id: form.role === 'Student' && !editing ? form.lrn : form.external_id, lrn: form.role === 'Student' ? form.lrn || null : null, date_of_birth: form.date_of_birth || null, middle_name: form.middle_name || null, name_extension: form.name_extension || null, grade: form.grade || null, section: form.section || null, guardian_phone: form.guardian_phone || null, enrollment_note: form.enrollment_note || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null };
       if (editing) await api.patch(`/persons/${editing}`, payload); else await api.post('/persons', payload);
       success(editing ? 'School record updated.' : 'School record created.'); setEditing(null); setForm(emptyPerson); await reload();
     } catch (err) { fail(err); }
@@ -218,7 +219,7 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
                 <SelectField label="Section" value={form.section} onChange={(v) => patch('section', v)} options={['', ...orderedOptions(structure.sections.filter(s => s.grade_level_id === structure.grade_levels.find(g => g.name === form.grade)?.id), (s) => s.name).map((s) => s.name)]} />
               </>
             )}
-            <EnrollmentFields form={form} onChange={patch} />
+            <EnrollmentFields form={form} onChange={patch} dateOfBirthRequired={!editing || (form.role === 'Student' && editingRole !== 'Student')} />
             <BiometricConsent checked={form.biometric_consent} onChange={(value) => patch('biometric_consent', value)} />
           </div>
           <div className="modal-actions">{editing && <button type="button" className="btn-secondary" onClick={() => { setEditing(null); setForm(emptyPerson); }}>Cancel</button>}<button className="btn-primary"><Save size={16} /> {editing ? 'Save changes' : 'Create record'}</button></div>
@@ -435,7 +436,7 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
   const firstGrade = sortedGradeLevels[0]?.id  || '';
 
   const [year,    setYear]    = useState({ id: null, name: '', starts_on: '', ends_on: '', active: true });
-  const [period,  setPeriod]  = useState({ id: null, school_year_id: '', name: 'Quarter 1', quarter: 1, starts_on: '', ends_on: '', active: true });
+  const [period,  setPeriod]  = useState({ id: null, school_year_id: '', name: 'Term 1', starts_on: '', ends_on: '', active: true });
   const [grade,   setGrade]   = useState({ id: null, name: '', active: true });
   const [section, setSection] = useState({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', track: '', active: true });
   const [subject, setSubject] = useState({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true });
@@ -574,9 +575,9 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
           await api.delete(`/admin/reference/${kind}/${item.id}`);
           if (kind === 'school-years') {
             if (year.id === item.id) setYear({ id: null, name: '', starts_on: '', ends_on: '', active: true });
-            if (Number(period.school_year_id) === item.id) setPeriod({ id: null, school_year_id: '', name: 'Quarter 1', quarter: 1, starts_on: '', ends_on: '', active: true });
+            if (Number(period.school_year_id) === item.id) setPeriod({ id: null, school_year_id: '', name: 'Term 1', starts_on: '', ends_on: '', active: true });
           }
-          if (kind === 'grading-periods' && period.id === item.id) setPeriod({ id: null, school_year_id: firstYear, name: 'Quarter 1', quarter: 1, starts_on: '', ends_on: '', active: true });
+          if (kind === 'grading-periods' && period.id === item.id) setPeriod({ id: null, school_year_id: firstYear, name: 'Term 1', starts_on: '', ends_on: '', active: true });
           if (kind === 'grade-levels') {
             if (grade.id === item.id) setGrade({ id: null, name: '', active: true });
             if (section.grade_level_id === item.id) setSection({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', track: '', active: true });
@@ -665,14 +666,14 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
       />
 
       <AcademicCard
-        title="Grading Periods" eyebrow="Quarters and term dates"
-        columns={[{ key: 'school_year', label: 'School Year' }, { key: 'name', label: 'Name' }, { key: 'quarter', label: 'Quarter' }, { key: 'starts_on', label: 'Starts' }, { key: 'ends_on', label: 'Ends' }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
+        title="Grading Periods" eyebrow="Terms and dates"
+        columns={[{ key: 'school_year', label: 'School Year' }, { key: 'name', label: 'Name' }, { key: 'starts_on', label: 'Starts' }, { key: 'ends_on', label: 'Ends' }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
         rows={structure.grading_periods}
-        onEdit={(item) => setPeriod({ ...item })}
+        onEdit={({ id, school_year_id, name, starts_on, ends_on, active }) => setPeriod({ id, school_year_id, name, starts_on, ends_on, active })}
         onDelete={(item) => confirmDelete('grading-periods', item, 'Grading Period')}
-        form={<div className="form-grid three-columns"><label><span className="field-label">School Year</span><select className="input-field" value={period.school_year_id} onChange={(e) => setPeriod({ ...period, school_year_id: Number(e.target.value) })}>{sortedSchoolYears.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><Field label="Name" value={period.name} onChange={(v) => setPeriod({ ...period, name: v })} /><Field label="Quarter" type="number" value={period.quarter} onChange={(v) => setPeriod({ ...period, quarter: Number(v) })} /><Field label="Starts" type="date" value={period.starts_on} onChange={(v) => setPeriod({ ...period, starts_on: v })} /><Field label="Ends" type="date" value={period.ends_on} onChange={(v) => setPeriod({ ...period, ends_on: v })} /></div>}
-        onSave={() => confirmSave('grading-periods', period, () => setPeriod({ id: null, school_year_id: firstYear, name: 'Quarter 1', quarter: 1, starts_on: '', ends_on: '', active: true }), 'Grading Period')}
-        onCancel={() => setPeriod({ id: null, school_year_id: firstYear, name: 'Quarter 1', quarter: 1, starts_on: '', ends_on: '', active: true })}
+        form={<div className="form-grid three-columns"><label><span className="field-label">School Year</span><select className="input-field" value={period.school_year_id} onChange={(e) => setPeriod({ ...period, school_year_id: Number(e.target.value) })}>{sortedSchoolYears.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><Field label="Name (e.g. TERM 1)" value={period.name} onChange={(v) => setPeriod({ ...period, name: v })} /><Field label="Starts" type="date" value={period.starts_on} onChange={(v) => setPeriod({ ...period, starts_on: v })} /><Field label="Ends" type="date" value={period.ends_on} onChange={(v) => setPeriod({ ...period, ends_on: v })} /></div>}
+        onSave={() => confirmSave('grading-periods', period, () => setPeriod({ id: null, school_year_id: firstYear, name: 'Term 1', starts_on: '', ends_on: '', active: true }), 'Grading Period')}
+        onCancel={() => setPeriod({ id: null, school_year_id: firstYear, name: 'Term 1', starts_on: '', ends_on: '', active: true })}
         isEditing={Boolean(period.id)}
       />
 
@@ -776,7 +777,7 @@ function RosterManager({ imports, reload, success, fail }) {
   const run = async (dryRun) => { if (!file) return fail(new Error('Select an approved .xlsx roster.')); const form = new FormData(); form.append('file', file); form.append('approved_reference', reference); form.append('dry_run', String(dryRun)); try { const result = await api.post('/admin/roster/import', form); setPreview(result); if (!dryRun) { success(`Roster imported: ${result.inserted} inserted and ${result.updated} updated.`); await reload(); } } catch (err) { fail(err); } };
   return (
     <div className="page-stack">
-      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Approved spreadsheet workflow</p><h2>Bulk roster import</h2></div><FileUp size={26} /></div><p className="section-copy">Required columns: External ID, Full Name, Sex, and Role. Students also require Grade and Section. Optional columns are LRN, Assignment, and Guardian Phone. Existing records with the same ID or LRN are updated.</p><div className="form-grid two-columns"><label><span className="field-label">Approved .xlsx roster</span><input title="Choose a file in the format shown by this field" className="input-field" type="file" accept=".xlsx" onChange={(e) => { setFile(e.target.files?.[0] || null); setPreview(null); }} /></label><Field label="School approval / source reference" value={reference} onChange={setReference} required /></div><div className="modal-actions"><button className="btn-secondary" onClick={() => run(true)}><FileUp size={16} /> Validate preview</button><button className="btn-primary" disabled={!preview?.dry_run || preview.invalid_rows > 0} onClick={() => run(false)}><Plus size={16} /> Import valid roster</button></div>{preview && <div className={`notice ${preview.invalid_rows ? 'notice-danger' : 'notice-success'}`}>Valid rows: {preview.valid_rows ?? preview.inserted + preview.updated}. Invalid rows: {preview.invalid_rows}. {preview.errors?.slice(0, 8).map((item) => `Row ${item.row}: ${item.errors.join(', ')}`).join(' · ')}</div>}</section>
+      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Approved spreadsheet workflow</p><h2>Bulk roster import</h2></div><FileUp size={26} /></div><p className="section-copy">Required columns: External ID, Full Name, Sex, and Role. Students also require Grade and Section; new student rows require Date of Birth. A blank DOB cell preserves the saved date on an existing student. Staff DOB is optional. Existing records with the same ID or LRN are updated.</p><div className="form-grid two-columns"><label><span className="field-label">Approved .xlsx roster</span><input title="Choose a file in the format shown by this field" className="input-field" type="file" accept=".xlsx" onChange={(e) => { setFile(e.target.files?.[0] || null); setPreview(null); }} /></label><Field label="School approval / source reference" value={reference} onChange={setReference} required /></div><div className="modal-actions"><button className="btn-secondary" onClick={() => run(true)}><FileUp size={16} /> Validate preview</button><button className="btn-primary" disabled={!preview?.dry_run || preview.invalid_rows > 0} onClick={() => run(false)}><Plus size={16} /> Import valid roster</button></div>{preview && <div className={`notice ${preview.invalid_rows ? 'notice-danger' : 'notice-success'}`}>Valid rows: {preview.valid_rows ?? preview.inserted + preview.updated}. Invalid rows: {preview.invalid_rows}. {preview.errors?.slice(0, 8).map((item) => `Row ${item.row}: ${item.errors.join(', ')}`).join(' · ')}</div>}</section>
       <section className="card-static"><h2>Roster import audit</h2><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Imported</th><th>File</th><th>Approval</th><th>Counts</th><th>Actor</th><th>SHA-256</th></tr></thead><PaginatedBody>{imports.length === 0 && <tr><td colSpan="6" className="empty-cell">No approved roster has been imported.</td></tr>}{imports.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.filename}</td><td>{item.approved_reference}</td><td>{item.inserted_count} added, {item.updated_count} updated</td><td>{item.actor_name}</td><td className="model-version">{item.file_sha256}</td></tr>)}</PaginatedBody></table></div></section>
     </div>
   );

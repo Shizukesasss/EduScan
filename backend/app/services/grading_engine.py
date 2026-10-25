@@ -289,8 +289,8 @@ def apply_transmutation(
 ) -> int | None:
     """Apply the transmutation/reporting rule to convert an initial grade.
 
-    If no transmutation table is provided, the default DepEd piecewise
-    formula is used as a fallback.
+    If no table is provided, the default piecewise formula is used for legacy
+    reporting. Direct and adjusted reporting are handled by the caller.
 
     Args:
         initial_grade: the computed initial grade (0-100)
@@ -324,6 +324,19 @@ def apply_transmutation(
     if grade >= 60:
         return int(((grade - 60) / Decimal("1.6")).to_integral_value(rounding=ROUND_FLOOR)) + 75
     return int((grade / Decimal("4")).to_integral_value(rounding=ROUND_FLOOR)) + 60
+
+
+def reporting_method_for_school_year(school_year) -> str:
+    """Keep the current adjusted table through 2026-27, then report direct grades."""
+    start_date = getattr(school_year, "starts_on", None)
+    if start_date is not None:
+        start_year = start_date.year
+    else:
+        try:
+            start_year = int(str(school_year).strip().split("-")[0])
+        except (TypeError, ValueError):
+            return "legacy"
+    return "adjusted_2026" if start_year == 2026 else "direct" if start_year >= 2027 else "legacy"
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +373,7 @@ def calculate_student_grade(
     rounding_decimal_places: int = 2,
     rounding_final_decimal_places: int = 0,
     rounding_method: str = "half_up",
+    reporting_method: str = "legacy",
 ) -> dict:
     """Calculate a single student's complete grade from raw scores.
 
@@ -409,15 +423,50 @@ def calculate_student_grade(
 
     initial_grade = weighted["initial_grade"]
     reported_grade = None
+    raw_initial = None
     if initial_grade is not None:
         template_exams = any(component.get('component_type') == 'Term Examinations' for component in components)
-        raw_initial = sum(Decimal(str(result['percentage'])) * Decimal(str(result['weight'])) / 100 for result in component_results) if template_exams else initial_grade
-        reported_grade = apply_transmutation(float(raw_initial), transmutation_table, use_lower_bounds=template_exams)
+        if reporting_method in {"direct", "adjusted_2026"}:
+            raw_initial = Decimal("0")
+            normalized_components = normalize_component_weights(components)
+            normalized_weights = [Decimal(str(component.get("weight", 0))) for component in normalized_components]
+            for index, component in enumerate(components):
+                items = items_by_component.get(component["id"], [])
+                scores = [score_by_item.get(item["id"]) for item in items]
+                if not items or any(not entry or entry.get("status", "Missing") != "Scored" or entry.get("score") is None
+                                    for entry in scores):
+                    continue
+                if component.get("component_type") == "Term Examinations":
+                    portions = {"ST1": Decimal("30"), "ST2": Decimal("30"), "TE": Decimal("40")}
+                    exam_labels = {item.get("label") for item in items}
+                    if len(items) != 3 or exam_labels != set(portions):
+                        continue
+                    percentage = sum((Decimal(str(score_by_item[item["id"]]["score"]))
+                                      / Decimal(str(item["max_score"])) * portions[item["label"]]
+                                      for item in items), Decimal("0"))
+                else:
+                    earned = sum((Decimal(str(score_by_item[item["id"]]["score"])) for item in items), Decimal("0"))
+                    possible = sum((Decimal(str(item["max_score"])) for item in items), Decimal("0"))
+                    if possible <= 0:
+                        continue
+                    percentage = earned / possible * 100
+                weight = normalized_weights[index]
+                raw_initial += percentage * weight / 100
+            if reporting_method == "direct":
+                reported_grade = round_value(raw_initial, rounding_final_decimal_places, rounding_method)
+            else:
+                reported_grade = apply_transmutation(
+                    float(raw_initial), transmutation_table, use_lower_bounds=True,
+                ) if transmutation_table else None
+        else:
+            raw_initial = sum(Decimal(str(result['percentage'])) * Decimal(str(result['weight'])) / 100 for result in component_results) if template_exams else initial_grade
+            reported_grade = apply_transmutation(float(raw_initial), transmutation_table, use_lower_bounds=template_exams)
 
     status = determine_grade_status(reported_grade, passing_grade, weighted["complete"])
 
     return {
         "initial_grade": initial_grade,
+        "raw_initial_grade": float(raw_initial) if raw_initial is not None else None,
         "reported_grade": reported_grade,
         "status": status,
         "complete": weighted["complete"],

@@ -30,7 +30,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
   const [academicLoading, setAcademicLoading] = useState(!isExistingPerson);
   const [academicError, setAcademicError] = useState('');
   const [gradeLevelId, setGradeLevelId] = useState('');
-  const [form, setForm] = useState({ external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Male', role: 'Student', grade: '', section: '', assignment: '', guardian_phone: '', biometric_consent: false, enrollment_status: 'Regular', enrollment_note: '', enrollment_start_date: '', enrollment_end_date: '', transfer_school: '' });
+  const [form, setForm] = useState({ external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Male', role: 'Student', date_of_birth: '', grade: '', section: '', assignment: '', guardian_phone: '', biometric_consent: false, enrollment_status: 'Regular', enrollment_note: '', enrollment_start_date: '', enrollment_end_date: '', transfer_school: '' });
   const [changeReason, setChangeReason] = useState('');
 
   useEffect(() => () => {
@@ -99,6 +99,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
     }
     if (!assistedRegistration && !(isExistingPerson ? person.biometric_consent : form.biometric_consent)) return showError('Confirm the documented consent/authorization before biometric enrollment.');
     if (!isExistingPerson && form.role === 'Student' && !form.lrn.trim()) return showError('Enter the student LRN.');
+    if (!isExistingPerson && form.role === 'Student' && !form.date_of_birth) return showError('Enter the student’s date of birth.');
     if (!isExistingPerson && form.role !== 'Student' && !form.external_id.trim()) return showError('Enter the employee ID.');
     if (missingStudentPlacement) return showError('Choose an active grade and section from the school records before enrolling this student.');
     if (isReplacement && changeReason.trim().length < 8) return showError('Enter a specific re-enrollment reason of at least 8 characters.');
@@ -106,7 +107,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
     setSaving(true);
     setEnrollmentError(null);
     try {
-      const payload = { ...form, external_id: form.role === 'Student' ? form.lrn : form.external_id, lrn: form.role === 'Student' ? form.lrn || null : null, guardian_phone: form.guardian_phone || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null, enrollment_note: form.enrollment_note || null, grade: form.role === 'Student' ? form.grade : null, section: form.role === 'Student' ? form.section : null, assignment: form.role === 'Student' ? null : form.assignment || null };
+      const payload = { ...form, external_id: form.role === 'Student' ? form.lrn : form.external_id, lrn: form.role === 'Student' ? form.lrn || null : null, date_of_birth: form.date_of_birth || null, guardian_phone: form.guardian_phone || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null, enrollment_note: form.enrollment_note || null, grade: form.role === 'Student' ? form.grade : null, section: form.role === 'Student' ? form.section : null, assignment: form.role === 'Student' ? null : form.assignment || null };
       if (assistedRegistration) {
         const id = personId || (await api.post('/persons', payload)).id;
         setPersonId(id);
@@ -176,7 +177,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
             {!academicLoading && !academicError && sortedGrades.length === 0 && <div className="notice notice-warning full-field" role="status">Add an active grade level and section in Administration before enrolling a student.</div>}
           </>
             : <><label className="full-field"><span className="field-label">Office / assignment</span><input placeholder="e.g. Science department (blank for role default)" className="input-field" value={form.assignment} onChange={(e) => patch('assignment', e.target.value)} /></label><PhoneNumberField label="Phone number" value={form.guardian_phone} onChange={value => patch('guardian_phone', value)} /></>}
-          <EnrollmentFields form={form} onChange={patch} />
+          <EnrollmentFields form={form} onChange={patch} dateOfBirthRequired={!isExistingPerson} />
           <BiometricConsent checked={form.biometric_consent} onChange={(value) => patch('biometric_consent', value)} />
         </div>}
         <div className="enrollment-camera">

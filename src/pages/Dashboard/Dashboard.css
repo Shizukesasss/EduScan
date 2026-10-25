@@ -1,0 +1,316 @@
+.admin-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.admin-overview__heading,
+.admin-overview__title,
+.admin-overview__section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.admin-overview__title {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.admin-overview__title h1 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.2;
+}
+
+.admin-overview__title time,
+.admin-overview__section-heading time {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-overview__health,
+.admin-overview__summary,
+.admin-overview__events,
+.admin-overview__support {
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  box-shadow: var(--card-shadow);
+}
+
+.admin-overview__health {
+  display: grid;
+  grid-template-columns: minmax(145px, 0.8fr) minmax(110px, 0.65fr) minmax(250px, 1.7fr);
+  align-items: center;
+  min-height: 58px;
+  padding: 9px 18px;
+}
+
+.admin-overview__health-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.admin-overview__health-item + .admin-overview__health-item {
+  min-height: 34px;
+  padding-left: 18px;
+  border-left: 1px solid var(--border-color);
+}
+
+.admin-overview__health-item span,
+.admin-overview__stat dt {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.admin-overview__health-item strong {
+  overflow-wrap: anywhere;
+  color: var(--primary-color);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.admin-overview__health-item .is-healthy {
+  color: var(--success);
+}
+
+.admin-overview__health-item small {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.admin-overview__health-model strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-overview__summary {
+  display: grid;
+  grid-template-columns: minmax(175px, 1fr) minmax(135px, 0.75fr) minmax(180px, 1fr) minmax(300px, 1.35fr);
+  margin: 0;
+  overflow: hidden;
+}
+
+.admin-overview__stat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  min-height: 72px;
+  padding: 12px 16px;
+}
+
+.admin-overview__stat + .admin-overview__stat {
+  border-left: 1px solid var(--border-color);
+}
+
+.admin-overview__stat dd {
+  margin: 0;
+  color: var(--primary-color);
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.admin-overview__stat-late dd {
+  color: var(--warning);
+}
+
+.admin-overview__stat-sms {
+  align-items: flex-start;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+}
+
+.admin-overview__stat-sms dd {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  width: 100%;
+}
+
+.admin-overview__stat-sms dd span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.admin-overview__stat-sms dd strong {
+  font-size: 17px;
+}
+
+.admin-overview__stat-sms dd small {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.admin-overview__workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(270px, 318px);
+  align-items: stretch;
+  gap: 18px;
+  min-width: 0;
+}
+
+.admin-overview__events {
+  min-width: 0;
+  padding: 18px 20px 20px;
+}
+
+.admin-overview__section-heading {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.admin-overview__section-heading h2,
+.admin-overview__support h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.admin-overview__events .table-scroll {
+  overflow-x: auto;
+  border: 0;
+  border-radius: 0;
+}
+
+.admin-overview__events .interactive-table {
+  min-width: 620px;
+}
+
+.admin-overview__events .interactive-table td.empty-cell {
+  padding-block: 32px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.admin-overview__support {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0 18px;
+}
+
+.admin-overview__support section {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 18px 2px;
+}
+
+.admin-overview__support section + section {
+  border-top: 1px solid var(--border-color);
+}
+
+.admin-overview__support h2 {
+  font-size: 16px;
+}
+
+.admin-overview__support p {
+  margin: 8px 0 14px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.admin-overview__support .btn-secondary {
+  margin-top: auto;
+}
+
+@media (max-width: 1100px) {
+  .admin-overview__workspace {
+    grid-template-columns: minmax(0, 1fr) minmax(250px, 290px);
+  }
+
+  .admin-overview__summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-overview__stat:nth-child(3) {
+    border-left: 0;
+  }
+
+  .admin-overview__stat:nth-child(n + 3) {
+    border-top: 1px solid var(--border-color);
+  }
+}
+
+@media (max-width: 760px) {
+  .admin-overview__heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .admin-overview__workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-overview__health {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .admin-overview__health-model {
+    grid-column: 1 / -1;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-color);
+    border-left: 0 !important;
+  }
+}
+
+@media (max-width: 540px) {
+  .admin-overview__title {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .admin-overview__title h1 {
+    font-size: 25px;
+  }
+
+  .admin-overview__health {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-overview__health-item + .admin-overview__health-item {
+    padding: 10px 0 0;
+    border-top: 1px solid var(--border-color);
+    border-left: 0;
+  }
+
+  .admin-overview__health-model {
+    grid-column: auto;
+  }
+
+  .admin-overview__summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-overview__stat + .admin-overview__stat,
+  .admin-overview__stat:nth-child(3),
+  .admin-overview__stat:nth-child(n + 3) {
+    border-top: 1px solid var(--border-color);
+    border-left: 0;
+  }
+
+  .admin-overview__stat-sms dd {
+    justify-content: space-between;
+    gap: 6px;
+  }
+}
