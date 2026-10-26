@@ -25,7 +25,8 @@ from app.models_grading import AssessmentItem, Gradebook, GradebookComponent, Gr
 from app.services.grading_engine import DEFAULT_TRANSMUTATION_TABLE
 from app.services.annex_g import backfill_annex_g_dobs, import_annex_g_enrollments
 from app.services.annex_g import age_on, build_annex_g_section, first_friday_of_june, render_annex_g_html
-from app.schemas import AnnexGCommentPayload
+from app.schemas import AnnexGCommentPayload, AnnexGPlacementPayload, PersonCreate
+from app import main
 
 
 def workbook(rows: list[list[object]]) -> bytes:
@@ -86,6 +87,106 @@ class AnnexGImportTests(unittest.TestCase):
         self.db.add(record)
         self.db.commit()
         return record
+
+    def test_native_student_creation_adds_year_specific_placement(self):
+        payload = PersonCreate(external_id="NATIVE-ENROLL-1", first_name="New", surname="Learner",
+            sex="Female", date_of_birth=date(2012, 1, 2), role="Student", grade="7", section="Jose",
+            school_year_id=self.year.id, enrollment_start_date=date(2026, 6, 1))
+        person = main._new_person_record(payload, self.db, self.admin)
+        self.db.commit()
+
+        placement = self.db.scalar(select(LearnerEnrollment).where(LearnerEnrollment.person_id == person.id))
+        self.assertIsNotNone(placement)
+        self.assertEqual((placement.school_year_id, placement.grade_level_id, placement.section_id,
+            placement.starts_on, placement.person.date_of_birth),
+            (self.year.id, self.grade.id, self.section.id, date(2026, 6, 1), date(2012, 1, 2)))
+        self.assertEqual(placement.source_reference, "EduScan student enrollment form")
+        self.assertEqual(len(placement.source_sha256), 64)
+
+    def test_native_student_creation_requires_year_and_start_date(self):
+        for field in ("school_year_id", "enrollment_start_date"):
+            values = {"external_id": f"MISSING-{field}", "first_name": "New", "surname": "Learner",
+                "sex": "Female", "date_of_birth": date(2012, 1, 2), "role": "Student", "grade": "7",
+                "section": "Jose", "school_year_id": self.year.id,
+                "enrollment_start_date": date(2026, 6, 1)}
+            values[field] = None
+            with self.subTest(field=field), self.assertRaises(HTTPException) as failure:
+                main._new_person_record(PersonCreate(**values), self.db, self.admin)
+            self.assertEqual(failure.exception.status_code, 422)
+            self.assertIsNone(self.db.scalar(select(Person).where(Person.external_id == values["external_id"])))
+
+    def test_native_student_creation_rejects_date_outside_school_year(self):
+        payload = PersonCreate(external_id="OUTSIDE-NATIVE", first_name="New", surname="Learner",
+            sex="Female", date_of_birth=date(2012, 1, 2), role="Student", grade="7", section="Jose",
+            school_year_id=self.year.id, enrollment_start_date=date(2027, 4, 1))
+        with self.assertRaises(HTTPException) as failure:
+            main._new_person_record(payload, self.db, self.admin)
+        self.assertEqual(failure.exception.status_code, 422)
+        self.assertIsNone(self.db.scalar(select(Person).where(Person.external_id == "OUTSIDE-NATIVE")))
+
+    def test_native_student_placement_rolls_back_with_person(self):
+        payload = PersonCreate(external_id="ROLLBACK-NATIVE", first_name="New", surname="Learner",
+            sex="Female", date_of_birth=date(2012, 1, 2), role="Student", grade="7", section="Jose",
+            school_year_id=self.year.id, enrollment_start_date=date(2026, 6, 1))
+        person = main._new_person_record(payload, self.db, self.admin)
+        person_id = person.id
+        self.db.rollback()
+        self.assertIsNone(self.db.get(Person, person_id))
+        self.assertIsNone(self.db.scalar(select(LearnerEnrollment).where(LearnerEnrollment.person_id == person_id)))
+
+    def test_placement_candidates_exclude_learners_already_placed_in_selected_year(self):
+        self.add_enrollment(self.learner)
+        result = main.annex_g_placement_candidates(self.year.id, self.db, self.admin)
+        self.assertEqual([item["id"] for item in result["candidates"]], [self.other.id])
+        self.assertNotIn("date_of_birth", result["candidates"][0])
+
+    def test_annex_g_options_include_year_bounds_and_grade_level_ids(self):
+        result = main.annex_g_options(self.db, self.admin)
+        year = next(item for item in result["school_years"] if item["id"] == self.year.id)
+        section = next(item for item in year["sections"] if item["id"] == self.section.id)
+        self.assertEqual((year["starts_on"], year["ends_on"]), (self.year.starts_on, self.year.ends_on))
+        self.assertEqual(section["grade_level_id"], self.grade.id)
+
+    def test_admin_placement_review_saves_target_without_changing_person_profile(self):
+        original = (self.other.grade, self.other.section, self.other.date_of_birth, self.other.guardian_phone)
+        payload = AnnexGPlacementPayload(person_id=self.other.id, school_year_id=self.year.id,
+            grade_level_id=self.grade.id, section_id=self.section.id, starts_on=date(2026, 6, 1), confirmed=True)
+        result = main.create_annex_g_placement(payload, self.db, self.admin)
+
+        placement = self.db.scalar(select(LearnerEnrollment).where(LearnerEnrollment.person_id == self.other.id))
+        self.assertEqual(result["person_id"], self.other.id)
+        self.assertEqual((placement.grade_level_id, placement.section_id, placement.starts_on),
+            (self.grade.id, self.section.id, date(2026, 6, 1)))
+        self.assertEqual(placement.source_reference, "Administrator verified against official school records")
+        self.assertEqual((self.other.grade, self.other.section, self.other.date_of_birth, self.other.guardian_phone), original)
+
+    def test_admin_placement_review_requires_confirmation(self):
+        payload = AnnexGPlacementPayload(person_id=self.other.id, school_year_id=self.year.id,
+            grade_level_id=self.grade.id, section_id=self.section.id, starts_on=date(2026, 6, 1), confirmed=False)
+        with self.assertRaises(HTTPException) as failure:
+            main.create_annex_g_placement(payload, self.db, self.admin)
+        self.assertEqual(failure.exception.status_code, 422)
+        self.assertIsNone(self.db.scalar(select(LearnerEnrollment).where(LearnerEnrollment.person_id == self.other.id)))
+
+    def test_admin_placement_review_rejects_duplicate_year_placement(self):
+        payload = AnnexGPlacementPayload(person_id=self.other.id, school_year_id=self.year.id,
+            grade_level_id=self.grade.id, section_id=self.section.id, starts_on=date(2026, 6, 1), confirmed=True)
+        main.create_annex_g_placement(payload, self.db, self.admin)
+        with self.assertRaises(HTTPException) as failure:
+            main.create_annex_g_placement(payload, self.db, self.admin)
+        self.assertEqual(failure.exception.status_code, 409)
+        self.assertEqual(len(self.db.scalars(select(LearnerEnrollment).where(
+            LearnerEnrollment.person_id == self.other.id, LearnerEnrollment.school_year_id == self.year.id)).all()), 1)
+
+    def test_admin_placement_routes_require_admin_role(self):
+        teacher = User(username="placement-review-teacher", password_hash="x", role="teacher",
+                       full_name="Teacher", must_change_password=False)
+        for path in ("/api/admin/annex-g/placement-candidates", "/api/admin/annex-g/placements"):
+            route = next(item for item in main.app.routes if getattr(item, "path", None) == path)
+            guard = next(item.call for item in route.dependant.dependencies if item.name == "user")
+            with self.subTest(path=path), self.assertRaises(HTTPException) as failure:
+                guard(user=teacher)
+            self.assertEqual(failure.exception.status_code, 403)
 
     def add_gradebook(self, subject, term, score, *, status="Finalized", learning_area=""):
         assignment = self.db.scalar(select(SubjectTeachingAssignment).where(

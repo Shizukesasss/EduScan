@@ -2,6 +2,7 @@
 import json
 import unittest
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,7 +12,7 @@ from sqlalchemy import select
 from app import main
 from app.auth import current_user
 from app.database import Base, get_db
-from app.models import AttendanceEvent, BiometricAuditEvent, GradeLevel, Person, SchoolSection, SmsOutbox, SystemAuditEvent
+from app.models import AttendanceEvent, BiometricAuditEvent, GradeLevel, LearnerEnrollment, Person, SchoolSection, SchoolYear, SmsOutbox, SystemAuditEvent
 
 
 class AtomicEnrollmentTest(unittest.TestCase):
@@ -27,6 +28,24 @@ class AtomicEnrollmentTest(unittest.TestCase):
         response = self.client.patch(f'/api/persons/{self.fixture.first.id}', json=update)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()['external_id'], self.fixture.first.external_id)
+        self.assertEqual(self.db.scalar(select(LearnerEnrollment).where(
+            LearnerEnrollment.person_id == self.fixture.first.id)).school_year_id, self.school_year.id)
+
+    def test_new_student_requires_school_year_and_enrollment_start_date(self):
+        for field in ('school_year_id', 'enrollment_start_date'):
+            payload = {**self.payload, 'external_id': f'MISSING-{field}'}
+            payload.pop(field)
+            response = self.client.post('/api/persons', json=payload)
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertIsNone(self.db.scalar(select(Person).where(Person.external_id == payload['external_id'])))
+            self.assertIsNone(self.db.scalar(select(LearnerEnrollment)))
+
+    def test_new_student_rejects_enrollment_start_outside_school_year(self):
+        response = self.client.post('/api/persons', json={**self.payload,
+            'external_id': 'OUTSIDE-YEAR', 'enrollment_start_date': '2027-04-01'})
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIsNone(self.db.scalar(select(Person).where(Person.external_id == 'OUTSIDE-YEAR')))
+        self.assertIsNone(self.db.scalar(select(LearnerEnrollment)))
 
     def test_staff_requires_employee_id_and_preserves_phone(self):
         for role in ('Faculty', 'Non-teaching Personnel'):
@@ -87,10 +106,14 @@ class AtomicEnrollmentTest(unittest.TestCase):
         grade = GradeLevel(name='7')
         self.db.add(grade)
         self.db.flush()
-        self.db.add(SchoolSection(grade_level_id=grade.id, name='Jose'))
+        section = SchoolSection(grade_level_id=grade.id, name='Jose')
+        self.school_year = SchoolYear(name='2026-2027', starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
+        self.db.add_all([section, self.school_year])
         self.db.commit()
+        self.section = section
         self.payload = {'external_id': 'NEW-STUDENT', 'surname': 'Example', 'first_name': 'New',
-                        'sex': 'Male', 'date_of_birth': '2012-01-01', 'role': 'Student', 'grade': '7', 'section': 'Jose', 'biometric_consent': True}
+                        'sex': 'Male', 'date_of_birth': '2012-01-01', 'role': 'Student', 'grade': '7', 'section': 'Jose', 'biometric_consent': True,
+                        'school_year_id': self.school_year.id, 'enrollment_start_date': '2026-06-01'}
         self.overrides = dict(main.app.dependency_overrides)
         main.app.dependency_overrides[get_db] = lambda: self.db
         main.app.dependency_overrides[current_user] = lambda: self.fixture.admin
@@ -121,6 +144,9 @@ class AtomicEnrollmentTest(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.text)
         person = self.db.get(Person, result.json()['person_id'])
         self.assertEqual(person.full_name, 'Example, New')
+        placement = self.db.scalar(select(LearnerEnrollment).where(LearnerEnrollment.person_id == person.id))
+        self.assertEqual((placement.school_year_id, placement.grade_level_id, placement.section_id, placement.starts_on),
+                         (self.school_year.id, self.section.grade_level_id, self.section.id, date(2026, 6, 1)))
         self.assertEqual(len(self.fixture.samples(person)), 15)
         self.assertIsNotNone(self.db.scalar(select(BiometricAuditEvent).where(BiometricAuditEvent.person_id == person.id)))
         self.assertIsNotNone(self.db.scalar(select(SystemAuditEvent).where(SystemAuditEvent.entity_id == str(person.id), SystemAuditEvent.entity_type == 'Person')))
@@ -137,6 +163,7 @@ class AtomicEnrollmentTest(unittest.TestCase):
                 result = self.enroll(faces)
                 self.assertEqual(result.status_code, 422, result.text)
                 self.assertEqual(self.snapshot(), before)
+                self.assertEqual(self.db.scalars(select(LearnerEnrollment)).all(), [])
             notice.assert_not_called()
             dispatch.assert_not_called()
 

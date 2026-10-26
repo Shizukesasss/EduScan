@@ -119,6 +119,7 @@ class PersonCreate(BaseModel):
     role: str
     grade: str | None = None
     section: str | None = None
+    school_year_id: int | None = Field(default=None, gt=0)
     assignment: str | None = Field(default=None, max_length=180)
     guardian_phone: str | None = None
     enrollment_status: str = "Regular"
@@ -589,6 +590,15 @@ class DedicatedDemoAdvisoryPayload(BaseModel):
 class DemoTeacherSetupPayload(BaseModel):
     school_year_id: int
     section_ids: list[int] = Field(min_length=1, max_length=200)
+
+
+class AnnexGPlacementPayload(BaseModel):
+    person_id: int = Field(gt=0)
+    school_year_id: int = Field(gt=0)
+    grade_level_id: int = Field(gt=0)
+    section_id: int = Field(gt=0)
+    starts_on: date
+    confirmed: bool = False
 
 
 class AnnexGCommentPayload(BaseModel):

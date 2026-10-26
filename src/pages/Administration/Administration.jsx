@@ -23,7 +23,7 @@ const tabs = [
 ];
 const emptyPerson = {
   external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Female', role: 'Student', date_of_birth: '',
-  grade: '', section: '', guardian_phone: '',
+  grade: '', section: '', school_year_id: '', guardian_phone: '',
   enrollment_status: 'Regular', enrollment_note: '', enrollment_start_date: '', enrollment_end_date: '',
   transfer_school: '', biometric_consent: false,
 };
@@ -204,12 +204,14 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
   const [editing, setEditing] = useState(null);
   const [disposal, setDisposal] = useState(null);
   const editingRole = people.find((item) => item.id === editing)?.role;
-  const patch = (field, value) => setForm((c) => ({ ...c, [field]: value, ...(field === 'role' && value !== c.role ? { enrollment_status: value === 'Student' ? 'Regular' : 'Appointed', enrollment_end_date: '' } : {}) }));
+  const patch = (field, value) => setForm((c) => ({ ...c, [field]: value, ...(field === 'role' && value !== c.role ? { enrollment_status: value === 'Student' ? 'Regular' : 'Appointed', enrollment_end_date: '', school_year_id: '' } : {}) }));
   const edit  = (item) => { setEditing(item.id); setForm(Object.fromEntries(Object.keys(emptyPerson).map((k) => [k, item[k] ?? emptyPerson[k]]))); };
   const save  = async (event) => {
     event.preventDefault();
     try {
       const payload = { ...form, external_id: form.role === 'Student' && !editing ? form.lrn : form.external_id, lrn: form.role === 'Student' ? form.lrn || null : null, date_of_birth: form.date_of_birth || null, middle_name: form.middle_name || null, name_extension: form.name_extension || null, grade: form.grade || null, section: form.section || null, guardian_phone: form.guardian_phone || null, enrollment_note: form.enrollment_note || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null };
+      if (editing || form.role !== 'Student') delete payload.school_year_id;
+      else payload.school_year_id = Number(form.school_year_id);
       if (editing) await api.patch(`/persons/${editing}`, payload); else await api.post('/persons', payload);
       success(editing ? 'School record updated.' : 'School record created.'); setEditing(null); setForm(emptyPerson); await reload();
     } catch (err) { fail(err); }
@@ -233,11 +235,12 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
             <PhoneNumberField label={form.role === 'Student' ? 'Guardian phone' : 'Phone number'} value={form.guardian_phone} onChange={(v) => patch('guardian_phone', v)} />
             {form.role === 'Student' && (
               <>
-                <SelectField label="Grade level" value={form.grade} onChange={(v) => { patch('grade', v); patch('section', ''); }} options={['', ...orderedOptions(structure.grade_levels).map((g) => g.name)]} />
-                <SelectField label="Section" value={form.section} onChange={(v) => patch('section', v)} options={['', ...orderedOptions(structure.sections.filter(s => s.grade_level_id === structure.grade_levels.find(g => g.name === form.grade)?.id), (s) => s.name).map((s) => s.name)]} />
+                {!editing && <label><span className="field-label">School year placement</span><select className="input-field" value={form.school_year_id} onChange={(event) => patch('school_year_id', event.target.value)} required><option value="">Choose school year</option>{orderedOptions(structure.school_years).map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>}
+                <SelectField label="Grade level" value={form.grade} onChange={(v) => { patch('grade', v); patch('section', ''); }} options={['', ...orderedOptions(structure.grade_levels.filter((g) => g.active)).map((g) => g.name)]} />
+                <SelectField label="Section" value={form.section} onChange={(v) => patch('section', v)} options={['', ...orderedOptions(structure.sections.filter(s => s.active && s.grade_level_id === structure.grade_levels.find(g => g.name === form.grade)?.id), (s) => s.name).map((s) => s.name)]} />
               </>
             )}
-            <EnrollmentFields form={form} onChange={patch} dateOfBirthRequired={!editing || (form.role === 'Student' && editingRole !== 'Student')} />
+            <EnrollmentFields form={form} onChange={patch} dateOfBirthRequired={!editing || (form.role === 'Student' && editingRole !== 'Student')} enrollmentStartDateRequired={!editing} />
             <BiometricConsent checked={form.biometric_consent} onChange={(value) => patch('biometric_consent', value)} />
           </div>
           <div className="modal-actions">{editing && <button type="button" className="btn-secondary" onClick={() => { setEditing(null); setForm(emptyPerson); }}>Cancel</button>}<button className="btn-primary"><Save size={16} /> {editing ? 'Save changes' : 'Create record'}</button></div>

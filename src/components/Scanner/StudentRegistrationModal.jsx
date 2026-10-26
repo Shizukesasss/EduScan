@@ -30,7 +30,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
   const [academicLoading, setAcademicLoading] = useState(!isExistingPerson);
   const [academicError, setAcademicError] = useState('');
   const [gradeLevelId, setGradeLevelId] = useState('');
-  const [form, setForm] = useState({ external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Male', role: 'Student', date_of_birth: '', grade: '', section: '', assignment: '', guardian_phone: '', biometric_consent: false, enrollment_status: 'Regular', enrollment_note: '', enrollment_start_date: '', enrollment_end_date: '', transfer_school: '' });
+  const [form, setForm] = useState({ external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Male', role: 'Student', date_of_birth: '', grade: '', section: '', school_year_id: '', assignment: '', guardian_phone: '', biometric_consent: false, enrollment_status: 'Regular', enrollment_note: '', enrollment_start_date: '', enrollment_end_date: '', transfer_school: '' });
   const [changeReason, setChangeReason] = useState('');
 
   useEffect(() => () => {
@@ -58,8 +58,8 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
     .filter((section) => section.active && section.grade_level_id === Number(gradeLevelId))
     .sort((a, b) => a.name.localeCompare(b.name)), [academicStructure.sections, gradeLevelId]);
   const missingStudentPlacement = !isExistingPerson && form.role === 'Student'
-    && (!form.grade || !form.section || !availableSections.some((section) => section.name === form.section));
-  const patch = (field, value) => setForm((current) => ({ ...current, [field]: value, ...(field === 'role' && value !== current.role ? { enrollment_status: value === 'Student' ? 'Regular' : 'Appointed', enrollment_end_date: '' } : {}) }));
+    && (!form.school_year_id || !form.enrollment_start_date || !form.grade || !form.section || !availableSections.some((section) => section.name === form.section));
+  const patch = (field, value) => setForm((current) => ({ ...current, [field]: value, ...(field === 'role' && value !== current.role ? { enrollment_status: value === 'Student' ? 'Regular' : 'Appointed', enrollment_end_date: '', school_year_id: '' } : {}) }));
 
   const startCamera = async () => {
     const generation = cameraGeneration.current;
@@ -101,13 +101,13 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
     if (!isExistingPerson && form.role === 'Student' && !form.lrn.trim()) return showError('Enter the student LRN.');
     if (!isExistingPerson && form.role === 'Student' && !form.date_of_birth) return showError('Enter the student’s date of birth.');
     if (!isExistingPerson && form.role !== 'Student' && !form.external_id.trim()) return showError('Enter the employee ID.');
-    if (missingStudentPlacement) return showError('Choose an active grade and section from the school records before enrolling this student.');
+    if (missingStudentPlacement) return showError('Choose the school year, active grade and section, and enrollment start date before enrolling this student.');
     if (isReplacement && changeReason.trim().length < 8) return showError('Enter a specific re-enrollment reason of at least 8 characters.');
     if (!assistedRegistration && frames.length < targetFrames) return showError(`Capture all ${targetFrames} camera frames first.`);
     setSaving(true);
     setEnrollmentError(null);
     try {
-      const payload = { ...form, external_id: form.role === 'Student' ? form.lrn : form.external_id, lrn: form.role === 'Student' ? form.lrn || null : null, date_of_birth: form.date_of_birth || null, guardian_phone: form.guardian_phone || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null, enrollment_note: form.enrollment_note || null, grade: form.role === 'Student' ? form.grade : null, section: form.role === 'Student' ? form.section : null, assignment: form.role === 'Student' ? null : form.assignment || null };
+      const payload = { ...form, external_id: form.role === 'Student' ? form.lrn : form.external_id, lrn: form.role === 'Student' ? form.lrn || null : null, school_year_id: form.role === 'Student' ? Number(form.school_year_id) : null, date_of_birth: form.date_of_birth || null, guardian_phone: form.guardian_phone || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null, enrollment_note: form.enrollment_note || null, grade: form.role === 'Student' ? form.grade : null, section: form.role === 'Student' ? form.section : null, assignment: form.role === 'Student' ? null : form.assignment || null };
       if (assistedRegistration) {
         const id = personId || (await api.post('/persons', payload)).id;
         setPersonId(id);
@@ -166,7 +166,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
           <label><span className="field-label">Middle name</span><input placeholder="Middle name, if applicable" className="input-field" pattern={personNamePattern} title="Use letters and common name punctuation only." value={form.middle_name} onChange={(e) => patch('middle_name', e.target.value)} /></label>
           <label><span className="field-label">Extension (e.g., Jr.)</span><input placeholder="e.g. Jr. (leave blank if none)" className="input-field" pattern={personNamePattern} title="Use letters and common name punctuation only." value={form.name_extension} onChange={(e) => patch('name_extension', e.target.value)} /></label>
           <label><span className="field-label">Sex for official roster</span><select className="input-field" value={form.sex} onChange={(e) => patch('sex', e.target.value)}><option>Male</option><option>Female</option></select></label>
-          {form.role === 'Student' ? <><label><span className="field-label">Grade</span><select className="input-field" value={gradeLevelId} disabled={academicLoading || Boolean(academicError)} onChange={(e) => {
+          {form.role === 'Student' ? <><label><span className="field-label">School year</span><select className="input-field" value={form.school_year_id} disabled={academicLoading || Boolean(academicError)} onChange={(e) => patch('school_year_id', e.target.value)} required><option value="">Select a school year</option>{(academicStructure.school_years || []).map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label><span className="field-label">Grade</span><select className="input-field" value={gradeLevelId} disabled={academicLoading || Boolean(academicError)} onChange={(e) => {
             const value = e.target.value;
             const grade = sortedGrades.find((item) => item.id === Number(value));
             setGradeLevelId(value);
@@ -177,7 +177,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
             {!academicLoading && !academicError && sortedGrades.length === 0 && <div className="notice notice-warning full-field" role="status">Add an active grade level and section in Administration before enrolling a student.</div>}
           </>
             : <><label className="full-field"><span className="field-label">Office / assignment</span><input placeholder="e.g. Science department (blank for role default)" className="input-field" value={form.assignment} onChange={(e) => patch('assignment', e.target.value)} /></label><PhoneNumberField label="Phone number" value={form.guardian_phone} onChange={value => patch('guardian_phone', value)} /></>}
-          <EnrollmentFields form={form} onChange={patch} dateOfBirthRequired={!isExistingPerson} />
+          <EnrollmentFields form={form} onChange={patch} dateOfBirthRequired={!isExistingPerson} enrollmentStartDateRequired={!isExistingPerson} />
           <BiometricConsent checked={form.biometric_consent} onChange={(value) => patch('biometric_consent', value)} />
         </div>}
         <div className="enrollment-camera">

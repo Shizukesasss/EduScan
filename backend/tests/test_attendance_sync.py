@@ -44,6 +44,7 @@ class AttendanceSyncTest(unittest.TestCase):
         year = SchoolYear(name="2026-2027", starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
         self.db.add_all([section, year])
         self.db.flush()
+        self.school_year = year
         self.db.add(SectionAdviserAssignment(school_year_id=year.id, section_id=section.id, teacher_user_id=self.teacher.id))
         self.db.commit()
         set_json(self.db, "attendance", {"duplicate_cooldown_seconds": 0, "auto_close_enabled": False})
@@ -144,7 +145,7 @@ class AttendanceSyncTest(unittest.TestCase):
         })
         self.assertEqual(invalid.status_code, 422, invalid.text)
         created = self.client.post("/api/persons", headers=self.admin_headers, json={
-            "external_id": "NEW-STUDENT", "surname": "New", "first_name": "Learner", "sex": "Female", "date_of_birth": "2012-01-01", "role": "Student", "grade": "10", "section": "Rizal", "biometric_consent": False})
+            "external_id": "NEW-STUDENT", "surname": "New", "first_name": "Learner", "sex": "Female", "date_of_birth": "2012-01-01", "role": "Student", "grade": "10", "section": "Rizal", "school_year_id": self.school_year.id, "enrollment_start_date": "2026-06-01", "biometric_consent": False})
         self.assertEqual(created.status_code, 200, created.text)
         row = next(row for row in self.api_rows() if row["person_id"] == created.json()["id"])
         self.assertEqual(row["status"], "No scan")

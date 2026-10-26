@@ -376,7 +376,7 @@ def build_annex_g_section(db: Session, school_year_id: int, grade: str, section:
         blockers = []
         age = age_on(person.date_of_birth, reference_date) if person.date_of_birth and person.date_of_birth <= reference_date else None
         if person.date_of_birth is None:
-            blockers.append("Verified date of birth is missing; an administrator must import it from an official learner record.")
+            blockers.append("Verified date of birth is missing; an administrator must enter it in People & Records from an official learner record.")
         elif person.date_of_birth > reference_date:
             blockers.append("Date of birth is after the school-year age reference date; verify the source record.")
         if assignment_issue:

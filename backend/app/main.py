@@ -44,7 +44,7 @@ from .schemas import (
     InterventionPayload, LoginRequest, LoginResponse, PasswordChangePayload, PersonCreate, PersonnelSchedulePayload, RecognitionResult,
     RecordDisposalPayload, SchedulePayload, SchoolYearPayload, SectionPayload, SmsSettingsPayload, SubjectPayload,
     SubjectTeachingAssignmentPayload,
-    UserCreate, UserUpdate, SchoolHeadPayload, AnnexGCommentPayload,
+    UserCreate, UserUpdate, SchoolHeadPayload, AnnexGCommentPayload, AnnexGPlacementPayload,
 )
 from .services.attendance import attendance_event_query, close_day, latest_day_reset, list_rows, record_gate_match, reset_day, save_correction
 from .services.audit import add_audit, model_snapshot
@@ -543,14 +543,29 @@ def _new_person_record(payload: PersonCreate, db: Session, actor: User) -> Perso
             status_code=422, detail="Student grade and section are required")
     if payload.role == "Student" and payload.date_of_birth is None:
         raise HTTPException(status_code=422, detail="Student date of birth is required")
-    if payload.role == "Student" and not db.scalar(select(SchoolSection.id).join(GradeLevel).where(
-        GradeLevel.name == payload.grade,
-        GradeLevel.deleted_at.is_(None),
-        SchoolSection.name == payload.section,
-        SchoolSection.deleted_at.is_(None),
-    )):
-        raise HTTPException(status_code=422, detail="Choose a grade and section from the academic structure")
-    dump = payload.model_dump()
+    year = grade_record = section_record = None
+    if payload.role == "Student":
+        if not payload.school_year_id:
+            raise HTTPException(status_code=422, detail="Choose the school year for this student enrollment")
+        if not payload.enrollment_start_date:
+            raise HTTPException(status_code=422, detail="Enter the student's enrollment start date")
+        year = db.scalar(select(SchoolYear).where(
+            SchoolYear.id == payload.school_year_id, SchoolYear.deleted_at.is_(None)))
+        grade_record = db.scalar(select(GradeLevel).where(
+            GradeLevel.name == payload.grade, GradeLevel.deleted_at.is_(None), GradeLevel.active.is_(True)))
+        section_record = db.scalar(select(SchoolSection).where(
+            SchoolSection.grade_level_id == (grade_record.id if grade_record else -1),
+            SchoolSection.name == payload.section, SchoolSection.deleted_at.is_(None),
+            SchoolSection.active.is_(True)))
+        if not year:
+            raise HTTPException(status_code=422, detail="Choose an available school year")
+        if not grade_record or not section_record:
+            raise HTTPException(status_code=422, detail="Choose an active grade and section from the academic structure")
+        if not year.starts_on <= payload.enrollment_start_date <= year.ends_on:
+            raise HTTPException(status_code=422, detail="Enrollment start date must be within the selected school year")
+        if payload.enrollment_end_date and not payload.enrollment_start_date <= payload.enrollment_end_date <= year.ends_on:
+            raise HTTPException(status_code=422, detail="Enrollment end date must be on or before the end of the selected school year")
+    dump = payload.model_dump(exclude={"school_year_id"})
     parts = []
     if dump.get('surname'):
         parts.append(dump['surname'] + ",")
@@ -563,6 +578,19 @@ def _new_person_record(payload: PersonCreate, db: Session, actor: User) -> Perso
     person = Person(**dump)
     db.add(person)
     db.flush()
+    if payload.role == "Student":
+        placement_source = {
+            "kind": "native enrollment form", "person_id": person.id, "school_year_id": year.id,
+            "grade_level_id": grade_record.id, "section_id": section_record.id,
+            "starts_on": payload.enrollment_start_date.isoformat(),
+        }
+        db.add(LearnerEnrollment(
+            person_id=person.id, school_year_id=year.id, grade_level_id=grade_record.id,
+            section_id=section_record.id, starts_on=payload.enrollment_start_date,
+            ends_on=payload.enrollment_end_date, source_reference="EduScan student enrollment form",
+            source_sha256=hashlib.sha256(json.dumps(placement_source, sort_keys=True).encode()).hexdigest(),
+            imported_by=actor.id, imported_by_name=actor.full_name,
+        ))
     add_audit(db, actor, "Create", "Person", person.id,
               f"School record created for {person.full_name}", {}, model_snapshot(person))
     return person
@@ -595,7 +623,7 @@ def update_person(person_id: int, payload: PersonCreate, db: Session = Depends(g
         raise HTTPException(
             status_code=409, detail="LRN is already registered")
     before = model_snapshot(person)
-    dump = payload.model_dump()
+    dump = payload.model_dump(exclude={"school_year_id"})
     parts = []
     if dump.get('surname'):
         parts.append(dump['surname'] + ",")
@@ -735,6 +763,72 @@ async def annex_g_dob_import(file: UploadFile = File(...), approved_reference: s
     return backfill_annex_g_dobs(db, await file.read(), filename, approved_reference, user, dry_run)
 
 
+@app.get("/api/admin/annex-g/placement-candidates")
+def annex_g_placement_candidates(school_year_id: int = Query(gt=0), db: Session = Depends(get_db),
+                                 user: User = Depends(require_roles("admin"))) -> dict:
+    year = db.scalar(select(SchoolYear).where(
+        SchoolYear.id == school_year_id, SchoolYear.deleted_at.is_(None)))
+    if not year:
+        raise HTTPException(status_code=404, detail="School year was not found")
+    placed_people = select(LearnerEnrollment.person_id).where(
+        LearnerEnrollment.school_year_id == year.id)
+    candidates = db.scalars(select(Person).where(
+        Person.role == "Student", Person.active.is_(True), Person.id.not_in(placed_people),
+    ).order_by(Person.full_name)).all()
+    return {"school_year": {"id": year.id, "name": year.name}, "candidates": [
+        {"id": item.id, "full_name": item.full_name, "lrn": item.lrn,
+         "current_grade": item.grade, "current_section": item.section}
+        for item in candidates
+    ]}
+
+
+@app.post("/api/admin/annex-g/placements")
+def create_annex_g_placement(payload: AnnexGPlacementPayload, db: Session = Depends(get_db),
+                              user: User = Depends(require_roles("admin"))) -> dict:
+    if not payload.confirmed:
+        raise HTTPException(status_code=422, detail="Confirm that you verified this placement against a school record")
+    year = db.scalar(select(SchoolYear).where(
+        SchoolYear.id == payload.school_year_id, SchoolYear.deleted_at.is_(None)))
+    person = db.get(Person, payload.person_id)
+    grade = db.scalar(select(GradeLevel).where(
+        GradeLevel.id == payload.grade_level_id, GradeLevel.deleted_at.is_(None), GradeLevel.active.is_(True)))
+    section = db.scalar(select(SchoolSection).where(
+        SchoolSection.id == payload.section_id, SchoolSection.deleted_at.is_(None),
+        SchoolSection.active.is_(True)))
+    if not year or not person or person.role != "Student" or not person.active:
+        raise HTTPException(status_code=404, detail="Active learner or school year was not found")
+    if not grade or not section or section.grade_level_id != grade.id or grade.name not in {"7", "8", "9", "10"}:
+        raise HTTPException(status_code=422, detail="Choose a Grade 7–10 section from the academic structure")
+    if not year.starts_on <= payload.starts_on <= year.ends_on:
+        raise HTTPException(status_code=422, detail="Placement start date must be within the selected school year")
+    if db.scalar(select(LearnerEnrollment.id).where(
+        LearnerEnrollment.person_id == person.id, LearnerEnrollment.school_year_id == year.id)):
+        raise HTTPException(status_code=409, detail="This learner already has a placement for the selected school year")
+    source_reference = "Administrator verified against official school records"
+    source_details = {"kind": "administrator-confirmed placement", "person_id": person.id,
+        "school_year_id": year.id, "grade_level_id": grade.id, "section_id": section.id,
+        "starts_on": payload.starts_on.isoformat(), "source_reference": source_reference}
+    placement = LearnerEnrollment(
+        person_id=person.id, school_year_id=year.id, grade_level_id=grade.id, section_id=section.id,
+        starts_on=payload.starts_on, source_reference=source_reference,
+        source_sha256=hashlib.sha256(json.dumps(source_details, sort_keys=True).encode()).hexdigest(),
+        imported_by=user.id, imported_by_name=user.full_name,
+    )
+    try:
+        db.add(placement)
+        db.flush()
+        add_audit(db, user, "Create", "LearnerEnrollment", placement.id,
+            f"Verified school-year placement created for {person.full_name}", {}, model_snapshot(placement))
+        db.commit()
+        db.refresh(placement)
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This learner already has a placement with that enrollment date") from error
+    return {"id": placement.id, "person_id": person.id, "school_year_id": year.id,
+        "grade": grade.name, "section": section.name, "starts_on": placement.starts_on,
+        "source_reference": placement.source_reference}
+
+
 def _annex_g_enrollment(db: Session, enrollment_id: int) -> LearnerEnrollment:
     enrollment = db.get(LearnerEnrollment, enrollment_id)
     if not enrollment or enrollment.person.role != "Student":
@@ -762,18 +856,24 @@ def annex_g_options(db: Session = Depends(get_db),
             section = db.get(SchoolSection, assignment.section_id)
             if not section or section.grade_level.name not in {"7", "8", "9", "10"}:
                 continue
+            year = db.get(SchoolYear, assignment.school_year_id)
             contexts.setdefault(assignment.school_year_id, {"id": assignment.school_year_id,
-                "name": db.get(SchoolYear, assignment.school_year_id).name, "sections": {}})["sections"][section.id] = {
-                    "id": section.id, "grade": section.grade_level.name, "section": section.name}
+                "name": year.name, "starts_on": year.starts_on, "ends_on": year.ends_on,
+                "sections": {}})["sections"][section.id] = {
+                    "id": section.id, "grade_level_id": section.grade_level_id,
+                    "grade": section.grade_level.name, "section": section.name}
     else:
         contexts = {}
         years = db.scalars(select(SchoolYear).where(SchoolYear.deleted_at.is_(None))).all()
         sections = db.scalars(select(SchoolSection).join(GradeLevel).where(
             GradeLevel.name.in_(["7", "8", "9", "10"]), GradeLevel.deleted_at.is_(None),
-            SchoolSection.deleted_at.is_(None))).all()
+            GradeLevel.active.is_(True), SchoolSection.deleted_at.is_(None),
+            SchoolSection.active.is_(True))).all()
         for year in years:
             contexts[year.id] = {"id": year.id, "name": year.name,
-                "sections": {item.id: {"id": item.id, "grade": item.grade_level.name,
+                "starts_on": year.starts_on, "ends_on": year.ends_on,
+                "sections": {item.id: {"id": item.id, "grade_level_id": item.grade_level_id,
+                                       "grade": item.grade_level.name,
                                        "section": item.name} for item in sections}}
     for item in contexts.values():
         item["sections"] = sorted(item["sections"].values(), key=lambda row: (int(row["grade"]), row["section"]))
@@ -781,7 +881,8 @@ def annex_g_options(db: Session = Depends(get_db),
             GradingPeriod.school_year_id == item["id"], GradingPeriod.deleted_at.is_(None),
             GradingPeriod.term_order.in_([1, 2, 3])).order_by(GradingPeriod.term_order)).all()
     return {"school_years": sorted(contexts.values(), key=lambda row: row["name"], reverse=True),
-            "can_import": user.role == "admin", "can_release": user.role == "records_officer"}
+            "can_import": user.role == "admin", "can_manage_placements": user.role == "admin",
+            "can_release": user.role == "records_officer"}
 
 
 @app.get("/api/annex-g/section")

@@ -214,6 +214,7 @@ class GradingApiTest(unittest.TestCase):
         s1 = self.client.post("/api/persons", headers=self.admin_headers, json={
             "external_id": "TEST-STU-001", "lrn": "111111111111", "surname": "DELA CRUZ", "first_name": "JUAN",
             "sex": "Male", "date_of_birth": "2012-01-01", "role": "Student", "grade": gl["name"], "section": sec["name"],
+            "school_year_id": sy["id"], "enrollment_start_date": sy["starts_on"],
             "guardian_phone": "+639170000001", "biometric_consent": False,
         })
         self.assertEqual(s1.status_code, 200, s1.text)
@@ -222,6 +223,7 @@ class GradingApiTest(unittest.TestCase):
         s2 = self.client.post("/api/persons", headers=self.admin_headers, json={
             "external_id": "TEST-STU-002", "lrn": "111111111112", "surname": "SANTOS", "first_name": "MARIA",
             "sex": "Female", "date_of_birth": "2012-01-01", "role": "Student", "grade": gl["name"], "section": sec["name"],
+            "school_year_id": sy["id"], "enrollment_start_date": sy["starts_on"],
             "guardian_phone": "+639170000002", "biometric_consent": False,
         })
         self.assertEqual(s2.status_code, 200, s2.text)

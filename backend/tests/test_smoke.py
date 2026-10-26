@@ -50,6 +50,8 @@ class EduScanSmokeTest(unittest.TestCase):
         teacher = next(item for item in cls.client.get("/api/admin/users", headers=cls.headers).json() if item["username"] == "teacher")
         cls.teacher_account = teacher
         structure = cls.client.get("/api/admin/academic-structure", headers=cls.headers).json()
+        year = structure["school_years"][0]
+        cls.student_placement = {"school_year_id": year["id"], "enrollment_start_date": year["starts_on"]}
         section = next(item for item in structure["sections"] if item["name"] == "Rizal")
         assigned = cls.client.post("/api/admin/sections", headers=cls.headers,
                                    json={**section, "adviser_user_id": teacher["id"], "adviser_name": teacher["full_name"]})
@@ -66,7 +68,7 @@ class EduScanSmokeTest(unittest.TestCase):
         person = self.client.post("/api/persons", headers=self.headers, json={
             "external_id": "BIO-CRUD-001", "lrn": "999999999991", "surname": "AUDIT", "first_name": "FACE TEST",
             "sex": "Female", "date_of_birth": "2012-01-01", "role": "Student", "grade": "10", "section": "Rizal",
-            "guardian_phone": "+639171111111", "biometric_consent": True,
+            **self.student_placement, "guardian_phone": "+639171111111", "biometric_consent": True,
         })
         self.assertEqual(person.status_code, 200, person.text)
         person_id = person.json()["id"]
@@ -153,7 +155,7 @@ class EduScanSmokeTest(unittest.TestCase):
         person = self.client.post("/api/persons", headers=self.headers, json={
             "external_id": "SMOKE-001", "lrn": "123456789012", "surname": "TEST", "first_name": "LEARNER A",
             "sex": "Male", "date_of_birth": "2012-01-01", "role": "Student", "grade": "10", "section": "Rizal",
-            "guardian_phone": "+639171234567", "biometric_consent": True,
+            **self.student_placement, "guardian_phone": "+639171234567", "biometric_consent": True,
         })
         self.assertEqual(person.status_code, 200, person.text)
         person_id = person.json()["id"]
@@ -352,7 +354,7 @@ class EduScanSmokeTest(unittest.TestCase):
         created = self.client.post("/api/persons", headers=self.headers, json={
             "external_id": "EXTENDED-001", "lrn": "999999999981", "surname": "REENTRY", "first_name": "LEARNER",
             "sex": "Male", "date_of_birth": "2012-01-01", "role": "Student", "grade": "10", "section": "Rizal",
-            "guardian_phone": "+639181111111", "biometric_consent": False,
+            **self.student_placement, "guardian_phone": "+639181111111", "biometric_consent": False,
         })
         self.assertEqual(created.status_code, 200, created.text)
         person_id = created.json()["id"]
@@ -432,7 +434,7 @@ class EduScanSmokeTest(unittest.TestCase):
         for external_id, name, sex in (("MULTI-001", "Zulu, Ana", "Female"), ("MULTI-002", "Alpha, Bea", "Female")):
             response = self.client.post("/api/persons", headers=self.headers, json={
                 "external_id": external_id, "lrn": None, "surname": name.split(',')[0], "first_name": name.split(',')[1].strip(), "sex": sex, "date_of_birth": "2012-01-01", "role": "Student",
-                "grade": "9", "section": "Multi", "guardian_phone": None, "biometric_consent": True,
+                "grade": "9", "section": "Multi", **self.student_placement, "guardian_phone": None, "biometric_consent": True,
             })
             self.assertEqual(response.status_code, 200, response.text)
             people.append(response.json())
@@ -534,7 +536,7 @@ class EduScanSmokeTest(unittest.TestCase):
         ]
         for payload in payloads:
             response = self.client.post("/api/persons", headers=self.headers, json={
-                **payload, "role": "Student", "date_of_birth": "2012-01-01", "grade": "11-T", "section": "Advisory",
+                **payload, "role": "Student", "date_of_birth": "2012-01-01", "grade": "11-T", "section": "Advisory", **self.student_placement,
                 "guardian_phone": None, "biometric_consent": False,
             })
             self.assertEqual(response.status_code, 200, response.text)
@@ -542,7 +544,7 @@ class EduScanSmokeTest(unittest.TestCase):
 
         duplicate_id = self.client.post("/api/persons", headers=self.headers, json={
             **payloads[0], "full_name": "DUPLICATE, SHOULD FAIL", "role": "Student",
-            "grade": "11-T", "section": "Advisory", "guardian_phone": None, "biometric_consent": False,
+            "grade": "11-T", "section": "Advisory", **self.student_placement, "guardian_phone": None, "biometric_consent": False,
         })
         self.assertEqual(duplicate_id.status_code, 409, duplicate_id.text)
 
@@ -564,7 +566,7 @@ class EduScanSmokeTest(unittest.TestCase):
             response = self.client.post("/api/persons", headers=self.headers, json={
                 "external_id": external_id, "lrn": f"77777777777{external_id[-1]}",
                 "surname": external_id, "first_name": "LEARNER", "sex": "Male", "role": "Student",
-                "date_of_birth": "2012-01-01", "grade": "11-T", "section": section_name, "guardian_phone": None,
+                "date_of_birth": "2012-01-01", "grade": "11-T", "section": section_name, **self.student_placement, "guardian_phone": None,
                 "biometric_consent": False,
             })
             self.assertEqual(response.status_code, 200, response.text)

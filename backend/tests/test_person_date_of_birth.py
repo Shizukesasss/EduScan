@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from app import main
 from app.database import Base
-from app.models import GradeLevel, Person, SchoolSection, User
+from app.models import GradeLevel, Person, SchoolSection, SchoolYear, User
 from app.schemas import PersonCreate
 from app.services.attendance import local_now
 from app.services.roster import import_roster, parse_roster
@@ -30,6 +30,8 @@ class PersonDateOfBirthTests(unittest.TestCase):
         self.db.add(grade)
         self.db.flush()
         self.db.add(SchoolSection(grade_level_id=grade.id, name="Jose"))
+        self.school_year = SchoolYear(name="2026-2027", starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
+        self.db.add(self.school_year)
         self.db.commit()
 
     def tearDown(self):
@@ -45,6 +47,8 @@ class PersonDateOfBirthTests(unittest.TestCase):
             "role": "Student",
             "grade": "7",
             "section": "Jose",
+            "school_year_id": self.school_year.id,
+            "enrollment_start_date": date(2026, 6, 1),
             **changes,
         })
 
