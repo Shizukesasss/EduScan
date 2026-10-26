@@ -1929,6 +1929,27 @@ def save_section(payload: SectionPayload, db: Session = Depends(get_db), actor: 
 
 @app.post("/api/admin/subjects")
 def save_subject(payload: SubjectPayload, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))) -> dict:
+    if not payload.is_elective and not payload.category.strip().upper().startswith("SHS"):
+        approved_jhs_subjects = {
+            "AP": {"ARALING PANLIPUNAN", "AP"},
+            "SCI": {"SCIENCE"},
+            "VE": {"VALUES EDUCATION"},
+            "FIL": {"FILIPINO"},
+            "MATH": {"MATHEMATICS", "MATH"},
+            "MAP": {"MAPEH"},
+            "TLE": {"TECHNOLOGY AND LIVELIHOOD EDUCATION", "TLE"},
+            "ENG": {"ENGLISH"},
+        }
+        code = " ".join(payload.code.split()).upper()
+        name = " ".join(payload.name.split()).upper()
+        if name not in approved_jhs_subjects.get(code, set()):
+            if payload.id:
+                existing = db.get(Subject, payload.id)
+                if not existing:
+                    raise HTTPException(404, "Reference record was not found")
+                if existing.deleted_at is not None:
+                    raise HTTPException(409, "Restore this deleted item before editing it")
+            raise HTTPException(422, "Choose an approved JHS subject and matching subject code.")
     if payload.is_elective and not payload.category.strip().upper().startswith('SHS'):
         grades = payload.allowed_grades if payload.allowed_grades is not None else [7, 8, 9, 10]
         if not grades or any(grade not in (7, 8, 9, 10) for grade in grades):

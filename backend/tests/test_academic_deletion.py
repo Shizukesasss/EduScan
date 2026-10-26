@@ -3,7 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 TEST_DIR = tempfile.TemporaryDirectory(prefix="eduscan-academic-delete-", dir=os.environ.get("EDUSCAN_TEST_TEMP_DIR"))
@@ -20,10 +20,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 from app.auth import create_token
 from app.database import Base, get_db
-from app.main import academic_structure, app, save_grading_period, seed_reference_data
+from app.main import academic_structure, app, save_grading_period, save_subject, seed_reference_data
 from app.migrations import MIGRATIONS, run_migrations
 from app.models import GradeLevel, GradingPeriod, Person, SchoolSection, SchoolYear, Subject, SubjectTeachingAssignment, SystemAuditEvent, User
-from app.schemas import GradingPeriodPayload
+from app.schemas import GradingPeriodPayload, SubjectPayload
 from app.models_grading import AssessmentItem, Gradebook, GradebookComponent, StudentScore
 
 
@@ -81,6 +81,54 @@ class AcademicDeletionTest(unittest.TestCase):
         response = self.client.delete(f"/api/admin/reference/{kind}/{item.id}", headers=self.headers)
         self.assertEqual(response.status_code, 200, response.text)
         return response
+
+    def test_subject_save_handler_enforces_jhs_catalog_and_preserves_elective_and_shs_creation(self):
+        with self.assertRaisesRegex(HTTPException, "approved JHS subject") as rejected:
+            save_subject(SubjectPayload(
+                code="CUSTOM-JHS", name="Unapproved Learning Area", category="JHS",
+            ), self.db, self.admin)
+        self.assertEqual(rejected.exception.status_code, 422)
+        with self.assertRaises(HTTPException) as mismatched:
+            save_subject(SubjectPayload(code="SCI", name="ENGLISH", category="JHS"), self.db, self.admin)
+        self.assertEqual(mismatched.exception.status_code, 422)
+
+        catalog = (
+            ("AP", "ARALING PANLIPUNAN"), ("SCI", "SCIENCE"),
+            ("VE", "VALUES EDUCATION"), ("FIL", "FILIPINO"),
+            ("MATH", "MATHEMATICS"), ("MAP", "MAPEH"),
+            ("TLE", "TECHNOLOGY AND LIVELIHOOD EDUCATION"), ("ENG", "ENGLISH"),
+        )
+        tle_id = None
+        for code, name in catalog:
+            with self.subTest(code=code):
+                payload = {"code": code, "name": name, "category": "JHS"}
+                if code == "MATH":
+                    payload["id"] = self.subject.id
+                result = save_subject(SubjectPayload(**payload), self.db, self.admin)
+                self.assertGreater(result["id"], 0)
+                if code == "TLE":
+                    tle_id = result["id"]
+
+        save_subject(SubjectPayload(id=tle_id, code="TLE", name="TLE", category="JHS"), self.db, self.admin)
+
+        elective = save_subject(SubjectPayload(**{
+            "code": "JHS-ROBOTICS", "name": "Robotics", "category": "JHS",
+            "is_elective": True, "allowed_grades": [7, 8],
+        }), self.db, self.admin)
+        self.assertEqual(self.db.get(Subject, elective["id"]).allowed_grades, [7, 8])
+
+        shs = save_subject(SubjectPayload(**{
+            "code": "SHS-RESEARCH", "name": "Research", "category": "SHS",
+        }), self.db, self.admin)
+        self.assertGreater(shs["id"], 0)
+
+        self.subject.deleted_at = datetime(2026, 1, 1)
+        self.db.commit()
+        with self.assertRaises(HTTPException) as deleted:
+            save_subject(SubjectPayload(
+                id=self.subject.id, code="CUSTOM-JHS", name="Unapproved Learning Area", category="JHS",
+            ), self.db, self.admin)
+        self.assertEqual(deleted.exception.status_code, 409)
 
     def test_linked_grade_section_and_subject_can_be_deleted_and_restored(self):
         listed = self.client.get("/api/gradebooks", headers=self.headers)

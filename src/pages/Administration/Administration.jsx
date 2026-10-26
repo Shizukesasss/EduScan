@@ -34,6 +34,24 @@ const orderedOptions = (items, getLabel = (item) => item?.name) => [...items].so
 const orderedSections = (items) => [...items].sort((a, b) => compareText(a.grade, b.grade) || compareText(a.name, b.name));
 const orderedTracks = orderedOptions(SHS_TRACKS, (track) => track);
 const JHS_PROGRAMS = orderedOptions(['BEP', 'STE'], (program) => program);
+const JHS_SUBJECT_CATALOG = [
+  { code: 'AP', name: 'ARALING PANLIPUNAN', aliases: ['AP'] },
+  { code: 'SCI', name: 'SCIENCE' },
+  { code: 'VE', name: 'VALUES EDUCATION', aliases: ['VE'] },
+  { code: 'FIL', name: 'FILIPINO' },
+  { code: 'MATH', name: 'MATHEMATICS', aliases: ['MATH'] },
+  { code: 'MAP', name: 'MAPEH' },
+  { code: 'TLE', name: 'TECHNOLOGY AND LIVELIHOOD EDUCATION', aliases: ['TLE'] },
+  { code: 'ENG', name: 'ENGLISH' },
+];
+const jhsCatalogSubject = (subject) => {
+  const name = String(subject?.name || '').trim().toUpperCase();
+  const code = String(subject?.code || '').trim().toUpperCase();
+  const byName = JHS_SUBJECT_CATALOG.find(item => item.name === name || (item.aliases || []).includes(name));
+  const byCode = JHS_SUBJECT_CATALOG.find(item => item.code === code || (item.aliases || []).includes(code));
+  if (name && !byName) return undefined;
+  return byName && byCode && byName.code !== byCode.code ? undefined : byName || byCode;
+};
 const personNamePattern = "[\\p{L}\\p{M} '’.-]+";
 
 // ─── Confirmation Modal ─────────────────────────────────────────────────────
@@ -441,6 +459,15 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
   const [section, setSection] = useState({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', track: '', active: true });
   const [subject, setSubject] = useState({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true });
   const [teaching, setTeaching] = useState({ id: null, school_year_id: '', subject_id: '', teacher_user_id: '', section_ids: [] });
+  const subjectIsShs = String(subject.category || 'JHS').toUpperCase().startsWith('SHS');
+  const subjectUsesJhsCatalog = !subjectIsShs && !subject.is_elective;
+  const selectedJhsCatalogSubject = jhsCatalogSubject(subject);
+  const jhsCatalogOptions = JHS_SUBJECT_CATALOG.map(item => ({
+    ...item,
+    alreadyAdded: structure.subjects.some(existing => existing.id !== subject.id
+      && !String(existing.category || 'JHS').toUpperCase().startsWith('SHS')
+      && !existing.is_elective && jhsCatalogSubject(existing)?.code === item.code),
+  }));
 
   const [adviserModal, setAdviserModal] = useState(null);
   const [newAdviserId, setNewAdviserId] = useState('');
@@ -718,8 +745,53 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
         rows={structure.subjects.map(item => ({ ...item, elective_label: item.is_elective && !String(item.category).toUpperCase().startsWith('SHS') ? `STE · Grades ${(item.allowed_grades ?? [7, 8, 9, 10]).join(', ')}` : item.is_elective ? `Yes${item.elective_track ? ` · ${item.elective_track}` : ''}` : 'No' }))}
         onEdit={(item) => setSubject({ ...item })}
         onDelete={(item) => confirmDelete('subjects', item, 'Subject')}
-        form={<div className="form-grid three-columns"><Field label="Subject code (e.g. ENG)" value={subject.code} onChange={(v) => setSubject({ ...subject, code: v })} /><Field label="Subject name" value={subject.name} onChange={(v) => setSubject({ ...subject, name: v })} /><label><span className="field-label">Category</span><select className="input-field" value={String(subject.category || 'JHS').toUpperCase().startsWith('SHS') ? 'SHS' : 'JHS'} onChange={(e) => setSubject({ ...subject, category: e.target.value, elective_track: e.target.value === 'JHS' ? '' : subject.elective_track })}><option value="JHS">JHS (Grades 7-10)</option><option value="SHS">SHS (Grades 11-12)</option></select></label><label className="checkbox-field"><input type="checkbox" checked={Boolean(subject.is_elective)} onChange={(e) => setSubject({ ...subject, is_elective: e.target.checked, elective_track: e.target.checked ? subject.elective_track : '' })} /><span>Elective subject</span></label>{String(subject.category || '').toUpperCase().startsWith('SHS') && subject.is_elective && <label><span className="field-label">Available to SHS track</span><select className="input-field" value={subject.elective_track || ''} onChange={(e) => setSubject({ ...subject, elective_track: e.target.value })}><option value="">Choose track</option>{sortedTracks.map(track => <option key={track} value={track}>{track}</option>)}</select></label>}{!String(subject.category || '').toUpperCase().startsWith('SHS') && subject.is_elective && <fieldset className="elective-grade-picker" aria-describedby="elective-grade-help"><legend>Allowed JHS grades</legend><div className="elective-grade-picker__intro"><p id="elective-grade-help">Choose the grade levels that can take this elective. Applies to STE sections.</p><span className="elective-grade-picker__count">{(subject.allowed_grades ?? [7, 8, 9, 10]).length} selected</span></div><div className="elective-grade-picker__options">{[7, 8, 9, 10].map(grade => <label key={grade} className="elective-grade-picker__option"><input type="checkbox" checked={(subject.allowed_grades ?? [7, 8, 9, 10]).includes(grade)} onChange={event => setSubject({ ...subject, allowed_grades: event.target.checked ? [...(subject.allowed_grades ?? [7, 8, 9, 10]), grade] : (subject.allowed_grades ?? [7, 8, 9, 10]).filter(value => value !== grade) })} /><span>Grade {grade}</span></label>)}</div><p className="elective-grade-picker__hint">Select one or more grades. Existing class records are preserved.</p>{!(subject.allowed_grades ?? [7, 8, 9, 10]).length && <p className="elective-grade-picker__error" role="status">Choose at least one grade before saving.</p>}</fieldset>}</div>}
-        onSave={() => subject.is_elective && !String(subject.category).toUpperCase().startsWith('SHS') && !(subject.allowed_grades ?? [7, 8, 9, 10]).length ? showError('Select at least one allowed JHS grade.') : confirmSave('subjects', subject, () => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true }), 'Subject')}
+        form={(
+          <div className="form-grid three-columns">
+            {subjectUsesJhsCatalog && !(subject.id && !selectedJhsCatalogSubject) && (
+              <label>
+                <span className="field-label">Approved JHS subject</span>
+                <select
+                  className="input-field"
+                  value={selectedJhsCatalogSubject?.code || ''}
+                  onChange={(event) => {
+                    const selected = JHS_SUBJECT_CATALOG.find(item => item.code === event.target.value);
+                    if (selected) setSubject({ ...subject, code: selected.code, name: selected.name });
+                  }}
+                  required
+                >
+                  <option value="">Choose an approved subject</option>
+                  {jhsCatalogOptions.map(item => <option key={item.code} value={item.code} disabled={item.alreadyAdded}>
+                    {item.name}{item.alreadyAdded ? ' (already added)' : ''}
+                  </option>)}
+                </select>
+                <span className="muted-small">The subject code and workbook mapping are assigned automatically.</span>
+              </label>
+            )}
+            {(!subjectUsesJhsCatalog || Boolean(subject.id && !selectedJhsCatalogSubject)) && <>
+              <Field label="Subject code (e.g. ENG)" value={subject.code} onChange={(v) => setSubject({ ...subject, code: v })} required />
+              <Field label="Subject name" value={subject.name} onChange={(v) => setSubject({ ...subject, name: v })} required />
+            </>}
+            <label>
+              <span className="field-label">Category</span>
+              <select className="input-field" value={subjectIsShs ? 'SHS' : 'JHS'} onChange={(e) => setSubject({ ...subject, category: e.target.value, elective_track: e.target.value === 'JHS' ? '' : subject.elective_track })}>
+                <option value="JHS">JHS (Grades 7-10)</option>
+                <option value="SHS">SHS (Grades 11-12)</option>
+              </select>
+            </label>
+            <label className="checkbox-field">
+              <input type="checkbox" checked={Boolean(subject.is_elective)} onChange={(e) => setSubject({ ...subject, is_elective: e.target.checked, elective_track: e.target.checked ? subject.elective_track : '' })} />
+              <span>Elective subject</span>
+            </label>
+            {!subjectIsShs && subject.is_elective && <p className="section-copy">Elective names are entered by the admin and use the approved English-derived JHS workbook template.</p>}
+            {subjectIsShs && subject.is_elective && <label><span className="field-label">Available to SHS track</span><select className="input-field" value={subject.elective_track || ''} onChange={(e) => setSubject({ ...subject, elective_track: e.target.value })}><option value="">Choose track</option>{sortedTracks.map(track => <option key={track} value={track}>{track}</option>)}</select></label>}
+            {!subjectIsShs && subject.is_elective && <fieldset className="elective-grade-picker" aria-describedby="elective-grade-help"><legend>Allowed JHS grades</legend><div className="elective-grade-picker__intro"><p id="elective-grade-help">Choose the grade levels that can take this elective. Applies to STE sections.</p><span className="elective-grade-picker__count">{(subject.allowed_grades ?? [7, 8, 9, 10]).length} selected</span></div><div className="elective-grade-picker__options">{[7, 8, 9, 10].map(grade => <label key={grade} className="elective-grade-picker__option"><input type="checkbox" checked={(subject.allowed_grades ?? [7, 8, 9, 10]).includes(grade)} onChange={event => setSubject({ ...subject, allowed_grades: event.target.checked ? [...(subject.allowed_grades ?? [7, 8, 9, 10]), grade] : (subject.allowed_grades ?? [7, 8, 9, 10]).filter(value => value !== grade) })} /><span>Grade {grade}</span></label>)}</div><p className="elective-grade-picker__hint">Select one or more grades. Existing class records are preserved.</p>{!(subject.allowed_grades ?? [7, 8, 9, 10]).length && <p className="elective-grade-picker__error" role="status">Choose at least one grade before saving.</p>}</fieldset>}
+          </div>
+        )}
+        onSave={() => {
+          if (subjectUsesJhsCatalog && !subject.id && !selectedJhsCatalogSubject) return showError('Choose one of the approved JHS subjects.');
+          if (subject.is_elective && !subjectIsShs && !(subject.allowed_grades ?? [7, 8, 9, 10]).length) return showError('Select at least one allowed JHS grade.');
+          confirmSave('subjects', subject, () => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true }), 'Subject');
+        }}
         onCancel={() => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true })}
         isEditing={Boolean(subject.id)}
       />
