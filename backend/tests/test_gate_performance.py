@@ -14,7 +14,7 @@ os.environ['EDUSCAN_DATA_DIR'] = TEST_DIR.name
 os.environ['EDUSCAN_SECRET_KEY'] = 'isolated-gate-speed-test'
 os.environ['ATTENDANCE_SCHEDULER_ENABLED'] = 'false'
 
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -73,15 +73,52 @@ class GatePerformanceTest(unittest.TestCase):
         self.assertEqual(len(self.db.scalars(select(AttendanceEvent)).all()), 1)
         self.assertEqual(tasks.tasks, [])
 
-    def test_departure_and_return_can_record_time_out_after_five_seconds(self):
+    def test_departure_and_return_can_record_time_out_after_two_clear_bursts(self):
         self.scan()
         event = self.db.scalar(select(AttendanceEvent))
         event.created_at = datetime.utcnow() - timedelta(seconds=6); self.db.commit()
         import time
-        self.presence.observe('gate-one', set(), now=time.monotonic() - 3)
+        self.presence.observe('gate-one', set(), now=time.monotonic() - 12)
+        self.presence.observe('gate-one', set(), now=time.monotonic() - 8)
         result, _tasks = self.scan()
         self.assertEqual(result['results'][0]['attendance_event']['direction'], 'Time Out')
         self.assertEqual(len(self.db.scalars(select(AttendanceEvent)).all()), 2)
+
+    def test_one_missed_burst_does_not_infer_time_out(self):
+        self.scan()
+        event = self.db.scalar(select(AttendanceEvent))
+        event.created_at = datetime.utcnow() - timedelta(seconds=6); self.db.commit()
+        import time
+        self.presence.observe('gate-one', set(), now=time.monotonic() - 5)
+        result, _tasks = self.scan()
+        self.assertFalse(result['results'][0]['attendance_event']['recorded'])
+        self.assertTrue(result['results'][0]['attendance_event']['presence_hold'])
+        self.assertEqual(len(self.db.scalars(select(AttendanceEvent)).all()), 1)
+
+    def test_empty_camera_bursts_release_a_visit_for_automatic_time_out(self):
+        self.scan()
+        event = self.db.scalar(select(AttendanceEvent))
+        event.created_at = datetime.utcnow() - timedelta(seconds=20); self.db.commit()
+        empty = HTTPException(422, {'code': 'no_faces_in_burst', 'message': 'No frontal human face was detected'})
+        with patch.object(main.biometric_service, 'recognize_frames', side_effect=empty):
+            with self.assertRaises(HTTPException):
+                main.process_gate_frames(BackgroundTasks(), [b'empty'], 'gate-one', self.db)
+            self.presence._states[('gate-one', self.person.id)]['absent_since'] -= 9
+            with self.assertRaises(HTTPException):
+                main.process_gate_frames(BackgroundTasks(), [b'empty'], 'gate-one', self.db)
+        result, _tasks = self.scan()
+        self.assertEqual(result['results'][0]['attendance_event']['direction'], 'Time Out')
+
+    def test_unusable_face_does_not_count_as_departure(self):
+        self.scan()
+        event = self.db.scalar(select(AttendanceEvent))
+        event.created_at = datetime.utcnow() - timedelta(seconds=20); self.db.commit()
+        unusable = HTTPException(422, 'Face quality is too low')
+        with patch.object(main.biometric_service, 'recognize_frames', side_effect=unusable):
+            with self.assertRaises(HTTPException):
+                main.process_gate_frames(BackgroundTasks(), [b'blurred'], 'gate-one', self.db)
+        result, _tasks = self.scan()
+        self.assertTrue(result['results'][0]['attendance_event']['presence_hold'])
 
     def test_liveness_pending_cannot_record_attendance(self):
         result, tasks = self.scan(live=False)
@@ -112,9 +149,21 @@ class GatePerformanceTest(unittest.TestCase):
         tracker.observe('a', {1}, now=0); tracker.mark_recorded('a', 1)
         tracker.observe('a', set(), now=1); tracker.observe('a', {1}, now=2)
         self.assertTrue(tracker.already_recorded('a', 1))
+        tracker.observe('a', set(), now=3, count_absence=False)
+        tracker.observe('a', set(), now=8, count_absence=False)
+        tracker.observe('a', {1}, now=12)
+        self.assertTrue(tracker.already_recorded('a', 1))
         tracker.observe('b', {1}, now=2)
         self.assertFalse(tracker.already_recorded('b', 1))
         tracker.clear()
+        self.assertFalse(tracker.already_recorded('a', 1))
+
+    def test_two_clear_absence_observations_release_a_visit(self):
+        tracker = GatePresence()
+        tracker.observe('a', {1}, now=0); tracker.mark_recorded('a', 1)
+        tracker.observe('a', set(), now=1)
+        tracker.observe('a', set(), now=5)
+        tracker.observe('a', {1}, now=10)
         self.assertFalse(tracker.already_recorded('a', 1))
 
     def test_cleared_accidental_scan_releases_only_that_person_at_all_stations(self):
@@ -132,6 +181,9 @@ class GatePerformanceTest(unittest.TestCase):
         try:
             with TestClient(main.app) as client, patch.object(main.biometric_service, 'recognize_frames', return_value=[self.match(False)]) as recognize:
                 # Startup uses the isolated app database; use the fixture session for requests.
+                health = client.get('/api/station/health')
+                self.assertEqual(health.status_code, 200, health.text)
+                self.assertTrue(health.json()['attendance_auto_visit_ready'])
                 response = client.post('/api/biometrics/recognize-many', files={'frame': ('old.jpg', b'frame', 'image/jpeg')})
                 self.assertEqual(response.status_code, 200, response.text)
                 files = [('frames', (f'{index}.jpg', b'frame', 'image/jpeg')) for index in range(40)]

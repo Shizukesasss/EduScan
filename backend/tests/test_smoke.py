@@ -179,8 +179,13 @@ class EduScanSmokeTest(unittest.TestCase):
         self.assertEqual(corrected_row["status"], "Late")
 
         sf2 = self.client.get("/api/sf2/export?year=2026&month=8&grade=10&section=Rizal&school_id=SMOKE&school_year=2026-2027", headers=self.headers)
-        self.assertEqual(sf2.status_code, 200, sf2.text)
-        with zipfile.ZipFile(io.BytesIO(sf2.content)) as archive:
+        self.assertEqual(sf2.status_code, 409, sf2.text)
+        from app.database import SessionLocal
+        from app.services.sf2 import generate_sf2
+        with SessionLocal() as db:
+            sf2_path = generate_sf2(db, 2026, 8, "10", "Rizal", "SMOKE", "2026-2027",
+                                    "San Jose National High School")
+        with zipfile.ZipFile(sf2_path) as archive:
             self.assertIn("xl/media/image2.wmf", archive.namelist())
             self.assertIn("xl/media/eduscan-tardy.png", archive.namelist())
             drawing = archive.read("xl/drawings/drawing1.xml")
@@ -286,6 +291,12 @@ class EduScanSmokeTest(unittest.TestCase):
             "0018_grade_criteria_adjustment_requests",
             "0019_enrollment_departure_notes",
             "0020_admin_schedules_and_report_roles",
+            "0021_jhs_elective_allowed_grades",
+            "0022_annual_advisers_demo_setup",
+            "0023_school_year_grading_reporting_mode",
+            "0024_replace_quarter_with_term_order",
+            "0025_person_date_of_birth",
+            "0026_annex_g_enrollment_and_comments",
         ])
         inspector = inspect(legacy_engine)
         self.assertTrue(inspector.has_table("attendance_reset_audits"))
@@ -416,10 +427,16 @@ class EduScanSmokeTest(unittest.TestCase):
         removed_exception = self.client.delete(f"/api/calendar/exceptions/{holiday.json()['id']}", headers=self.headers)
         self.assertEqual(removed_exception.status_code, 200, removed_exception.text)
 
-    def test_multi_face_lbph_and_approved_roster_import(self) -> None:
+    def test_roster_import_routes_are_removed(self) -> None:
+        paths = {route.path for route in self.client.app.routes}
+        self.assertNotIn('/api/admin/roster/import', paths)
+        self.assertNotIn('/api/admin/roster/imports', paths)
+        self.assertIn('/api/admin/annex-g/enrollments/import', paths)
+
+    def test_multi_face_lbph_and_school_record_sf2(self) -> None:
         import cv2
         import numpy as np
-        from openpyxl import Workbook, load_workbook
+        from openpyxl import load_workbook
         from app.database import SessionLocal
         from app.models import BiometricSample, Person
         from app.services.biometrics import ProcessedFace, biometric_service
@@ -469,18 +486,20 @@ class EduScanSmokeTest(unittest.TestCase):
                 matches = biometric_service.recognize_many(db, b"two-face-frame")
             self.assertEqual({match["person"].id for match in matches if match.get("person")}, {item["id"] for item in people})
 
-        workbook = Workbook(); sheet = workbook.active
-        sheet.append(["External ID", "Full Name", "Sex", "Role", "Grade", "Section", "LRN", "Date of Birth"])
-        sheet.append(["ROSTER-002", "BETA, LEARNER", "Male", "Student", "8", "Roster", "888888888882", date(2012, 1, 1)])
-        sheet.append(["ROSTER-001", "ALPHA, LEARNER", "Male", "Student", "8", "Roster", "888888888881", date(2012, 1, 1)])
-        roster_stream = io.BytesIO(); workbook.save(roster_stream); roster_data = roster_stream.getvalue()
-        files = {"file": ("approved-roster.xlsx", roster_data, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
-        preview = self.client.post("/api/admin/roster/import", headers=self.headers, files=files,
-                                   data={"approved_reference": "SJNHS-ROSTER-2026", "dry_run": "true"})
-        self.assertEqual(preview.status_code, 200, preview.text); self.assertEqual(preview.json()["valid_rows"], 2)
-        imported = self.client.post("/api/admin/roster/import", headers=self.headers, files=files,
-                                    data={"approved_reference": "SJNHS-ROSTER-2026", "dry_run": "false"})
-        self.assertEqual(imported.status_code, 200, imported.text); self.assertEqual(imported.json()["inserted"], 2)
+        roster_grade = self.client.post("/api/admin/grade-levels", headers=self.headers, json={"name": "8", "active": True})
+        self.assertEqual(roster_grade.status_code, 200, roster_grade.text)
+        roster_section = self.client.post("/api/admin/sections", headers=self.headers,
+                                          json={"grade_level_id": roster_grade.json()["id"], "name": "Roster", "active": True})
+        self.assertEqual(roster_section.status_code, 200, roster_section.text)
+        for external_id, lrn, surname in (("ROSTER-002", "888888888882", "BETA"),
+                                           ("ROSTER-001", "888888888881", "ALPHA")):
+            response = self.client.post("/api/persons", headers=self.headers, json={
+                "external_id": external_id, "lrn": lrn, "surname": surname, "first_name": "LEARNER",
+                "sex": "Male", "date_of_birth": "2012-01-01", "role": "Student",
+                "grade": "8", "section": "Roster", **self.student_placement,
+                "guardian_phone": None, "biometric_consent": False,
+            })
+            self.assertEqual(response.status_code, 200, response.text)
         with SessionLocal() as db:
             sf2_path = generate_sf2(db, 2026, 8, "8", "Roster", "SJNHS", "2026-2027", "San Jose National High School")
         rendered = load_workbook(sf2_path, read_only=True, data_only=True)["School Form 2 (SF2)"]
@@ -496,7 +515,7 @@ class EduScanSmokeTest(unittest.TestCase):
         for external_id in ("ROSTER-001", "ROSTER-002"):
             item = next(row for row in self.client.get("/api/admin/persons", headers=self.headers).json() if row["external_id"] == external_id)
             self.client.request("DELETE", f"/api/admin/persons/{item['id']}/records", headers=self.headers,
-                                json={"reason": "Test cleanup after roster verification",
+                                json={"reason": "Test cleanup after school-record verification",
                                       "authorization_reference": "TEST-CLEANUP-002", "confirmation": external_id, "confirmed": True})
 
     def test_reporting_scope_transfer_deduplication_and_clean_slate(self) -> None:
@@ -552,10 +571,9 @@ class EduScanSmokeTest(unittest.TestCase):
             grade_level = db.query(GradeLevel).filter_by(name="11-T").one()
             teaching_section = SchoolSection(grade_level_id=grade_level.id, name="Teaching", active=True)
             outside_section = SchoolSection(grade_level_id=grade_level.id, name="Outside", active=True)
-            year = SchoolYear(name="Scope-2026-2027", starts_on=date(2026, 8, 1),
-                              ends_on=date(2027, 6, 30), active=True)
+            year = db.get(SchoolYear, self.student_placement["school_year_id"])
             subject = Subject(code="SCOPE-SUBJECT", name="Scope Subject", category="JHS", active=True)
-            db.add_all([teaching_section, outside_section, year, subject])
+            db.add_all([teaching_section, outside_section, subject])
             db.flush()
             db.add(SubjectTeachingAssignment(
                 school_year_id=year.id, subject_id=subject.id, section_id=teaching_section.id,
@@ -565,7 +583,7 @@ class EduScanSmokeTest(unittest.TestCase):
         for external_id, section_name in (("SCOPE-004", "Teaching"), ("SCOPE-005", "Outside")):
             response = self.client.post("/api/persons", headers=self.headers, json={
                 "external_id": external_id, "lrn": f"77777777777{external_id[-1]}",
-                "surname": external_id, "first_name": "LEARNER", "sex": "Male", "role": "Student",
+                "surname": section_name.upper(), "first_name": "LEARNER", "sex": "Male", "role": "Student",
                 "date_of_birth": "2012-01-01", "grade": "11-T", "section": section_name, **self.student_placement, "guardian_phone": None,
                 "biometric_consent": False,
             })

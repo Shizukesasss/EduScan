@@ -7,7 +7,10 @@ from .config import settings
 
 
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, pool_pre_ping=True, connect_args=connect_args)
+# The shared Supabase session pooler has a small client budget. Keep one idle
+# session and allow two short-lived bursts; excess requests wait for a slot.
+pool_options = {"pool_size": 1, "max_overflow": 2, "pool_timeout": 20, "pool_use_lifo": True} if settings.database_url.startswith("postgresql") else {}
+engine = create_engine(settings.database_url, pool_pre_ping=True, connect_args=connect_args, **pool_options)
 
 
 if settings.database_url.startswith("sqlite"):

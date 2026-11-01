@@ -41,7 +41,7 @@ EduScan is the working local-first attendance, SMS, grading, and SF2 reporting s
 - Date-range student/personnel attendance exports with batched daily reads, isolated download files, registered report hashes, and records-officer review/approval history
 - Administrative CRUD for accounts, students, employees, grade levels, sections, and subjects
 - Restricted records-officer, privacy-officer, and ICT roles plus a unified before/after administrative audit
-- Approved XLSX roster preview/import plus alphabetically arranged male/female SF2 placement
+- Alphabetically arranged male/female SF2 placement from school records
 - Separate full school-record disposal with an attributable, non-identifying disposal audit
 - Passphrase-encrypted backup/restoration of SQLite, MySQL, or PostgreSQL together with the matching application secret, encryption key, biometric artifacts, models, and templates. See [PostgreSQL recovery](docs/POSTGRES_RECOVERY.md).
 - Daily/weekly encrypted backup scheduling, rotation, off-device copies, run inventory, failure visibility, key fingerprint, model version, and file integrity hash
@@ -50,7 +50,7 @@ EduScan is the working local-first attendance, SMS, grading, and SF2 reporting s
 - Gate-station API/database/camera/SMS/model health indicators and a controlled recognition-loop restart
 - Recorded database migrations and tested disaster-recovery procedure
 - Real temporary attendance XLSX and official SF2 XLSX generation using the supplied template and sex-specific row blocks
-- Privacy notice, access matrix, correction procedure, retention process, and deployment evidence register under System Setup
+- Operational attendance, enrollment, SMS gateway, and personnel schedule controls under System Setup
 
 ## Install
 
@@ -101,7 +101,11 @@ Initial local accounts are bootstrap credentials only. On the first login after 
 6. Log in with the scanner account on the secured gate laptop, enable the camera, and start recognition. The accepted events alternate automatically between time-in and time-out.
 7. Review Attendance and make corrections with reasons. The server closes absences automatically at the authorized cutoff; administrators can run the same controlled action manually for operational recovery.
 8. Upload the official SF2 template in Reports if it was not supplied during setup, then generate and verify the monthly workbook.
-9. Open Administration to configure academic references, accounts, and approved roster imports. Open Oversight for report/audit review, retention/legal holds, recognition reviews, and the encrypted backup schedule allowed by the signed-in role.
+9. Open Administration for accounts, school records, school-year and class setup, activity audit, data management, and backup and recovery according to your role. People & records can create a school record without camera enrollment. Review recognition issues in Attendance, service health in Overview, and SMS delivery and face controls in System Setup.
+
+### Recognition check before a large school test
+
+EduScan trains a local LBPH model after enrollment, but gate identity is decided by SFace feature comparisons; the LBPH distance is retained for audit. Enrollment currently requires pairwise SFace similarity of at least 0.65 among captured frames and among reusable stored references. Each reusable reference must also agree with the capture. Gate matching requires three corroborating stored references, a score of at least 0.413, and a lead of at least 0.05 over the next candidate. These are provisional conservative cutoffs, **not measured accuracy guarantees**. They can reject genuine people as uncertain. Before admitting people with automatic attendance, enroll authorized people one at a time, then use separate live camera sessions to test each person's recognition and blink check. Include people who have **not** been enrolled, similar-looking people where available, and groups of up to five. Record false matches, missed matches, ambiguous rejections, and scan time; investigate every false match before wider use. Uncertain or inconsistent results should be handled by verified staff assistance. Do not put face images, embeddings, or encryption keys in Git.
 
 ## Build verification
 
@@ -132,4 +136,4 @@ LBPH does not produce a reusable single face vector suitable for a document colu
 
 ## Deployment responsibility
 
-The code keeps biometric operation available for controlled development and technical evaluation. Before processing real students at the gate, complete the System Setup evidence register and obtain the written determination required by the school DPO, records officer, Schools Division Office/DepEd, and applicable Philippine privacy/AI rules. A software checkbox cannot substitute for those approvals.
+The code keeps biometric operation available for controlled development and technical evaluation. Before processing real students at the gate, obtain the written determinations and approvals required by the school and applicable rules through the school's real-world process. EduScan does not record or grant those approvals.

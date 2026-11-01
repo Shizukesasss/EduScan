@@ -1,8 +1,10 @@
 import PaginatedBody from '../../components/Common/PaginatedBody';
+import OperationalControls from '../Operations/OperationalControls';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, Clock3, Download, Eraser, FileEdit, MessageSquareText, ShieldCheck, X } from 'lucide-react';
+import { ChevronDown, Clock3, Download, Eraser, FileEdit, ShieldCheck, X } from 'lucide-react';
 import { api, auth, displayTime, localDate } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
+import { orderAttendanceRows } from '../../services/attendanceOrder';
 
 const statusColor = {
   Present: 'var(--success)', Late: '#b45309', Absent: 'var(--danger)', 'No scan': 'var(--text-muted)',
@@ -16,7 +18,6 @@ export default function Attendance() {
   const [resets, setResets] = useState([]);
   const [sections, setSections] = useState([]);
   const [sectionKey, setSectionKey] = useState('');
-  const [outboxCount, setOutboxCount] = useState(0);
   const [editing, setEditing] = useState(null);
   const [resetting, setResetting] = useState(false);
   const { showSuccess, showError } = useToast();
@@ -45,12 +46,11 @@ export default function Attendance() {
   const load = useCallback(() => {
     const attendance = loadRows();
     const requests = [api.get('/attendance/corrections')];
-    if (auth.role() === 'admin') requests.push(api.get('/sms/outbox'), api.get('/attendance/resets'));
-    const metadata = Promise.allSettled(requests).then(([audit, outbox, resetRows]) => {
+    if (auth.role() === 'admin') requests.push(api.get('/attendance/resets'));
+    const metadata = Promise.allSettled(requests).then(([audit, resetRows]) => {
       if (audit.status === 'fulfilled') setCorrections(audit.value);
-      if (outbox?.status === 'fulfilled') setOutboxCount(outbox.value.length);
       if (resetRows?.status === 'fulfilled') setResets(resetRows.value);
-      const failed = [audit, outbox, resetRows].find((result) => result?.status === 'rejected');
+      const failed = [audit, resetRows].find((result) => result?.status === 'rejected');
       if (failed) showError(failed.reason.message);
     }).catch((err) => showError(err.message));
     return Promise.all([attendance, metadata]);
@@ -66,7 +66,7 @@ export default function Attendance() {
       busy = true;
       try { await loadRows(); } finally { busy = false; }
     };
-    const timer = window.setInterval(refresh, 5000);
+    const timer = window.setInterval(refresh, 2000);
     window.addEventListener('focus', refresh);
     document.addEventListener('visibilitychange', refresh);
     return () => {
@@ -76,7 +76,9 @@ export default function Attendance() {
     };
   }, [loadRows]);
 
-  const filtered = roleFilter === 'All' ? rows : rows.filter((row) => row.role === roleFilter);
+  const filtered = useMemo(() => orderAttendanceRows(roleFilter === 'All' ? rows : rows.filter((row) => row.role === roleFilter)), [rows, roleFilter]);
+  const newest = filtered[0];
+  const pageKey = `${date}|${sectionKey}|${roleFilter}|${newest?.person_id || ''}|${newest?.last_gate_time || newest?.time_out || newest?.time_in || ''}`;
   const counts = filtered.reduce((result, row) => ({ ...result, [row.status]: (result[row.status] || 0) + 1 }), {});
   const downloadLog = () => {
     if (auth.role() === 'teacher' && !selectedSection) return showError('Ask the administrator to assign your adviser account to a section first.');
@@ -95,7 +97,7 @@ export default function Attendance() {
 
   return <div className="page-stack">
     <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}><button className="btn-secondary" onClick={load}>Refresh attendance</button>{auth.role() === 'admin' && <button className="btn-primary" onClick={downloadLog}><Download size={17} /> Download current log</button>}</div>
-    <p className="muted-small">Attendance updates every 5 seconds while this page is visible. Registered students appear in the roster; a successful Time In marks them Present or Late. Time Out keeps their attendance for the day and records their departure time.</p>
+    <p className="muted-small">Latest gate activity appears first. Attendance refreshes every 2 seconds while this page is visible. A successful Time In marks a person Present or Late; Time Out records their departure time.</p>
     <div className="notice notice-blue"><ShieldCheck size={19} /><div><strong>One row per unique student ID or LRN.</strong> The all-school file includes every active record; adviser downloads are filtered by section and alphabetized. Raw scans and clean-slate actions remain auditable.</div></div>
 
     <div className="metric-grid compact-grid">{[['Present', counts.Present || 0], ['Late', counts.Late || 0], ['Absent', counts.Absent || 0], ['Pending / no scan', counts['No scan'] || 0]].map(([label, value]) => <div className="metric-card" key={label}><span>{label}</span><strong>{value}</strong></div>)}</div>
@@ -105,13 +107,13 @@ export default function Attendance() {
         <div><label className="field-label" htmlFor="attendance-date">Attendance date</label><input title="Choose a calendar date" id="attendance-date" type="date" className="input-field" value={date} onChange={(event) => setDate(event.target.value)} /></div>
         <div><label className="field-label" htmlFor="section-filter">Reporting scope</label><select id="section-filter" className="input-field" value={sectionKey} onChange={(event) => setSectionKey(event.target.value)}>{auth.role() === 'admin' && <option value="">All school records</option>}{sections.map((item) => <option key={item.id} value={`${item.grade}|${item.section}`}>Grade {item.grade} — {item.section}</option>)}</select></div>
         {auth.role() === 'admin' && <div><label className="field-label" htmlFor="role-filter">Personnel group</label><select id="role-filter" className="input-field" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}><option>All</option><option>Student</option><option>Faculty</option><option>Non-teaching Personnel</option></select></div>}
-        <div className="toolbar-note"><MessageSquareText size={17} /> {auth.role() === 'admin' ? `${outboxCount} SMS notice(s) in outbox` : `${sections.length} assigned section(s)`}</div>
+        <div className="toolbar-note">{auth.role() === 'admin' ? <a href="/dashboard/setup#sms-delivery">View SMS delivery in System Setup</a> : `${sections.length} assigned section(s)`}</div>
         <details className="action-menu"><summary><ChevronDown size={16} /> Attendance actions</summary><div className="action-menu-panel"><button onClick={handleClose}><Clock3 size={16} /> Run authorized daily close</button>{auth.role() === 'admin' && <button className="danger-link" onClick={() => setResetting(true)}><Eraser size={16} /> Start a clean slate for {date}</button>}</div></details>
       </div>
       {auth.role() === 'teacher' && sections.length === 0 && <div className="notice notice-warning">No adviser section is assigned to {auth.name()}. An administrator must select this account’s full name in Administration → Academic structure → Sections.</div>}
-      <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>Role / class</th><th>Time in</th><th>Time out</th><th>Status</th><th>Source</th><th>Action</th></tr></thead><PaginatedBody resetKey={`${date}|${sectionKey}|${roleFilter}`}>
+      <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>Role / class</th><th>Time in</th><th>Time out</th><th>Status</th><th>Source</th><th>Action</th></tr></thead><PaginatedBody resetKey={pageKey}>
         {filtered.length === 0 && <tr><td colSpan="7" className="empty-cell">No active records are available for this scope.</td></tr>}
-        {filtered.map((row) => <tr key={row.person_id}><td><strong>{row.full_name}</strong><div className="muted-small">{row.external_id}{row.lrn ? ` · LRN ${row.lrn}` : ''} · {row.sex}</div></td><td>{row.role}<div className="muted-small">{row.role === 'Student' ? `Grade ${row.grade} — ${row.section}` : row.assignment}</div></td><td>{displayTime(row.time_in)}</td><td>{displayTime(row.time_out)}</td><td><span style={{ color: statusColor[row.status], fontWeight: 700 }}>{row.status}</span></td><td>{row.source}{row.correction_reason && <div className="muted-small">Reason: {row.correction_reason}</div>}</td><td><button className="btn-link" onClick={() => setEditing(row)}><FileEdit size={15} /> Correct</button><button className="btn-link" onClick={() => setEditing({ ...row, assisted: true })}>Assist</button></td></tr>)}
+        {filtered.map((row) => <tr key={row.person_id}><td><strong>{row.full_name}</strong><div className="muted-small">{row.external_id}{row.lrn ? ` · LRN ${row.lrn}` : ''} · {row.sex}</div>{row.last_gate_time && <div className="muted-small">Latest scan: {row.last_gate_direction} · {displayTime(row.last_gate_time)}</div>}</td><td>{row.role}<div className="muted-small">{row.role === 'Student' ? `Grade ${row.grade} — ${row.section}` : row.assignment}</div></td><td>{displayTime(row.time_in)}</td><td>{displayTime(row.time_out)}</td><td><span style={{ color: statusColor[row.status], fontWeight: 700 }}>{row.status}</span></td><td>{row.source}{row.correction_reason && <div className="muted-small">Reason: {row.correction_reason}</div>}</td><td><button className="btn-link" onClick={() => setEditing(row)}><FileEdit size={15} /> Correct</button><button className="btn-link" onClick={() => setEditing({ ...row, assisted: true })}>Assist</button></td></tr>)}
       </PaginatedBody></table></div>
     </section>
 
@@ -120,6 +122,7 @@ export default function Attendance() {
       {corrections.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.person_name}</td><td>{item.actor_name} · {item.actor_role}</td><td>{item.before.status} · {displayTime(item.before.time_in)} / {displayTime(item.before.time_out)}</td><td>{item.status} · {displayTime(item.time_in)} / {displayTime(item.time_out)}</td><td>{item.reason}</td></tr>)}
     </PaginatedBody></table></div></details>
     {auth.role() === 'admin' && <details className="card-static disclosure-card"><summary>Clean-slate audit ({resets.length})</summary><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Reset time</th><th>Attendance date</th><th>Actor</th><th>Superseded records</th><th>Reason</th></tr></thead><PaginatedBody resetKey={`${date}|${sectionKey}|${roleFilter}`}>{resets.length === 0 && <tr><td colSpan="5" className="empty-cell">No attendance day has been reset.</td></tr>}{resets.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.attendance_date}</td><td>{item.actor_name}</td><td>{item.superseded_event_count} scans, {item.superseded_correction_count} corrections</td><td>{item.reason}</td></tr>)}</PaginatedBody></table></div></details>}
+    {auth.role() === 'admin' && <OperationalControls view="reviews" />}
     {editing && <CorrectionModal row={editing} date={date} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); showSuccess('Attendance correction saved with an audit entry.'); await load(); }} />}
     {resetting && <ResetDayModal date={date} onClose={() => setResetting(false)} onSaved={async (result) => { setResetting(false); showSuccess(`Clean slate started. ${result.superseded_event_count} scan event(s) and ${result.superseded_correction_count} correction(s) were superseded, not silently erased.`); await load(); }} />}
   </div>;

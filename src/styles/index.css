@@ -4835,16 +4835,6 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent-blue); 
 .account-security-shell { background: var(--bg-color); }
 .account-security-card { border-radius: 22px; box-shadow: var(--card-shadow); }
 
-/* Teacher context stays beside its action on desktop, and stacks on phones. */
-.teacher-workspace-toolbar { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 16px; }
-.subject-selector { display: flex; align-items: center; gap: 16px; background: #fff; padding: 16px 20px; border-radius: 16px; box-shadow: var(--card-shadow); border: 1px solid var(--border-color); min-width: 0; max-width: 100%; }
-.subject-selector > svg { flex-shrink: 0; }
-.subject-selector-content { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-.subject-selector-label { color: var(--text-muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
-.subject-context-select.input-field { padding: 4px 24px 4px 0; border: none; background: transparent; font-size: 15px; font-weight: 600; color: var(--primary-color); box-shadow: none; cursor: pointer; min-width: 0; }
-.teacher-workspace-tabs { display: flex; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--border-color); padding-bottom: 16px; }
-.teacher-workspace-tabs > button { font-size: 13px; min-height: 40px; }
-
 /* Login: same content, fields and submit action, now in a responsive layout. */
 .login-shell {
   min-height: 100svh;
@@ -4935,8 +4925,6 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent-blue); 
   .setup-tabs { max-width: 100%; flex-wrap: wrap; }
   .compact-settings-card { padding: 18px; }
   .compact-setting-item { min-width: 0; }
-  .teacher-workspace-toolbar { flex-direction: column; align-items: stretch; }
-  .subject-selector { width: 100%; }
   .form-grid.three-columns, .form-grid.five-columns { grid-template-columns: 1fr; }
   .modal-backdrop { padding: 12px; }
   .modal-card { max-height: 92svh; border-radius: 18px; padding: 20px; }
@@ -5025,9 +5013,6 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent-blue); 
 /* Text-first interface: decorative icons are removed from every workspace. */
 .lucide, .toast-icon, .breakdown-icon-circle, .empty-state-icon, .status-dot {
   display: none !important;
-}
-.teacher-class-workspace > div > .card > div:first-child:has(> .lucide) {
-  display: none;
 }
 .login-input-wrap .input-field, .search-box .input-field {
   padding-left: 14px;

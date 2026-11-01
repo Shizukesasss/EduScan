@@ -2,12 +2,14 @@ import usePagination from '../../hooks/usePagination';
 import Pagination from '../../components/Common/Pagination';
 import PaginatedBody from '../../components/Common/PaginatedBody';
 import { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
-  AlertTriangle, ArchiveRestore, CheckCircle2, ChevronDown,
-  Database, Download, FileUp, KeyRound, Pencil, Plus, Save,
+  AlertTriangle, CheckCircle2, ChevronDown,
+  Database, Pencil, Save,
   ShieldAlert, Trash2, UserCog, Users, UserCheck
 } from 'lucide-react';
 import { api, auth } from '../../api/client';
+import OperationalControls from '../Operations/OperationalControls';
 import { availableOptionId, isJuniorHighGrade, isSeniorHighGrade, subjectMatchesGrade } from '../../services/academicContext';
 import { useToast } from '../../contexts/useToast';
 import BiometricConsent from '../../components/Scanner/BiometricConsent';
@@ -15,11 +17,9 @@ import EnrollmentFields from '../../components/Scanner/EnrollmentFields';
 import PhoneNumberField from '../../components/Scanner/PhoneNumberField';
 
 const tabs = [
-  ['people', 'People & records'],
   ['accounts', 'Accounts'],
-  ['academic', 'Academic structure'],
-  ['roster', 'Roster import'],
-  ['recovery', 'Backup & recovery'],
+  ['people', 'People & records'],
+  ['academic', 'School years & classes'],
 ];
 const emptyPerson = {
   external_id: '', lrn: '', surname: '', first_name: '', middle_name: '', name_extension: '', sex: 'Female', role: 'Student', date_of_birth: '',
@@ -88,7 +88,6 @@ function ConfirmModal({ title, message, onConfirm, onCancel, danger = false }) {
     </div>
   );
 }
-
 // ─── Active Badge ───────────────────────────────────────────────────────────
 function ActiveBadge({ active }) {
   return <span className={`tag ${active ? 'tag-success' : 'tag-gray'}`}>{active ? 'Yes' : 'No'}</span>;
@@ -156,27 +155,47 @@ function SelectField({ label, value, onChange, options }) {
   );
 }
 
-// ─── Administration Root ────────────────────────────────────────────────────
 export default function Administration() {
-  const [active, setActive] = useState('people');
+  const role = auth.role();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const available = [
+    ...(role === 'admin' ? tabs : []),
+    ...(['admin', 'records_officer', 'privacy_officer'].includes(role) ? [['activity', 'Activity']] : []),
+    ...(['admin', 'privacy_officer'].includes(role) ? [['data', 'Data management']] : []),
+    ...(['admin', 'ict'].includes(role) ? [['backup', 'Backup & recovery']] : []),
+    ...(role === 'ict' ? [['health', 'Service health']] : []),
+  ];
+  const requestedTab = searchParams.get('tab');
+  const active = available.some(([id]) => id === requestedTab) ? requestedTab : available[0]?.[0] || 'activity';
+  return <div className="page-stack">
+    <div className="setup-tabs">{available.map(([id, label]) =>
+      <button key={id} className={active === id ? 'active' : ''} onClick={() => setSearchParams({ tab: id })}>{label}</button>)}</div>
+    {tabs.some(([id]) => id === active) && role === 'admin' && <AdminRecords active={active} />}
+    {['activity', 'data', 'backup', 'health'].includes(active) && <OperationalControls view={active} />}
+  </div>;
+}
+
+// Only the active records tab loads administrator-only data.
+function AdminRecords({ active }) {
   const [people, setPeople] = useState([]);
   const [users, setUsers] = useState([]);
   const [structure, setStructure] = useState({ school_years: [], grading_periods: [], grade_levels: [], sections: [], subjects: [] });
-  const [imports, setImports] = useState([]);
   const [disposals, setDisposals] = useState([]);
-  const [backups, setBackups] = useState([]);
   const [deletedReferences, setDeletedReferences] = useState([]);
   const { showSuccess, showError } = useToast();
 
-  const load = useCallback(() => Promise.all([
-    api.get('/admin/persons'), api.get('/admin/users'), api.get('/admin/academic-structure'),
-    api.get('/admin/roster/imports'), api.get('/admin/disposals'), api.get('/admin/backups'),
-    api.get('/admin/reference-deleted'),
-  ]).then(([personRows, accountRows, academicRows, importRows, disposalRows, backupRows, deletedRows]) => {
-      setPeople(personRows); setUsers(accountRows); setStructure(academicRows);
-      setImports(importRows); setDisposals(disposalRows); setBackups(backupRows);
-      setDeletedReferences(deletedRows);
-    }).catch((err) => showError(err.message)), [showError]);
+  const load = useCallback(() => {
+    const paths = {
+      people: ['/admin/persons', '/admin/academic-structure', '/admin/disposals'],
+      accounts: ['/admin/users', '/admin/academic-structure'],
+      academic: ['/admin/academic-structure', '/admin/users', '/admin/reference-deleted'],
+    };
+    return Promise.all(paths[active].map((path) => api.get(path))).then((rows) => {
+      if (active === 'people') { setPeople(rows[0]); setStructure(rows[1]); setDisposals(rows[2]); }
+      else if (active === 'accounts') { setUsers(rows[0]); setStructure(rows[1]); }
+      else if (active === 'academic') { setStructure(rows[0]); setUsers(rows[1]); setDeletedReferences(rows[2]); }
+    }).catch((err) => showError(err.message));
+  }, [active, showError]);
 
   useEffect(() => { load(); }, [load]);
   const success = (msg) => showSuccess(msg);
@@ -184,16 +203,9 @@ export default function Administration() {
 
   return (
     <div className="page-stack">
-      <div className="setup-tabs">
-        {tabs.map(([id, label]) => (
-          <button key={id} className={active === id ? 'active' : ''} onClick={() => setActive(id)}>{label}</button>
-        ))}
-      </div>
       {active === 'people'   && <PeopleManager people={people} disposals={disposals} reload={load} success={success} fail={fail} structure={structure} />}
       {active === 'accounts' && <AccountManager users={users} schoolYears={structure.school_years} reload={load} success={success} fail={fail} />}
       {active === 'academic' && <AcademicManager structure={structure} deletedReferences={deletedReferences} teachers={users.filter((u) => u.role === 'teacher' && u.active)} reload={load} success={success} fail={fail} />}
-      {active === 'roster'   && <RosterManager imports={imports} reload={load} success={success} fail={fail} />}
-      {active === 'recovery' && <RecoveryManager backups={backups} reload={load} success={success} fail={fail} />}
     </div>
   );
 }
@@ -219,6 +231,7 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
   const setActive = async (item) => { const data = new FormData(); data.append('active', String(!item.active)); try { await api.post(`/admin/persons/${item.id}/active`, data); success(`${item.full_name} ${item.active ? 'deactivated' : 'reactivated'}.`); await reload(); } catch (err) { fail(err); } };
   return (
     <div className="page-stack">
+      <div className="notice notice-blue">Create or update a school record here when camera capture is unavailable. This does not enroll a face. To capture face samples and train the model, use <a href="/scanner">Gate Station → Enroll person</a>. Staff can record a verified assisted visit in Attendance.</div>
       <section className="card-static">
         <div className="section-heading"><div><p className="eyebrow">Students, faculty, and personnel</p><h2>{editing ? 'Edit school record' : 'Add school record'}</h2></div><Users size={24} /></div>
         <form onSubmit={save}>
@@ -323,13 +336,11 @@ function SchoolHeadSettings({ schoolYears, success, fail }) {
 
 function AccountManager({ users, schoolYears, reload, success, fail }) {
   const [form, setForm] = useState(emptyUser); const [editing, setEditing] = useState(null);
-  const [passwords, setPasswords] = useState({ current_password: '', new_password: '' });
   const patch = (field, value) => setForm((c) => ({ ...c, [field]: value }));
   const edit  = (item) => { setEditing(item.id); setForm({ username: item.username, password: '', role: item.role, full_name: item.full_name, active: item.active }); };
   const save  = async (event) => { event.preventDefault(); try { if (editing) await api.put(`/admin/users/${editing}`, { role: form.role, full_name: form.full_name, active: form.active, new_password: form.password || null }); else await api.post('/admin/users', form); success(editing ? 'Account updated.' : 'Account created.'); setEditing(null); setForm(emptyUser); await reload(); } catch (err) { fail(err); } };
   const deactivate    = async (item) => { try { await api.delete(`/admin/users/${item.id}`); success(`${item.username} was deactivated.`); await reload(); } catch (err) { fail(err); } };
   const unlock        = async (item) => { try { await api.post(`/admin/users/${item.id}/unlock`, {}); success(`${item.username} was unlocked.`); await reload(); } catch (err) { fail(err); } };
-  const changePassword = async (event) => { event.preventDefault(); try { await api.post('/auth/change-password', passwords); auth.passwordChanged(); setPasswords({ current_password: '', new_password: '' }); success('Your password was changed.'); } catch (err) { fail(err); } };
   return (
     <div className="page-stack">
       <SchoolHeadSettings schoolYears={schoolYears} success={success} fail={fail} />
@@ -347,10 +358,6 @@ function AccountManager({ users, schoolYears, reload, success, fail }) {
           <div className="modal-actions">{editing && <button type="button" className="btn-secondary" onClick={() => { setEditing(null); setForm(emptyUser); }}>Cancel</button>}<button className="btn-primary"><Save size={16} /> Save account</button></div>
         </form>
         <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Security</th><th /></tr></thead><PaginatedBody>{users.map((item) => <tr key={item.id}><td>{item.full_name}{item.is_demo && <span className="table-subline">Demo account</span>}</td><td>{item.username}</td><td>{item.role}</td><td>{item.active ? 'Active' : 'Inactive'}</td><td>{item.locked_until ? `Locked until ${new Date(item.locked_until).toLocaleString('en-PH')}` : item.must_change_password ? 'Password change required' : 'Ready'}</td><td><details className="action-menu table-action-menu"><summary><ChevronDown size={15} /> Manage</summary><div className="action-menu-panel"><button onClick={() => edit(item)}><Pencil size={14} /> Edit account</button>{item.locked_until && <button onClick={() => unlock(item)}>Unlock account</button>}{item.active && item.username !== 'admin' && <button className="danger-link" onClick={() => deactivate(item)}>Deactivate account</button>}</div></details></td></tr>)}</PaginatedBody></table></div>
-      </section>
-      <section className="card-static">
-        <div className="section-heading"><div><p className="eyebrow">Signed in as {auth.name()}</p><h2>Change my password</h2></div><KeyRound size={24} /></div>
-        <form onSubmit={changePassword}><div className="form-grid two-columns"><Field label="Current password" type="password" value={passwords.current_password} onChange={(v) => setPasswords((c) => ({ ...c, current_password: v }))} required /><Field label="New strong password" type="password" value={passwords.new_password} onChange={(v) => setPasswords((c) => ({ ...c, new_password: v }))} required /></div><div className="modal-actions"><button className="btn-primary"><KeyRound size={16} /> Change password</button></div></form>
       </section>
     </div>
   );
@@ -662,7 +669,7 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
 
   return (
     <div className="page-stack">
-      <div className="notice notice-blue"><Database size={18} /> Admins can delete school years, grading periods, grade levels, sections, and subjects from setup. Linked student and class records are preserved. Deleted items can be restored below.</div>
+      <div className="notice notice-blue"><Database size={18} /> Set up each school year's dates and grading periods here. Grade levels, sections, and subjects are reusable definitions; adviser and subject-teacher assignments can change by year. Editing or deleting setup items preserves existing student, score, attendance, and class records. Deleted items can be restored below.</div>
 
       <section className="card-static">
         <details>
@@ -842,31 +849,6 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
 
       {/* Global Confirmation Modal */}
       {confirm && <ConfirmModal title={confirm.title} message={confirm.message} danger={confirm.danger} onConfirm={confirm.onConfirm} onCancel={() => setConfirm(null)} />}
-    </div>
-  );
-}
-
-// ─── Roster Manager ─────────────────────────────────────────────────────────
-function RosterManager({ imports, reload, success, fail }) {
-  const [file, setFile] = useState(null); const [reference, setReference] = useState(''); const [preview, setPreview] = useState(null);
-  const run = async (dryRun) => { if (!file) return fail(new Error('Select an approved .xlsx roster.')); const form = new FormData(); form.append('file', file); form.append('approved_reference', reference); form.append('dry_run', String(dryRun)); try { const result = await api.post('/admin/roster/import', form); setPreview(result); if (!dryRun) { success(`Roster imported: ${result.inserted} inserted and ${result.updated} updated.`); await reload(); } } catch (err) { fail(err); } };
-  return (
-    <div className="page-stack">
-      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Approved spreadsheet workflow</p><h2>Bulk roster import</h2></div><FileUp size={26} /></div><p className="section-copy">Required columns: External ID, Full Name, Sex, and Role. Students also require Grade and Section; new student rows require Date of Birth. A blank DOB cell preserves the saved date on an existing student. Staff DOB is optional. Existing records with the same ID or LRN are updated.</p><div className="form-grid two-columns"><label><span className="field-label">Approved .xlsx roster</span><input title="Choose a file in the format shown by this field" className="input-field" type="file" accept=".xlsx" onChange={(e) => { setFile(e.target.files?.[0] || null); setPreview(null); }} /></label><Field label="School approval / source reference" value={reference} onChange={setReference} required /></div><div className="modal-actions"><button className="btn-secondary" onClick={() => run(true)}><FileUp size={16} /> Validate preview</button><button className="btn-primary" disabled={!preview?.dry_run || preview.invalid_rows > 0} onClick={() => run(false)}><Plus size={16} /> Import valid roster</button></div>{preview && <div className={`notice ${preview.invalid_rows ? 'notice-danger' : 'notice-success'}`}>Valid rows: {preview.valid_rows ?? preview.inserted + preview.updated}. Invalid rows: {preview.invalid_rows}. {preview.errors?.slice(0, 8).map((item) => `Row ${item.row}: ${item.errors.join(', ')}`).join(' · ')}</div>}</section>
-      <section className="card-static"><h2>Roster import audit</h2><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Imported</th><th>File</th><th>Approval</th><th>Counts</th><th>Actor</th><th>SHA-256</th></tr></thead><PaginatedBody>{imports.length === 0 && <tr><td colSpan="6" className="empty-cell">No approved roster has been imported.</td></tr>}{imports.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.filename}</td><td>{item.approved_reference}</td><td>{item.inserted_count} added, {item.updated_count} updated</td><td>{item.actor_name}</td><td className="model-version">{item.file_sha256}</td></tr>)}</PaginatedBody></table></div></section>
-    </div>
-  );
-}
-
-// ─── Recovery Manager ───────────────────────────────────────────────────────
-function RecoveryManager({ backups, reload, success, fail }) {
-  const [passphrase, setPassphrase] = useState(''); const [restoreFile, setRestoreFile] = useState(null); const [restorePassphrase, setRestorePassphrase] = useState(''); const [confirmation, setConfirmation] = useState('');
-  const create  = async () => { const form = new FormData(); form.append('passphrase', passphrase); try { const result = await api.post('/admin/backups', form); setPassphrase(''); success(`Encrypted ${result.database_backend} backup ${result.filename} created.`); await reload(); } catch (err) { fail(err); } };
-  const restore = async () => { if (!restoreFile) return fail(new Error('Select an .edubak recovery file.')); const form = new FormData(); form.append('file', restoreFile); form.append('passphrase', restorePassphrase); form.append('confirmation', confirmation); try { const result = await api.post('/admin/backups/restore', form); setRestorePassphrase(''); setConfirmation(''); success(result.offline_restore_required ? `Backup integrity verified (${result.file_count} files). Stop EduScan, then run ${result.apply_command} from the project folder.` : `Backup integrity verified (${result.file_count} files). Restart EduScan to apply it.`); } catch (err) { fail(err); } };
-  return (
-    <div className="page-stack">
-      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Database, encryption keys, faces, models, templates</p><h2>Create encrypted backup</h2></div><Database size={25} /></div><div className="notice notice-warning"><KeyRound size={18} /> The passphrase is not stored. Keep it in the school's approved password vault and retain an off-device copy of the .edubak file.</div><div className="form-grid two-columns"><Field label="Backup passphrase (at least 12 characters)" type="password" value={passphrase} onChange={setPassphrase} /><div className="modal-actions"><button className="btn-primary" onClick={create}><Database size={16} /> Create secure backup</button></div></div><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Created</th><th>Filename</th><th>Size</th><th /></tr></thead><PaginatedBody>{backups.length === 0 && <tr><td colSpan="4" className="empty-cell">No secure backup has been created.</td></tr>}{backups.map((item) => <tr key={item.filename}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.filename}</td><td>{(item.size_bytes / 1024 / 1024).toFixed(2)} MB</td><td><button className="btn-link" onClick={() => api.download(`/admin/backups/${encodeURIComponent(item.filename)}`, item.filename).catch(fail)}><Download size={15} /> Download</button></td></tr>)}</PaginatedBody></table></div></section>
-      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Controlled two-stage recovery</p><h2>Verify and stage a restore</h2></div><ArchiveRestore size={25} /></div><p className="section-copy">The server decrypts and verifies every file hash before staging. SQLite applies on restart. MySQL requires the API to be stopped and the controlled PowerShell restore command to be run; that command first creates a fresh encrypted safety backup, imports the SQL, and then swaps the matching encryption artifacts.</p><div className="form-grid three-columns"><label><span className="field-label">EduScan .edubak file</span><input title="Choose a file in the format shown by this field" className="input-field" type="file" accept=".edubak" onChange={(e) => setRestoreFile(e.target.files?.[0] || null)} /></label><Field label="Backup passphrase" type="password" value={restorePassphrase} onChange={setRestorePassphrase} /><Field label='Type "STAGE RESTORE"' value={confirmation} onChange={setConfirmation} /></div><div className="modal-actions"><button className="btn-danger" onClick={restore}><ArchiveRestore size={16} /> Verify and stage restore</button></div></section>
     </div>
   );
 }

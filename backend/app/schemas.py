@@ -394,17 +394,6 @@ class ExcusedAbsencePayload(BaseModel):
     reason: str = Field(min_length=5, max_length=1000)
 
 
-class CompliancePayload(BaseModel):
-    school_approval_reference: str = ""
-    parent_consent_process_reference: str = ""
-    dpo_pia_reference: str = ""
-    sdo_deped_clearance_reference: str = ""
-    ai_registry_reference: str = ""
-    records_schedule_reference: str = ""
-    acceptable_use_policy_reference: str = ""
-    breach_response_reference: str = ""
-
-
 class GradeComponentPayload(BaseModel):
     id: str = Field(min_length=1, max_length=120)
     category: str = Field(min_length=1, max_length=50)
