@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+from openpyxl import load_workbook
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
 from tests import test_grading_regressions as _fixtures
 from app.migrations import MIGRATIONS, run_migrations
-from app.models import Subject
-from app.schemas import SubjectPayload
-from app.main import save_subject
+from app.models import SchoolSection, Subject, SubjectTeachingAssignment
+from app.schemas import SectionPayload, SubjectPayload
+from app.main import save_section, save_subject
+from app.services import reports
+from app.services.shs_grading_policies import WORK_IMMERSION, ensure_shs_grading_policies
 from fastapi import HTTPException
 
 
@@ -26,6 +33,101 @@ class SubjectCategoryScopedNamesTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.fixture.tearDown()
+
+    def test_work_immersion_can_be_created_for_each_track_without_a_cluster(self) -> None:
+        for track, name in (
+            ("Academic Track", "WORK IMMERSION FOR ACADEMIC TRACK"),
+            ("Technical Professional (TechPro) Track", "WORK IMMERSION FOR TECH-PRO TRACK (320 HOURS)"),
+            ("Technical Professional (TechPro) Track", "WORK IMMERSION FOR TECH-PRO TRACK (540 HOURS) - 1 TERM"),
+            ("Technical Professional (TechPro) Track", "WORK IMMERSION FOR TECH-PRO TRACK (640 HOURS) - 1 TERM"),
+            ("Technical Professional (TechPro) Track", "WORK IMMERSION FOR TECH-PRO TRACK (540 HOURS) - 2 TERMS"),
+            ("Technical Professional (TechPro) Track", "WORK IMMERSION FOR TECH-PRO TRACK (640 HOURS) - 2 TERMS"),
+        ):
+            with self.subTest(track=track):
+                saved = save_subject(SubjectPayload(
+                    name=name, category="SHS", is_elective=True,
+                    elective_track=track, elective_cluster=None,
+                ), self.fixture.db, self.fixture.admin)
+                subject = self.fixture.db.get(Subject, saved["id"])
+                self.assertEqual(subject.elective_track, track)
+                self.assertIsNone(subject.elective_cluster)
+
+    def test_work_immersion_name_must_match_its_track_and_official_course(self) -> None:
+        for name in ("WORK IMMERSION", "WORK IMMERSION FOR ACADEMIC TRACK"):
+            with self.subTest(name=name), self.assertRaises(HTTPException) as error:
+                save_subject(SubjectPayload(
+                    name=name, category="SHS", is_elective=True,
+                    elective_track="Technical Professional (TechPro) Track",
+                ), self.fixture.db, self.fixture.admin)
+            self.assertEqual(error.exception.status_code, 422)
+
+    def _assert_grade12_work_immersion_export(self, track: str, name: str, cluster: str) -> None:
+        fixture = self.fixture
+        fixture.grade.name = "Grade 12"
+        fixture.first.grade = fixture.second.grade = "12"
+        fixture.outside.grade = "11"
+        fixture.section.track = track
+        fixture.section.track_cluster = cluster
+        saved = save_subject(SubjectPayload(
+            name=name, category="SHS", is_elective=True, elective_track=track,
+        ), fixture.db, fixture.admin)
+        fixture.subject = fixture.db.get(Subject, saved["id"])
+        policy = ensure_shs_grading_policies(fixture.db, fixture.year, "12", fixture.admin)[WORK_IMMERSION]
+        book = fixture.create(policy)
+        fixture.score_student(book, 80)
+        fixture.score_second_student(book, 80)
+        book.status = "Finalized"
+        fixture.db.commit()
+        with TemporaryDirectory() as folder, patch.object(reports, "EXPORT_DIR", Path(folder)):
+            path = reports.generate_gradebook_report_xlsx(
+                fixture.db, book.id, "V", "Test Division", "123456",
+            )
+            workbook = load_workbook(path, read_only=True)
+            try:
+                self.assertIn("Term 1", workbook.sheetnames)
+                self.assertIn("HELPER", workbook.sheetnames)
+            finally:
+                workbook.close()
+
+    def test_grade12_academic_work_immersion_exports_official_ecr(self) -> None:
+        self._assert_grade12_work_immersion_export(
+            "Academic Track", "WORK IMMERSION FOR ACADEMIC TRACK", "Field Experience",
+        )
+
+    def test_grade12_techpro_work_immersion_exports_official_ecr(self) -> None:
+        self._assert_grade12_work_immersion_export(
+            "Technical Professional (TechPro) Track",
+            "WORK IMMERSION FOR TECH-PRO TRACK (320 HOURS)",
+            "Aesthetic, Wellness, and Human Care",
+        )
+
+    def test_section_reclassification_rejects_a_mismatched_active_elective_assignment(self) -> None:
+        fixture = self.fixture
+        fixture.section.track = "Academic Track"
+        fixture.section.track_cluster = "Business and Entrepreneurship"
+        elective = Subject(
+            code="SHS-AC-BE-T1-TEST", name="BUSINESS TEST ELECTIVE", category="SHS",
+            is_elective=True, elective_track="Academic Track",
+            elective_cluster="Business and Entrepreneurship",
+        )
+        fixture.db.add(elective)
+        fixture.db.flush()
+        fixture.db.add(SubjectTeachingAssignment(
+            school_year_id=fixture.year.id, subject_id=elective.id,
+            section_id=fixture.section.id, teacher_user_id=fixture.teacher.id,
+            active=True,
+        ))
+        fixture.db.commit()
+        payload = SectionPayload(
+            id=fixture.section.id, school_year_id=fixture.year.id,
+            grade_level_id=fixture.grade.id, name=fixture.section.name,
+            adviser_user_id=fixture.teacher.id, track="Academic Track",
+            track_cluster="Science, Technology, Engineering, and Mathematics (STEM)",
+        )
+        with self.assertRaisesRegex(HTTPException, "active elective assignment"):
+            save_section(payload, fixture.db, fixture.admin)
+        self.assertEqual(fixture.db.get(SchoolSection, fixture.section.id).track_cluster,
+                         "Business and Entrepreneurship")
 
     def _add_jhs_research(self) -> Subject:
         subject = Subject(

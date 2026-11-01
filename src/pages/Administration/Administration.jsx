@@ -9,6 +9,7 @@ import {
   ShieldAlert, Trash2, UserCog, Users, UserCheck
 } from 'lucide-react';
 import { api, auth } from '../../api/client';
+import { WORK_IMMERSION_SCOPE, editableShsSubject, shsElectiveChoices, shsElectiveForSave } from '../../services/shsWorkImmersion';
 import OperationalControls from '../Operations/OperationalControls';
 import { availableOptionId, isJuniorHighGrade, isSeniorHighGrade, subjectMatchesGrade } from '../../services/academicContext';
 import { useToast } from '../../contexts/useToast';
@@ -690,7 +691,8 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
       && (normalizeSubjectName(existing.name) === item.name || String(existing.code || '').trim().toUpperCase() === item.code)),
   }));
   const currentSubject = structure.subjects.find(item => Number(item.id) === Number(subject.id));
-  const shsElectiveNames = SHS_ELECTIVE_SUBJECT_CATALOG[subject.elective_track]?.[subject.elective_cluster] || [];
+  const shsElectiveNames = shsElectiveChoices(subject.elective_track, subject.elective_cluster,
+    SHS_ELECTIVE_SUBJECT_CATALOG[subject.elective_track]?.[subject.elective_cluster] || []);
   const shsElectiveOptions = [...new Set([
     ...shsElectiveNames,
     ...(subjectIsShsElective && currentSubject?.name ? [normalizeSubjectName(currentSubject.name)] : []),
@@ -996,7 +998,7 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
         title="Subjects" eyebrow="Learning areas"
         columns={[{ key: 'name', label: 'Subject Name' }, { key: 'category', label: 'Category' }, { key: 'elective_label', label: 'Elective' }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
         rows={structure.subjects.map(item => ({ ...item, name: String(item.category || '').toUpperCase().startsWith('SHS') ? String(item.name || '').toUpperCase() : item.name, elective_label: item.is_elective && !String(item.category).toUpperCase().startsWith('SHS') ? `STE · Grades ${(item.allowed_grades ?? [7, 8, 9, 10]).join(', ')}` : item.is_elective ? `Yes${item.elective_cluster ? ` · ${item.elective_cluster}` : item.elective_track ? ` · ${item.elective_track}` : ''}` : 'No' }))}
-        onEdit={(item) => setSubject({ ...item })}
+        onEdit={(item) => setSubject(editableShsSubject(item))}
         onDelete={(item) => confirmDelete('subjects', item, 'Subject')}
         form={(
           <div className="form-grid three-columns">
@@ -1061,7 +1063,7 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
             </label>
             {!subjectIsShs && subject.is_elective && <p className="section-copy">Elective names are entered by the admin and use the approved English-derived JHS workbook template.</p>}
             {subjectIsShsElective && <label><span className="field-label">Available to SHS track</span><select className="input-field" value={subject.elective_track || ''} onChange={(e) => setSubject({ ...subject, id: null, code: '', name: '', elective_track: e.target.value, elective_cluster: '' })}><option value="">Choose track</option>{orderedElectiveTracks.map(track => <option key={track} value={track}>{track}</option>)}</select></label>}
-            {subjectIsShsElective && subject.elective_track && SHS_TRACK_CLUSTERS[subject.elective_track] && <label><span className="field-label">SHS elective cluster</span><select className="input-field" required value={subject.elective_cluster || ''} onChange={(e) => setSubject({ ...subject, id: null, code: '', name: '', elective_cluster: e.target.value })}><option value="">Choose cluster</option>{SHS_TRACK_CLUSTERS[subject.elective_track].map(cluster => <option key={cluster} value={cluster}>{cluster}</option>)}</select></label>}
+            {subjectIsShsElective && subject.elective_track && SHS_TRACK_CLUSTERS[subject.elective_track] && <label><span className="field-label">SHS elective cluster</span><select className="input-field" required value={subject.elective_cluster || ''} onChange={(e) => setSubject({ ...subject, id: null, code: '', name: '', elective_cluster: e.target.value })}><option value="">Choose cluster or Work Immersion</option>{SHS_TRACK_CLUSTERS[subject.elective_track].map(cluster => <option key={cluster} value={cluster}>{cluster}</option>)}<option value={WORK_IMMERSION_SCOPE}>Work Immersion — Grade 12, all clusters in this track</option></select></label>}
             {subjectIsShsElective && subject.elective_cluster && <label><span className="field-label">Subject name</span><select className="input-field" required disabled={!shsElectiveOptions.length} value={selectedShsElectiveSubject?.name || ''} onChange={(e) => {
               const name = normalizeSubjectName(e.target.value);
               const existing = shsElectiveOptions.find(item => item.name === name)?.existing;
@@ -1077,11 +1079,11 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
           if (subjectIsShs && subject.is_elective && !subject.elective_track) return showError('Choose the SHS track for this elective.');
           if (subjectIsShs && subject.is_elective && SHS_TRACK_CLUSTERS[subject.elective_track] && !subject.elective_cluster) return showError('Choose the SHS cluster for this elective.');
           if (subjectIsShsElective && !selectedShsElectiveSubject) return showError('Choose an SHS elective from the approved subject list for this cluster.');
-          const saveValue = subjectIsShs ? {
+          const saveValue = subjectIsShs ? shsElectiveForSave({
             ...subject,
             code: subject.code || (subjectUsesShsCoreCatalog ? selectedShsCoreSubject?.code : ''),
             name: normalizeSubjectName(selectedShsCoreSubject?.name || subject.name),
-          } : subject;
+          }) : subject;
           confirmSave('subjects', saveValue, () => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', elective_cluster: '', active: true }), 'Subject');
         }}
         onCancel={() => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', elective_cluster: '', active: true })}

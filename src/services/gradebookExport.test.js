@@ -13,6 +13,7 @@ const draft = (overrides = {}) => ({
 test('allows teachers to preview Grade 11 and Grade 12 SHS Drafts for the supported year', () => {
   assert.equal(isDraftPreviewAvailable(draft(), 'teacher'), true);
   assert.equal(isDraftPreviewAvailable(draft({ grade_name: 'Grade 12' }), 'teacher'), true);
+  assert.equal(isDraftPreviewAvailable(draft({ school_year_name: 'SY 2026 – 2027' }), 'teacher'), true);
 });
 
 test('does not allow previews for unsupported grades, years, statuses, legacy records, or roles', () => {

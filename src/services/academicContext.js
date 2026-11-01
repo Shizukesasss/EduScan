@@ -12,6 +12,9 @@ export function isJuniorHighGrade(value) {
 
 export function subjectMatchesGrade(subject, gradeName) {
   const seniorSubject = String(subject.category || 'JHS').trim().toUpperCase().startsWith('SHS');
+  if (seniorSubject && subject.is_elective && String(subject.name || '').toLowerCase().includes('work immersion')) {
+    return normalizeGradeName(gradeName) === '12';
+  }
   if (!seniorSubject && subject.is_elective && !(subject.allowed_grades ?? [7, 8, 9, 10]).includes(Number(normalizeGradeName(gradeName)))) return false;
   return seniorSubject === isSeniorHighGrade(gradeName);
 }

@@ -2024,13 +2024,29 @@ def save_section(payload: SectionPayload, db: Session = Depends(get_db), actor: 
     elif is_senior_high(parent_grade.name):
         payload.track = payload.track.strip() if payload.track else None
         payload.track_cluster = payload.track_cluster.strip() if payload.track_cluster else None
+        existing = db.get(SchoolSection, payload.id) if payload.id else None
         if payload.track in SHS_TRACK_CLUSTERS:
             if payload.track_cluster not in SHS_TRACK_CLUSTERS[payload.track]:
                 raise HTTPException(status_code=422, detail="Choose an elective cluster available to the selected SHS track")
         else:
-            existing = db.get(SchoolSection, payload.id) if payload.id else None
             if not payload.track or not existing or payload.track != existing.track or payload.track_cluster != existing.track_cluster:
                 raise HTTPException(status_code=422, detail="Choose an SHS track and one of its elective clusters")
+        if existing and (payload.track != existing.track or payload.track_cluster != existing.track_cluster):
+            assigned_electives = db.scalars(select(Subject).join(
+                SubjectTeachingAssignment,
+                SubjectTeachingAssignment.subject_id == Subject.id,
+            ).where(
+                SubjectTeachingAssignment.section_id == existing.id,
+                SubjectTeachingAssignment.active.is_(True),
+                Subject.active.is_(True), Subject.deleted_at.is_(None),
+                Subject.is_elective.is_(True),
+            )).all()
+            for elective in assigned_electives:
+                required_track = (elective.elective_track or "").strip()
+                required_cluster = (elective.elective_cluster or "").strip()
+                if (required_track and required_track.casefold() != payload.track.casefold()
+                        or required_cluster and required_cluster.casefold() != payload.track_cluster.casefold()):
+                    raise HTTPException(409, f"Review the active elective assignment for {elective.name} before changing this section's SHS track or cluster")
     else:
         payload.track = None
         payload.track_cluster = None
@@ -2142,9 +2158,25 @@ def save_subject(payload: SubjectPayload, db: Session = Depends(get_db), actor: 
         raise HTTPException(status_code=422, detail="Choose the SHS track allowed to take this elective")
     if payload.category.strip().upper().startswith("SHS") and payload.is_elective:
         payload.elective_track = payload.elective_track.strip()
+        work_immersion_names = {
+            "Academic Track": {"WORK IMMERSION FOR ACADEMIC TRACK"},
+            "Technical Professional (TechPro) Track": {
+                "WORK IMMERSION FOR TECH-PRO TRACK (320 HOURS)",
+                "WORK IMMERSION FOR TECH-PRO TRACK (540 HOURS) - 1 TERM",
+                "WORK IMMERSION FOR TECH-PRO TRACK (640 HOURS) - 1 TERM",
+                "WORK IMMERSION FOR TECH-PRO TRACK (540 HOURS) - 2 TERMS",
+                "WORK IMMERSION FOR TECH-PRO TRACK (640 HOURS) - 2 TERMS",
+            },
+        }
+        is_work_immersion = "WORK IMMERSION" in payload.name
+        if is_work_immersion:
+            approved_names = work_immersion_names.get(payload.elective_track, set())
+            if payload.name not in approved_names:
+                raise HTTPException(status_code=422, detail="Choose Work Immersion for the matching SHS track")
+            payload.elective_cluster = None
         if payload.elective_track in SHS_TRACK_CLUSTERS:
-            payload.elective_cluster = (payload.elective_cluster or "").strip()
-            if payload.elective_cluster not in SHS_TRACK_CLUSTERS[payload.elective_track]:
+            payload.elective_cluster = (payload.elective_cluster or "").strip() or None
+            if not is_work_immersion and payload.elective_cluster not in SHS_TRACK_CLUSTERS[payload.elective_track]:
                 raise HTTPException(status_code=422, detail="Choose a cluster available to the selected SHS track")
         else:
             payload.elective_cluster = None

@@ -45,6 +45,8 @@ def subject_matches_grade(subject, grade_name: str) -> bool:
     senior = (subject.category or 'JHS').strip().upper().startswith('SHS')
     if senior != is_senior_high(grade_name):
         return False
+    if senior and subject.is_elective and "work immersion" in (subject.name or "").casefold():
+        return normalize_grade_name(grade_name) == "12"
     if not senior and subject.is_elective:
         return is_junior_high(grade_name) and int(normalize_grade_name(grade_name)) in subject.allowed_grades
     return True

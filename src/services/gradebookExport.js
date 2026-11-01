@@ -1,11 +1,15 @@
 import { isSeniorHighGrade } from './academicContext.js';
 
 export function isDraftPreviewAvailable(gradebook, role) {
+  const schoolYear = String(gradebook?.school_year_name || '')
+    .replace(/^\s*SY\s*/i, '')
+    .trim()
+    .replace(/\s*[-–—]\s*/g, '-');
   return role === 'teacher'
     && Boolean(gradebook)
     && !gradebook.is_legacy_readonly
     && gradebook.status === 'Draft'
-    && gradebook.school_year_name === '2026-2027'
+    && schoolYear === '2026-2027'
     && isSeniorHighGrade(gradebook.grade_name);
 }
 

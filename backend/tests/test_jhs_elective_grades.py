@@ -9,6 +9,16 @@ from fastapi import HTTPException
 
 
 class ElectiveGradeTests(unittest.TestCase):
+    def test_official_work_immersion_is_available_only_to_grade12(self):
+        for track, name in (
+            ('Academic Track', 'WORK IMMERSION FOR ACADEMIC TRACK'),
+            ('Technical Professional (TechPro) Track', 'WORK IMMERSION FOR TECH-PRO TRACK (320 HOURS)'),
+        ):
+            with self.subTest(track=track):
+                subject = Subject(category='SHS', is_elective=True, elective_track=track, name=name)
+                self.assertFalse(subject_matches_grade(subject, 'Grade 11'))
+                self.assertTrue(subject_matches_grade(subject, 'Grade 12'))
+
     def test_new_assignment_and_schedule_reject_disallowed_grade(self):
         from types import SimpleNamespace
         from app.main import save_schedule, save_subject_teaching_assignments

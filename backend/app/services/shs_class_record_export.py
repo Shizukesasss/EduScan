@@ -266,7 +266,7 @@ def _course_selection(subject: Subject, grade_name: str, catalog: dict) -> tuple
         elif "tech-pro" in subject_name.casefold() or "techpro" in subject_name.casefold():
             track_name = "Technical Professional (TechPro) Track"
         if track_name == "Academic Track":
-            category, cluster = _ACADEMIC_CATEGORY, "OTHER ELECTIVE / SPECIAL CURRICULAR PROGRAM"
+            category, cluster = _ACADEMIC_CATEGORY, "FIELD EXPERIENCE"
         elif track_name == "Technical Professional (TechPro) Track":
             category, cluster = _TECHPRO_CATEGORY, "WORK IMMERSION"
         else:

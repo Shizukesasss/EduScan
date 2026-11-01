@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from openpyxl import load_workbook
 from app.services.reports import _complete_draft_preview_record
 from app.services.shs_class_record_export import (
+    _ecr_reference_data,
     _course_selection,
     _normalize_cluster,
     _normalize_course,
@@ -17,6 +18,26 @@ from app.services.shs_class_record_export import (
 
 
 class ShsEcrPreviewAndGrade12CoreTests(unittest.TestCase):
+    def test_work_immersion_catalog_matches_every_grade12_course(self) -> None:
+        template = Path(__file__).resolve().parents[1] / "templates" / "SUBJECT CLASS RECORDS" / "ECR_3Term - SSHS - SY2026-2027.xlsx"
+        catalog, _ = _ecr_reference_data(template)
+        courses = (
+            ("Academic Track", "WORK IMMERSION FOR ACADEMIC TRACK", 1),
+            ("Technical Professional (TechPro) Track", "WORK IMMERSION FOR TECH-PRO TRACK (320 HOURS)", 1),
+            ("Technical Professional (TechPro) Track", "WORK IMMERSION FOR TECH-PRO TRACK (540 HOURS) - 1 TERM", 1),
+            ("Technical Professional (TechPro) Track", "WORK IMMERSION FOR TECH-PRO TRACK (640 HOURS) - 1 TERM", 1),
+            ("Technical Professional (TechPro) Track", "WORK IMMERSION FOR TECH-PRO TRACK (540 HOURS) - 2 TERMS", 2),
+            ("Technical Professional (TechPro) Track", "WORK IMMERSION FOR TECH-PRO TRACK (640 HOURS) - 2 TERMS", 2),
+        )
+        for track, name, term_count in courses:
+            with self.subTest(name=name):
+                subject = SimpleNamespace(code="SHS-EL-WORK-IMMERSION", name=name,
+                                          is_elective=True, elective_track=track, elective_cluster=None)
+                selection = _course_selection(subject, "12", catalog)
+                self.assertEqual(selection[5], term_count)
+                with self.assertRaisesRegex(HTTPException, "does not list"):
+                    _course_selection(subject, "11", catalog)
+
     def test_master_ecr_shows_track_separately_and_with_cluster_on_each_term(self) -> None:
         template = Path(__file__).resolve().parents[1] / "templates" / "SUBJECT CLASS RECORDS" / "ECR_3Term - SSHS - SY2026-2027.xlsx"
         workbook = load_workbook(template, read_only=True, data_only=False)
