@@ -42,6 +42,9 @@ export default function GradingSheet({
   const [activeComponentId, setActiveComponentId] = useState(components[0]?.id);
   const inputRefs = useRef(new Map());
   const [scoreCell, setScoreCell] = useState(null);
+  const shsTrack = ['Academic Track', 'Technical Professional (TechPro) Track'].includes(gradebook?.section_track)
+    && ['11', '12'].includes(String(gradebook?.grade_name || '').replace(/^Grade\s*/i, '').trim())
+    ? gradebook.section_track : '';
   const openScoreStatus = (event, student, item, value, status) => {
     if (disabled) return;
     event.preventDefault();
@@ -272,6 +275,10 @@ export default function GradingSheet({
                   {selectors.section || gradebook?.section_name || (!(selectors.grade || gradebook?.grade_name) ? '-' : '')}
                 </div>
               </td>
+              {shsTrack && <>
+                <th>SHS TRACK:</th>
+                <td>{shsTrack}</td>
+              </>}
               <th>TEACHER:</th>
               <td>{gradebook?.teacher_name || '-'}</td>
               <th>SUBJECT:</th>

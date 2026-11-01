@@ -1,0 +1,48 @@
+.export-review-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 22px;
+  margin: 0;
+}
+
+.export-review-body {
+  max-height: min(72vh, 760px);
+  overflow-y: auto;
+}
+
+.export-review-item {
+  min-width: 0;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.export-review-item dt {
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.export-review-item dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 0.92rem;
+  overflow-wrap: anywhere;
+}
+
+.export-review-item-wide {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 540px) {
+  .export-review-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .export-review-item-wide {
+    grid-column: auto;
+  }
+}

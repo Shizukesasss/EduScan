@@ -1,6 +1,28 @@
 """Shared interpretation of academic labels without changing stored records."""
 import re
 
+SHS_TRACK_CLUSTERS = {
+    "Academic Track": (
+        "Arts, Social Sciences, and Humanities",
+        "Science, Technology, Engineering, and Mathematics (STEM)",
+        "Sports, Health, and Wellness",
+        "Business and Entrepreneurship",
+        "Field Experience",
+    ),
+    "Technical Professional (TechPro) Track": (
+        "Aesthetic, Wellness, and Human Care",
+        "Agri-Fishery Business and Food Innovation",
+        "Artisanry and Creative Enterprise",
+        "Automotive and Small Engine Technologies",
+        "Construction and Building Technologies",
+        "Creative Arts and Design Technologies",
+        "Hospitality and Tourism",
+        "ICT Support and Computer Programming Technologies",
+        "Industrial Technologies",
+        "Maritime",
+    ),
+}
+
 
 def normalize_grade_name(value: str) -> str:
     return re.sub(r"^grade\s*", "", str(value).strip(), flags=re.IGNORECASE).strip()

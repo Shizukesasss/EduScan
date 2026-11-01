@@ -233,6 +233,7 @@ def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=
         select(Gradebook)
         .options(
             joinedload(Gradebook.components).joinedload(GradebookComponent.items),
+            joinedload(Gradebook.section),
         )
         .where(Gradebook.id == gradebook_id)
     )
@@ -392,7 +393,12 @@ def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=
             "term_order": book.term_order,
             "grade_name": normalize_grade_name(book.grade_name),
             "section_name": book.section_name,
+            "section_track": book.section.track if book.section else None,
+            "section_cluster": book.section.track_cluster if book.section else None,
             "subject_name": book.subject_name,
+            "subject_category": book.subject.category if book.subject else None,
+            "subject_is_elective": bool(book.subject.is_elective) if book.subject else None,
+            "subject_elective_cluster": book.subject.elective_cluster if book.subject else None,
             "learning_area": book.learning_area,
             "is_legacy_readonly": book.is_legacy_readonly,
             "teacher_name": book.teacher_name,
@@ -564,6 +570,9 @@ def create_or_get_gradebook(
     if required_track and (sec.track or "").strip().casefold() != required_track.casefold():
         scope = "track" if (subj.category or "JHS").strip().upper().startswith("SHS") else "program"
         raise ValueError(f"This elective is available only to the {required_track} {scope}")
+    required_cluster = (subj.elective_cluster or "").strip()
+    if required_cluster and (sec.track_cluster or "").strip().casefold() != required_cluster.casefold():
+        raise ValueError(f"This elective belongs to the {required_cluster} cluster")
 
     class_key = f"{sy.name}-q{gp.term_order}-{gl.name}-{sec.name}-{subj.name}".lower().replace(" ", "-")
     if learning_area:
@@ -637,10 +646,21 @@ def create_or_get_gradebook(
     if grading_policy_id and not learning_area:
         policy = db.get(GradingPolicy, grading_policy_id)
     if not policy:
-        if not is_senior_high(gl.name):
+        policy_category = subject_policy_category(subj.name, subj.category)
+        if is_senior_high(gl.name):
+            from .shs_grading_policies import (
+                ensure_shs_grading_policies,
+                policy_category_for_subject,
+                uses_strengthened_shs_grading,
+            )
+
+            if uses_strengthened_shs_grading(sy, gl.name):
+                ensure_shs_grading_policies(db, sy, gl.name, user)
+                policy_category = policy_category_for_subject(subj)
+        else:
             from .template_policies import ensure_template_policies
             ensure_template_policies(db, sy.name, user)
-        policy = get_active_policy_for(db, sy.name, gl.name, subject_policy_category(subj.name, subj.category))
+        policy = get_active_policy_for(db, sy.name, gl.name, policy_category)
 
     class_key = f"{sy.name}-q{gp.term_order}-{gl.name}-{sec.name}-{subj.name}".lower().replace(" ", "-")
     if learning_area:

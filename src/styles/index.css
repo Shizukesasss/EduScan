@@ -988,6 +988,45 @@ button:disabled {
   margin-top: 3px;
 }
 
+.subject-elective-field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.subject-elective-field__control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-control, 8px);
+  background: #fff;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: border-color 140ms ease-out, box-shadow 140ms ease-out, background-color 140ms ease-out;
+}
+
+.subject-elective-field__control:hover {
+  border-color: var(--accent-blue);
+  background-color: #fbfdff;
+}
+
+.subject-elective-field__control:focus-within {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(24, 92, 197, 0.12);
+}
+
+.subject-elective-field__control input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: 0 0 16px;
+}
+
 .enrollment-camera {
   display: flex;
   flex-direction: column;
@@ -1131,6 +1170,10 @@ button:disabled {
 
 .three-columns {
   grid-template-columns: repeat(3, 1fr);
+}
+
+.four-columns {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .text-area {
@@ -4913,6 +4956,7 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent-blue); 
 
 @media (max-width: 1024px) {
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .form-grid.four-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .form-grid.five-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .scanner-header { flex-wrap: wrap; }
   .login-brand-panel, .login-form-panel { padding: 36px; }
@@ -4937,7 +4981,7 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent-blue); 
   .compact-setting-item { min-width: 0; }
   .teacher-workspace-toolbar { flex-direction: column; align-items: stretch; }
   .subject-selector { width: 100%; }
-  .form-grid.three-columns, .form-grid.five-columns { grid-template-columns: 1fr; }
+  .form-grid.three-columns, .form-grid.four-columns, .form-grid.five-columns { grid-template-columns: 1fr; }
   .modal-backdrop { padding: 12px; }
   .modal-card { max-height: 92svh; border-radius: 18px; padding: 20px; }
   .modal-card:has(> .modal-body) { padding: 0; }

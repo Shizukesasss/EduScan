@@ -555,6 +555,7 @@ class SectionPayload(BaseModel):
     adviser_user_id: int | None = None
     adviser_name: str | None = Field(default=None, max_length=180)
     track: str | None = Field(default=None, max_length=40)
+    track_cluster: str | None = Field(default=None, max_length=120)
     active: bool = True
 
     @field_validator("adviser_user_id", mode="before")
@@ -567,12 +568,13 @@ class SectionPayload(BaseModel):
 
 class SubjectPayload(BaseModel):
     id: int | None = None
-    code: str = Field(min_length=1, max_length=40)
+    code: str = Field(default="", max_length=40)
     name: str = Field(min_length=2, max_length=120)
     category: str = Field(default="JHS", max_length=20)
     is_elective: bool = False
     allowed_grades: list[int] | None = None
     elective_track: str | None = Field(default=None, max_length=40)
+    elective_cluster: str | None = Field(default=None, max_length=120)
     active: bool = True
 
 

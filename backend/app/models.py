@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, Time, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, Time, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -143,6 +143,7 @@ class SchoolSection(Base):
     adviser_name: Mapped[str | None] = mapped_column(
         String(180), nullable=True)
     track: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    track_cluster: Mapped[str | None] = mapped_column(String(120), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     grade_level: Mapped[GradeLevel] = relationship()
@@ -152,10 +153,11 @@ class Subject(Base):
     __tablename__ = "subjects"
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
-    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
     category: Mapped[str] = mapped_column(String(20), default="JHS")
     is_elective: Mapped[bool] = mapped_column(Boolean, default=False)
     elective_track: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    elective_cluster: Mapped[str | None] = mapped_column(String(120), nullable=True)
     allowed_grades_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     @property
@@ -169,6 +171,14 @@ class Subject(Base):
         self.allowed_grades_json = json.dumps(value) if value is not None else None
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+Index(
+    "uq_subject_category_name_ci",
+    text("(CASE WHEN UPPER(TRIM(category)) LIKE 'SHS%' THEN 'SHS' ELSE 'JHS' END)"),
+    func.upper(func.trim(Subject.name)),
+    unique=True,
+)
 
 
 class SubjectTeachingAssignment(Base):

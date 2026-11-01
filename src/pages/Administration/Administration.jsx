@@ -28,11 +28,33 @@ const emptyPerson = {
   transfer_school: '', biometric_consent: false,
 };
 const emptyUser = { username: '', password: '', role: 'teacher', full_name: '', active: true };
-const SHS_TRACKS = ['STEM', 'ABM', 'HUMSS', 'GAS', 'TVL', 'Sports', 'Arts and Design'];
+const SHS_TRACKS = ['Academic Track', 'Technical Professional (TechPro) Track'];
+const SHS_TRACK_CLUSTERS = {
+  'Academic Track': [
+    'Arts, Social Sciences, and Humanities',
+    'Science, Technology, Engineering, and Mathematics (STEM)',
+    'Sports, Health, and Wellness',
+    'Business and Entrepreneurship',
+    'Field Experience',
+  ],
+  'Technical Professional (TechPro) Track': [
+    'Aesthetic, Wellness, and Human Care',
+    'Agri-Fishery Business and Food Innovation',
+    'Artisanry and Creative Enterprise',
+    'Automotive and Small Engine Technologies',
+    'Construction and Building Technologies',
+    'Creative Arts and Design Technologies',
+    'Hospitality and Tourism',
+    'ICT Support and Computer Programming Technologies',
+    'Industrial Technologies',
+    'Maritime',
+  ],
+};
 const compareText = (left, right) => String(left ?? '').localeCompare(String(right ?? ''), undefined, { numeric: true, sensitivity: 'base' });
 const orderedOptions = (items, getLabel = (item) => item?.name) => [...items].sort((a, b) => compareText(getLabel(a), getLabel(b)));
 const orderedSections = (items) => [...items].sort((a, b) => compareText(a.grade, b.grade) || compareText(a.name, b.name));
 const orderedTracks = orderedOptions(SHS_TRACKS, (track) => track);
+const orderedElectiveTracks = orderedTracks;
 const JHS_PROGRAMS = orderedOptions(['BEP', 'STE'], (program) => program);
 const JHS_SUBJECT_CATALOG = [
   { code: 'AP', name: 'ARALING PANLIPUNAN', aliases: ['AP'] },
@@ -44,11 +66,190 @@ const JHS_SUBJECT_CATALOG = [
   { code: 'TLE', name: 'TECHNOLOGY AND LIVELIHOOD EDUCATION', aliases: ['TLE'] },
   { code: 'ENG', name: 'ENGLISH' },
 ];
+const SHS_CORE_SUBJECT_CATALOG = [
+  { code: 'SHS-CORE-EC', name: 'EFFECTIVE COMMUNICATION / MABISANG KOMUNIKASYON' },
+  { code: 'SHS-CORE-GM', name: 'GENERAL MATHEMATICS' },
+  { code: 'SHS-CORE-GS', name: 'GENERAL SCIENCE' },
+  { code: 'SHS-CORE-LCS', name: 'LIFE AND CAREER SKILLS' },
+  { code: 'SHS-CORE-PKLP', name: 'PAG-AARAL NG KASAYSAYAN AT LIPUNANG PILIPINO' },
+];
+const normalizeSubjectName = (name) => String(name || '').trim().replace(/\s+/g, ' ').toUpperCase();
+const SHS_ELECTIVE_SUBJECT_CATALOG = {
+  'Academic Track': {
+    'Arts, Social Sciences, and Humanities': [
+      'ART CRITICISM AND CREATIVE MARKETS',
+      'CITIZENSHIP AND CIVIC ENGAGEMENT',
+      'CONTEMPORARY LITERATURE 1',
+      'CONTEMPORARY LITERATURE 2',
+      'CREATIVE COMPOSITION 1',
+      'CREATIVE COMPOSITION 2',
+      'CREATIVE INDUSTRIES - APPLIED AND TRADITIONAL ARTS',
+      'CREATIVE INDUSTRIES - DANCE',
+      'CREATIVE INDUSTRIES - LITERARY ARTS',
+      'CREATIVE INDUSTRIES - MEDIA ARTS',
+      'CREATIVE INDUSTRIES - MUSIC',
+      'CREATIVE INDUSTRIES - THEATER ARTS',
+      'CREATIVE INDUSTRIES - VISUAL ARTS',
+      'CREATIVE PRODUCTION AND PRESENTATION',
+      'FILIPINO 1 - WIKA AT KOMUNIKASYON SA AKADEMIKONG FILIPINO',
+      'FILIPINO 2 - FILIPINO PARA SA LARANG TEKNIKAL PROPESYONAL',
+      'FILIPINO 2 - FILIPINO PARA SA ISPORTS',
+      'FILIPINO 2 - FILIPINO SA SINING AT DISENYO',
+      'FILIPINO IDENTITY THROUGH THE ARTS',
+      'INTRODUCTION TO PHILOSOPHY',
+      'LEADERSHIP AND MANAGEMENT IN THE ARTS',
+      'MALIKHAING PAGSULAT',
+      'PERFORMANCE CRITICISM AND CREATIVE MARKETS',
+      'PHILIPPINE GOVERNANCE (PHILIPPINE POLITICS AND GOVERNANCE)',
+      'SOCIAL SCIENCES (THEORY AND PRACTICE)',
+    ],
+    'Science, Technology, Engineering, and Mathematics (STEM)': [
+      'ADVANCED MATHEMATICS',
+      'BASIC CALCULUS',
+      'BIOLOGY 1',
+      'BIOLOGY 2',
+      'BIOLOGY 3',
+      'BIOLOGY 4',
+      'CHEMISTRY 1',
+      'CHEMISTRY 2',
+      'CHEMISTRY 3',
+      'CHEMISTRY 4',
+      'CONCEPTUAL BIOLOGY AND EARTH AND SPACE SCIENCE',
+      'CONCEPTUAL PHYSICS AND CHEMISTRY IN DAILY LIFE',
+      'DATABASE MANAGEMENT',
+      'EARTH AND SPACE SCIENCE 1',
+      'EARTH AND SPACE SCIENCE 2',
+      'EARTH AND SPACE SCIENCE 3',
+      'EARTH AND SPACE SCIENCE 4',
+      'EMPOWERMENT TECHNOLOGIES',
+      'FINITE MATHEMATICS 1',
+      'FINITE MATHEMATICS 2',
+      'FUNDAMENTALS OF DATA ANALYTICS',
+      'PHYSICS 1',
+      'PHYSICS 2',
+      'PHYSICS 3',
+      'PHYSICS 4',
+      'PRE-CALCULUS',
+    ],
+    'Sports, Health, and Wellness': [
+      'EXERCISE AND SPORTS PROGRAMMING',
+      'FIRST AID',
+      'FUNDAMENTALS OF BASIC LIFE SUPPORT',
+      'HUMAN MOVEMENT 1 - BASIC ANATOMY IN SPORTS AND EXERCISE',
+      'HUMAN MOVEMENT 2 - MOTOR SKILLS DEVELOPMENT',
+      'PHYSICAL EDUCATION 1 - FITNESS AND RECREATION',
+      'PHYSICAL EDUCATION 2 - SPORTS AND DANCE',
+      'SPORTS ACTIVITY MANAGEMENT',
+      'SPORTS COACHING',
+      'SPORTS OFFICIATING',
+    ],
+    'Business and Entrepreneurship': [
+      'BUSINESS 1 - BASIC ACCOUNTING',
+      'BUSINESS 2 - BUSINESS FINANCE AND INCOME TAXATION',
+      'BUSINESS 3 - BUSINESS ECONOMICS',
+      'CONTEMPORARY MARKETING',
+      'ENTREPRENEURSHIP',
+      'INTRODUCTION TO ORGANIZATION AND MANAGEMENT',
+    ],
+    'Field Experience': [
+      'ARTS APPRENTICESHIP – DANCE',
+      'ARTS APPRENTICESHIP – LITERARY ARTS',
+      'ARTS APPRENTICESHIP – MEDIA ARTS',
+      'ARTS APPRENTICESHIP – MUSIC',
+      'ARTS APPRENTICESHIP – THEATER ARTS',
+      'ARTS APPRENTICESHIP – TRADITIONAL CULTURAL EXPRESSIONS',
+      'ARTS APPRENTICESHIP – VISUAL ARTS',
+      'DESIGN AND INNOVATION',
+      'FIELD EXPOSURE (OFF-CAMPUS)',
+      'IN-CAMPUS FIELD EXPOSURE FOR SPORTS',
+      'RESEARCH 1',
+      'RESEARCH 2',
+    ],
+  },
+  'Technical Professional (TechPro) Track': {
+    'Aesthetic, Wellness, and Human Care': [
+      'AESTHETIC SERVICES (BEAUTY CARE)',
+      'CAREGIVING (ADULT CARE)',
+      'CAREGIVING (CHILD CARE)',
+      'HAIRDRESSING SERVICES',
+    ],
+    'Agri-Fishery Business and Food Innovation': [
+      'AGRICULTURAL-CROPS-PRODUCTION',
+      'AGRO-ENTREPRENEURSHIP',
+      'AQUACULTURE',
+      'FISH-CAPTURE',
+      'FOOD-PROCESSING',
+      'ORGANIC-AGRICULTURE-PRODUCTION',
+      'POULTRY-PRODUCTION-CHICKEN',
+      'RUMINANTS-PRODUCTION',
+      'SWINE-PRODUCTION',
+    ],
+    'Artisanry and Creative Enterprise': [
+      'GARMENTS ARTISANRY',
+      'HANDICRAFTS (WEAVING)',
+    ],
+    'Automotive and Small Engine Technologies': [
+      'AUTOMOTIVE SERVICING (ELECTRICAL REPAIR)',
+      'AUTOMOTIVE SERVICING (ENGINE AND CHASSIS REPAIRS)',
+      'DRIVING AND AUTOMOTIVE SERVICING',
+      'MOTORCYCLE AND SMALL ENGINE SERVICING',
+    ],
+    'Construction and Building Technologies': [
+      'CARPENTRY',
+      'CONSTRUCTION OPERATION',
+      'MANUAL METAL ARC WELDING',
+      'TECHNICAL DRAFTING',
+    ],
+    'Creative Arts and Design Technologies': [
+      'ANIMATION',
+      'ILLUSTRATION',
+      'VISUAL GRAPHIC DESIGN',
+    ],
+    'Hospitality and Tourism': [
+      'BAKERY OPERATIONS',
+      'EVENTS MANAGEMENT SERVICES',
+      'FOOD AND BEVERAGE OPERATION',
+      'HOTEL OPERATION (FRONT OFFICE SERVICES)',
+      'HOTEL OPERATION (HOUSEKEEPING SERVICES)',
+      'KITCHEN OPERATIONS',
+      'TOURISM SERVICES',
+    ],
+    'ICT Support and Computer Programming Technologies': [
+      'BROADBAND INSTALLATION',
+      'COMPUTER PROGRAMMING (.NET TECHNOLOGY)',
+      'COMPUTER PROGRAMMING (JAVA)',
+      'COMPUTER PROGRAMMING (ORACLE DATABASE)',
+      'COMPUTER SYSTEMS SERVICING',
+      'CONTACT CENTER SERVICES',
+    ],
+    'Industrial Technologies': [
+      'COMMERCIAL AIR CONDITIONING INSTALLATION AND SERVICING',
+      'DOMESTIC REFRIGERATION AND AIR CONDITIONING SERVICING',
+      'ELECTRICAL INSTALLATION AND MAINTENANCE',
+      'ELECTRONIC PRODUCTS ASSEMBLY AND SERVICING',
+      'MECHATRONICS',
+      'PHOTOVOLTAIC SYSTEMS INSTALLATION',
+    ],
+    'Maritime': [
+      'MARINE ENGINEERING AT THE SUPPORT LEVEL',
+      'MARINE TRANSPORTATION AT THE SUPPORT LEVEL',
+      'SHIPS CATERING SERVICES',
+    ],
+  },
+};
 const jhsCatalogSubject = (subject) => {
   const name = String(subject?.name || '').trim().toUpperCase();
   const code = String(subject?.code || '').trim().toUpperCase();
   const byName = JHS_SUBJECT_CATALOG.find(item => item.name === name || (item.aliases || []).includes(name));
   const byCode = JHS_SUBJECT_CATALOG.find(item => item.code === code || (item.aliases || []).includes(code));
+  if (name && !byName) return undefined;
+  return byName && byCode && byName.code !== byCode.code ? undefined : byName || byCode;
+};
+const shsCoreCatalogSubject = (subject) => {
+  const name = normalizeSubjectName(subject?.name);
+  const code = String(subject?.code || '').trim().toUpperCase();
+  const byName = SHS_CORE_SUBJECT_CATALOG.find(item => item.name === name);
+  const byCode = SHS_CORE_SUBJECT_CATALOG.find(item => item.code === code);
   if (name && !byName) return undefined;
   return byName && byCode && byName.code !== byCode.code ? undefined : byName || byCode;
 };
@@ -104,7 +305,7 @@ function Field({ label, value, onChange, type = 'text', required = false, disabl
   );
 }
 function SectionAssignmentPicker({ sections, selectedIds, onChange }) {
-  const paging = usePagination(sections, sections.map(item => `${item.grade}:${item.track || ''}`).filter((item,index,array) => array.indexOf(item) === index).join('|'));
+  const paging = usePagination(sections, sections.map(item => `${item.grade}:${item.track || ''}:${item.track_cluster || ''}`).filter((item,index,array) => array.indexOf(item) === index).join('|'));
   const selected = new Set(selectedIds.map(Number));
   const toggle = (sectionId) => {
     const next = new Set(selected);
@@ -131,6 +332,7 @@ function SectionAssignmentPicker({ sections, selectedIds, onChange }) {
               <span>
                 <strong>Grade {item.grade} · Section {item.name}</strong>
                 {item.track && <small>{item.track}</small>}
+                {item.track_cluster && <small>{item.track_cluster}</small>}
                 {item.assigned_teacher_name && <small>Currently assigned to {item.assigned_teacher_name}</small>}
               </span>
             </label>
@@ -445,7 +647,7 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
   const adviserYearId = Number(adviserYear || sortedSchoolYears.find(year => year.active)?.id || 0);
   const yearlySections = structure.sections.map(section => {
     const assignment = (structure.adviser_assignments || []).find(item => item.school_year_id === adviserYearId && item.section_id === section.id);
-    return { ...section, adviser_user_id: assignment?.teacher_user_id || null, adviser_name: assignment?.adviser_name || null };
+    return { ...section, track_label: [section.track, section.track_cluster].filter(Boolean).join(' · '), adviser_user_id: assignment?.teacher_user_id || null, adviser_name: assignment?.adviser_name || null };
   });
   const sortedGradeLevels = orderedOptions(structure.grade_levels);
   const sortedSubjects = orderedOptions(structure.subjects, (item) => `${item.name} (${item.category})`);
@@ -459,18 +661,38 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
   const [year,    setYear]    = useState({ id: null, name: '', starts_on: '', ends_on: '', active: true });
   const [period,  setPeriod]  = useState({ id: null, school_year_id: '', name: 'Term 1', starts_on: '', ends_on: '', active: true });
   const [grade,   setGrade]   = useState({ id: null, name: '', active: true });
-  const [section, setSection] = useState({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', track: '', active: true });
-  const [subject, setSubject] = useState({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true });
+  const [section, setSection] = useState({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', track: '', track_cluster: '', active: true });
+  const [subject, setSubject] = useState({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', elective_cluster: '', active: true });
   const [teaching, setTeaching] = useState({ id: null, school_year_id: '', subject_id: '', teacher_user_id: '', section_ids: [] });
   const subjectIsShs = String(subject.category || 'JHS').toUpperCase().startsWith('SHS');
+  const subjectIsShsElective = subjectIsShs && subject.is_elective;
   const subjectUsesJhsCatalog = !subjectIsShs && !subject.is_elective;
+  const subjectUsesShsCoreCatalog = subjectIsShs && !subject.is_elective;
   const selectedJhsCatalogSubject = jhsCatalogSubject(subject);
+  const selectedShsCoreSubject = shsCoreCatalogSubject(subject);
   const jhsCatalogOptions = JHS_SUBJECT_CATALOG.map(item => ({
     ...item,
     alreadyAdded: structure.subjects.some(existing => existing.id !== subject.id
       && !String(existing.category || 'JHS').toUpperCase().startsWith('SHS')
       && !existing.is_elective && jhsCatalogSubject(existing)?.code === item.code),
   }));
+  const shsCoreCatalogOptions = SHS_CORE_SUBJECT_CATALOG.map(item => ({
+    ...item,
+    alreadyAdded: structure.subjects.some(existing => existing.id !== subject.id
+      && String(existing.category || '').toUpperCase().startsWith('SHS')
+      && (normalizeSubjectName(existing.name) === item.name || String(existing.code || '').trim().toUpperCase() === item.code)),
+  }));
+  const currentSubject = structure.subjects.find(item => Number(item.id) === Number(subject.id));
+  const shsElectiveNames = SHS_ELECTIVE_SUBJECT_CATALOG[subject.elective_track]?.[subject.elective_cluster] || [];
+  const shsElectiveOptions = [...new Set([
+    ...shsElectiveNames,
+    ...(subjectIsShsElective && currentSubject?.name ? [normalizeSubjectName(currentSubject.name)] : []),
+  ])].map(name => {
+    const existing = structure.subjects.find(item => String(item.category || '').toUpperCase().startsWith('SHS')
+      && normalizeSubjectName(item.name) === name);
+    return { name, alreadyAdded: Boolean(existing && existing.id !== subject.id), existing };
+  });
+  const selectedShsElectiveSubject = shsElectiveOptions.find(item => item.name === normalizeSubjectName(subject.name));
 
   const [adviserModal, setAdviserModal] = useState(null);
   const [newAdviserId, setNewAdviserId] = useState('');
@@ -493,11 +715,16 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
     if (!subjectMatchesGrade(teachingSubject, item.grade)) return false;
     const sectionIsShs = isSeniorHighGrade(item.grade);
     if (sectionIsShs !== String(teachingSubject.category).toUpperCase().startsWith('SHS')) return false;
-    return !teachingSubject.is_elective || !teachingSubject.elective_track
+    const matchesTrack = !teachingSubject.is_elective || !teachingSubject.elective_track
       || item.track?.trim().toLowerCase() === teachingSubject.elective_track.trim().toLowerCase();
+    const matchesCluster = !teachingSubject.elective_cluster
+      || item.track_cluster?.trim().toLowerCase() === teachingSubject.elective_cluster.trim().toLowerCase();
+    return matchesTrack && matchesCluster;
   })).map((item) => ({
     ...item,
-    assigned_teacher_name: (existingAssignmentsBySection.get(item.id)?.teacher_name || '') + (!subjectMatchesGrade(teachingSubject, item.grade) ? ' — outside allowed grades; review required' : ''),
+    assigned_teacher_name: (existingAssignmentsBySection.get(item.id)?.teacher_name || '')
+      + (!subjectMatchesGrade(teachingSubject, item.grade) ? ' — outside allowed grades; review required' : '')
+      + (teachingSubject?.elective_cluster && item.track_cluster?.trim().toLowerCase() !== teachingSubject.elective_cluster.trim().toLowerCase() ? ' — different SHS cluster; review required' : ''),
   }));
   if (!period.id && period.school_year_id !== periodYearId) {
     setPeriod({ ...period, school_year_id: periodYearId });
@@ -610,10 +837,10 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
           if (kind === 'grading-periods' && period.id === item.id) setPeriod({ id: null, school_year_id: firstYear, name: 'Term 1', starts_on: '', ends_on: '', active: true });
           if (kind === 'grade-levels') {
             if (grade.id === item.id) setGrade({ id: null, name: '', active: true });
-            if (section.grade_level_id === item.id) setSection({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', track: '', active: true });
+            if (section.grade_level_id === item.id) setSection({ id: null, grade_level_id: '', name: '', adviser_user_id: '', adviser_name: '', track: '', track_cluster: '', active: true });
           }
-          if (kind === 'sections' && section.id === item.id) setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', active: true });
-          if (kind === 'subjects' && subject.id === item.id) setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true });
+          if (kind === 'sections' && section.id === item.id) setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', track_cluster: '', active: true });
+          if (kind === 'subjects' && subject.id === item.id) setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', elective_cluster: '', active: true });
           success(`${label} deleted.${recoverable ? ' Linked records were preserved.' : ''}`);
           await reload();
         }
@@ -651,7 +878,8 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
           await api.post('/admin/sections', {
             school_year_id: adviserYearId, id: adviserModal.id, grade_level_id: adviserModal.grade_level_id,
             name: adviserModal.name, adviser_user_id: newAdviserId ? Number(newAdviserId) : null,
-            adviser_name: adviserModal.adviser_name, track: adviserModal.track || null, active: adviserModal.active,
+            adviser_name: adviserModal.adviser_name, track: adviserModal.track || null,
+            track_cluster: adviserModal.track_cluster || null, active: adviserModal.active,
           });
           success(`Adviser for "${adviserModal.grade} - ${adviserModal.name}" updated to ${targetName}.`);
           setAdviserModal(null); await reload();
@@ -719,16 +947,23 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
         isEditing={Boolean(grade.id)}
       />
 
-      <label><span className="field-label">Adviser assignment school year</span><select className="input-field" value={adviserYearId} onChange={event => { setAdviserYear(event.target.value); setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', active: true }); }}>{sortedSchoolYears.filter(year => year.active).map(year => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
+      <label><span className="field-label">Adviser assignment school year</span><select className="input-field" value={adviserYearId} onChange={event => { setAdviserYear(event.target.value); setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', track_cluster: '', active: true }); }}>{sortedSchoolYears.filter(year => year.active).map(year => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
       <p className="section-copy">Adviser changes apply only to this school year. Other years retain their assignments.</p>
       <AcademicCard
         title="Sections" eyebrow="Class sections and adviser assignment"
-        columns={[{ key: 'grade', label: 'Grade' }, { key: 'name', label: 'Section' }, { key: 'track', label: 'Program / track', render: (v) => v || '—' }, { key: 'adviser_name', label: 'Adviser', render: (v) => v || <span style={{ color: 'var(--text-muted, #888)' }}>Unassigned</span> }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
+        columns={[{ key: 'grade', label: 'Grade' }, { key: 'name', label: 'Section' }, { key: 'track_label', label: 'Program / track', render: (v) => v || '—' }, { key: 'adviser_name', label: 'Adviser', render: (v) => v || <span style={{ color: 'var(--text-muted, #888)' }}>Unassigned</span> }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
         rows={yearlySections}
         onEdit={(item) => setSection({ ...item, adviser_user_id: item.adviser_user_id || '' })}
         onDelete={(item) => confirmDelete('sections', item, `Section ${item.grade} - ${item.name}`)}
         extraActions={(item) => <button onClick={() => openAdviserModal(item)}><UserCheck size={14} /> Assign adviser</button>}
-        form={<div className="form-grid three-columns"><label><span className="field-label">Grade Level</span><select className="input-field" value={section.grade_level_id} onChange={(e) => setSection({ ...section, grade_level_id: Number(e.target.value), track: '' })}>{sortedGradeLevels.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><Field label="Section name" value={section.name} onChange={(v) => setSection({ ...section, name: v })} required />{isJuniorHighGrade(sortedGradeLevels.find(item => item.id === Number(section.grade_level_id))?.name) ? <label><span className="field-label">JHS Program</span><select className="input-field" required value={section.track || ''} onChange={(e) => setSection({ ...section, track: e.target.value })}><option value="">Choose program</option>{sortedJhsPrograms.map(program => <option key={program} value={program}>{program}</option>)}</select></label> : isSeniorHighGrade(sortedGradeLevels.find(item => item.id === Number(section.grade_level_id))?.name) ? <label><span className="field-label">SHS Track</span><select className="input-field" value={section.track || ''} onChange={(e) => setSection({ ...section, track: e.target.value })}><option value="">Choose track</option>{sortedTracks.map(track => <option key={track} value={track}>{track}</option>)}</select></label> : <span />}</div>}
+        form={<div className="form-grid four-columns">
+          <label><span className="field-label">Grade Level</span><select className="input-field" value={section.grade_level_id} onChange={(e) => setSection({ ...section, grade_level_id: Number(e.target.value), track: '', track_cluster: '' })}>{sortedGradeLevels.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <Field label="Section name" value={section.name} onChange={(v) => setSection({ ...section, name: v })} required />
+          {isJuniorHighGrade(sortedGradeLevels.find(item => item.id === Number(section.grade_level_id))?.name) ? <label><span className="field-label">JHS Program</span><select className="input-field" required value={section.track || ''} onChange={(e) => setSection({ ...section, track: e.target.value, track_cluster: '' })}><option value="">Choose program</option>{sortedJhsPrograms.map(program => <option key={program} value={program}>{program}</option>)}</select></label> : isSeniorHighGrade(sortedGradeLevels.find(item => item.id === Number(section.grade_level_id))?.name) ? <>
+            <label><span className="field-label">SHS Track</span><select className="input-field" required value={section.track || ''} onChange={(e) => setSection({ ...section, track: e.target.value, track_cluster: '' })}><option value="">Choose track</option>{sortedTracks.map(track => <option key={track} value={track}>{track}</option>)}{section.track && !SHS_TRACKS.includes(section.track) && <option value={section.track}>{section.track} (legacy)</option>}</select></label>
+            {SHS_TRACK_CLUSTERS[section.track] && <label><span className="field-label">SHS Cluster</span><select className="input-field" required value={section.track_cluster || ''} onChange={(e) => setSection({ ...section, track_cluster: e.target.value })}><option value="">Choose cluster</option>{SHS_TRACK_CLUSTERS[section.track].map(cluster => <option key={cluster} value={cluster}>{cluster}</option>)}</select></label>}
+          </> : <span />}
+        </div>}
         formNote="Each teacher can advise one section per school year and teach one subject across multiple sections in the same grade."
         onSave={() => {
           const selectedGrade = sortedGradeLevels.find(item => item.id === Number(section.grade_level_id))?.name;
@@ -736,16 +971,24 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
             fail({ message: 'Choose BEP or STE for this junior high section.' });
             return;
           }
-          confirmSave('sections', { ...section, school_year_id: adviserYearId, adviser_user_id: section.adviser_user_id || null, track: section.track || null }, () => setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', active: true }), 'Section');
+          if (isSeniorHighGrade(selectedGrade) && !section.track) {
+            fail({ message: 'Choose an SHS track for this section.' });
+            return;
+          }
+          if (isSeniorHighGrade(selectedGrade) && SHS_TRACK_CLUSTERS[section.track] && !section.track_cluster) {
+            fail({ message: 'Choose an elective cluster for the selected SHS track.' });
+            return;
+          }
+          confirmSave('sections', { ...section, school_year_id: adviserYearId, adviser_user_id: section.adviser_user_id || null, track: section.track || null, track_cluster: section.track_cluster || null }, () => setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', track_cluster: '', active: true }), 'Section');
         }}
-        onCancel={() => setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', active: true })}
+        onCancel={() => setSection({ id: null, grade_level_id: firstGrade, name: '', adviser_user_id: '', adviser_name: '', track: '', track_cluster: '', active: true })}
         isEditing={Boolean(section.id)}
       />
 
       <AcademicCard
         title="Subjects" eyebrow="Learning areas"
-        columns={[{ key: 'code', label: 'Code' }, { key: 'name', label: 'Subject Name' }, { key: 'category', label: 'Category' }, { key: 'elective_label', label: 'Elective' }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
-        rows={structure.subjects.map(item => ({ ...item, elective_label: item.is_elective && !String(item.category).toUpperCase().startsWith('SHS') ? `STE · Grades ${(item.allowed_grades ?? [7, 8, 9, 10]).join(', ')}` : item.is_elective ? `Yes${item.elective_track ? ` · ${item.elective_track}` : ''}` : 'No' }))}
+        columns={[{ key: 'name', label: 'Subject Name' }, { key: 'category', label: 'Category' }, { key: 'elective_label', label: 'Elective' }, { key: 'active', label: 'Active', render: (v) => <ActiveBadge active={v} /> }]}
+        rows={structure.subjects.map(item => ({ ...item, name: String(item.category || '').toUpperCase().startsWith('SHS') ? String(item.name || '').toUpperCase() : item.name, elective_label: item.is_elective && !String(item.category).toUpperCase().startsWith('SHS') ? `STE · Grades ${(item.allowed_grades ?? [7, 8, 9, 10]).join(', ')}` : item.is_elective ? `Yes${item.elective_cluster ? ` · ${item.elective_cluster}` : item.elective_track ? ` · ${item.elective_track}` : ''}` : 'No' }))}
         onEdit={(item) => setSubject({ ...item })}
         onDelete={(item) => confirmDelete('subjects', item, 'Subject')}
         form={(
@@ -770,32 +1013,71 @@ function AcademicManager({ structure, deletedReferences, teachers, reload, succe
                 <span className="muted-small">The subject code and workbook mapping are assigned automatically.</span>
               </label>
             )}
-            {(!subjectUsesJhsCatalog || Boolean(subject.id && !selectedJhsCatalogSubject)) && <>
-              <Field label="Subject code (e.g. ENG)" value={subject.code} onChange={(v) => setSubject({ ...subject, code: v })} required />
-              <Field label="Subject name" value={subject.name} onChange={(v) => setSubject({ ...subject, name: v })} required />
+            {subjectUsesShsCoreCatalog && !(subject.id && !selectedShsCoreSubject) && (
+              <label>
+                <span className="field-label">Approved SHS core subject</span>
+                <select
+                  className="input-field"
+                  value={selectedShsCoreSubject?.code || ''}
+                  onChange={(event) => {
+                    const selected = SHS_CORE_SUBJECT_CATALOG.find(item => item.code === event.target.value);
+                    if (selected) setSubject({ ...subject, code: selected.code, name: selected.name });
+                  }}
+                  required
+                >
+                  <option value="">Choose an approved SHS core subject</option>
+                  {shsCoreCatalogOptions.map(item => <option key={item.code} value={item.code} disabled={item.alreadyAdded}>
+                    {item.name}{item.alreadyAdded ? ' (already added)' : ''}
+                  </option>)}
+                </select>
+                <span className="muted-small">The code and subject name are assigned automatically from the approved SHS core list.</span>
+              </label>
+            )}
+            {!subjectIsShsElective && (!subjectUsesJhsCatalog || Boolean(subject.id && !selectedJhsCatalogSubject))
+              && (!subjectUsesShsCoreCatalog || Boolean(subject.id && !selectedShsCoreSubject)) && <>
+              {!subject.is_elective && <Field label="Subject code (e.g. ENG)" value={subject.code} onChange={(v) => setSubject({ ...subject, code: v })} required />}
+              <Field label="Subject name" value={subject.name} onChange={(v) => setSubject({ ...subject, name: subjectIsShs ? v.toUpperCase() : v })} required />
             </>}
             <label>
               <span className="field-label">Category</span>
-              <select className="input-field" value={subjectIsShs ? 'SHS' : 'JHS'} onChange={(e) => setSubject({ ...subject, category: e.target.value, elective_track: e.target.value === 'JHS' ? '' : subject.elective_track })}>
+              <select className="input-field" value={subjectIsShs ? 'SHS' : 'JHS'} onChange={(e) => setSubject({ ...subject, category: e.target.value, elective_track: e.target.value === 'JHS' ? '' : subject.elective_track, elective_cluster: e.target.value === 'JHS' ? '' : subject.elective_cluster })}>
                 <option value="JHS">JHS (Grades 7-10)</option>
                 <option value="SHS">SHS (Grades 11-12)</option>
               </select>
             </label>
-            <label className="checkbox-field">
-              <input type="checkbox" checked={Boolean(subject.is_elective)} onChange={(e) => setSubject({ ...subject, is_elective: e.target.checked, elective_track: e.target.checked ? subject.elective_track : '' })} />
-              <span>Elective subject</span>
+            <label className="subject-elective-field">
+              <span className="field-label">Subject option</span>
+              <span className="subject-elective-field__control">
+                <input type="checkbox" checked={Boolean(subject.is_elective)} onChange={(e) => setSubject({ ...subject, is_elective: e.target.checked, elective_track: e.target.checked ? subject.elective_track : '', elective_cluster: e.target.checked ? subject.elective_cluster : '' })} />
+                <span>Elective subject</span>
+              </span>
             </label>
             {!subjectIsShs && subject.is_elective && <p className="section-copy">Elective names are entered by the admin and use the approved English-derived JHS workbook template.</p>}
-            {subjectIsShs && subject.is_elective && <label><span className="field-label">Available to SHS track</span><select className="input-field" value={subject.elective_track || ''} onChange={(e) => setSubject({ ...subject, elective_track: e.target.value })}><option value="">Choose track</option>{sortedTracks.map(track => <option key={track} value={track}>{track}</option>)}</select></label>}
+            {subjectIsShsElective && <label><span className="field-label">Available to SHS track</span><select className="input-field" value={subject.elective_track || ''} onChange={(e) => setSubject({ ...subject, id: null, code: '', name: '', elective_track: e.target.value, elective_cluster: '' })}><option value="">Choose track</option>{orderedElectiveTracks.map(track => <option key={track} value={track}>{track}</option>)}</select></label>}
+            {subjectIsShsElective && subject.elective_track && SHS_TRACK_CLUSTERS[subject.elective_track] && <label><span className="field-label">SHS elective cluster</span><select className="input-field" required value={subject.elective_cluster || ''} onChange={(e) => setSubject({ ...subject, id: null, code: '', name: '', elective_cluster: e.target.value })}><option value="">Choose cluster</option>{SHS_TRACK_CLUSTERS[subject.elective_track].map(cluster => <option key={cluster} value={cluster}>{cluster}</option>)}</select></label>}
+            {subjectIsShsElective && subject.elective_cluster && <label><span className="field-label">Subject name</span><select className="input-field" required disabled={!shsElectiveOptions.length} value={selectedShsElectiveSubject?.name || ''} onChange={(e) => {
+              const name = normalizeSubjectName(e.target.value);
+              const existing = shsElectiveOptions.find(item => item.name === name)?.existing;
+              setSubject({ ...subject, id: existing?.id || null, code: existing?.code || '', name, active: existing?.active ?? true });
+            }}><option value="">{shsElectiveOptions.length ? 'Choose an approved elective subject' : 'No approved subjects listed for this cluster yet'}</option>{shsElectiveOptions.map(item => <option key={item.name} value={item.name}>{item.name}{item.alreadyAdded ? ' (existing subject — will be updated)' : ''}</option>)}</select><span className="muted-small">Choose from the approved cluster list. Existing SHS subjects with the same name will be updated instead of duplicated.</span></label>}
             {!subjectIsShs && subject.is_elective && <fieldset className="elective-grade-picker" aria-describedby="elective-grade-help"><legend>Allowed JHS grades</legend><div className="elective-grade-picker__intro"><p id="elective-grade-help">Choose the grade levels that can take this elective. Applies to STE sections.</p><span className="elective-grade-picker__count">{(subject.allowed_grades ?? [7, 8, 9, 10]).length} selected</span></div><div className="elective-grade-picker__options">{[7, 8, 9, 10].map(grade => <label key={grade} className="elective-grade-picker__option"><input type="checkbox" checked={(subject.allowed_grades ?? [7, 8, 9, 10]).includes(grade)} onChange={event => setSubject({ ...subject, allowed_grades: event.target.checked ? [...(subject.allowed_grades ?? [7, 8, 9, 10]), grade] : (subject.allowed_grades ?? [7, 8, 9, 10]).filter(value => value !== grade) })} /><span>Grade {grade}</span></label>)}</div><p className="elective-grade-picker__hint">Select one or more grades. Existing class records are preserved.</p>{!(subject.allowed_grades ?? [7, 8, 9, 10]).length && <p className="elective-grade-picker__error" role="status">Choose at least one grade before saving.</p>}</fieldset>}
           </div>
         )}
         onSave={() => {
           if (subjectUsesJhsCatalog && !subject.id && !selectedJhsCatalogSubject) return showError('Choose one of the approved JHS subjects.');
+          if (subjectUsesShsCoreCatalog && !subject.id && !selectedShsCoreSubject) return showError('Choose one of the approved SHS core subjects.');
           if (subject.is_elective && !subjectIsShs && !(subject.allowed_grades ?? [7, 8, 9, 10]).length) return showError('Select at least one allowed JHS grade.');
-          confirmSave('subjects', subject, () => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true }), 'Subject');
+          if (subjectIsShs && subject.is_elective && !subject.elective_track) return showError('Choose the SHS track for this elective.');
+          if (subjectIsShs && subject.is_elective && SHS_TRACK_CLUSTERS[subject.elective_track] && !subject.elective_cluster) return showError('Choose the SHS cluster for this elective.');
+          if (subjectIsShsElective && !selectedShsElectiveSubject) return showError('Choose an SHS elective from the approved subject list for this cluster.');
+          const saveValue = subjectIsShs ? {
+            ...subject,
+            code: subject.code || (subjectUsesShsCoreCatalog ? selectedShsCoreSubject?.code : ''),
+            name: normalizeSubjectName(selectedShsCoreSubject?.name || subject.name),
+          } : subject;
+          confirmSave('subjects', saveValue, () => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', elective_cluster: '', active: true }), 'Subject');
         }}
-        onCancel={() => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', active: true })}
+        onCancel={() => setSubject({ id: null, code: '', name: '', category: 'JHS', is_elective: false, allowed_grades: [7, 8, 9, 10], elective_track: '', elective_cluster: '', active: true })}
         isEditing={Boolean(subject.id)}
       />
 

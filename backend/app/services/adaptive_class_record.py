@@ -15,6 +15,7 @@ from ..models import GradingPeriod, Subject
 from ..models_grading import Gradebook
 from .grading import get_gradebook_full
 from .grading_engine import normalize_component_weights, calculate_student_grade, round_value
+from .gradebook_validation import collect_common_export_issues, create_validation_issue
 
 
 def _text(sheet, row, column, value):
@@ -271,8 +272,74 @@ def _combined_arts_health(workbook, terms, sheets, students, cached):
     sheet.freeze_panes = 'C5'
 
 
+def validate_adaptive_class_record_export(
+    db, book, full, region, division, school_id, allowed_teacher_id=None,
+    all_terms=False, through_term=None,
+):
+    """Collect common and requested-term blockers without saving a workbook."""
+    issues = collect_common_export_issues(full, region, division, school_id)
+    term = full.get('gradebook', {}).get('term_order')
+    if term not in (1, 2, 3) or through_term not in (None, 2) or (through_term and all_terms) or (through_term == 2 and term != 2):
+        issues.append(create_validation_issue(
+            'EXPORT_TERM_SCOPE_INVALID', 'export_requirements',
+            {'type': 'setting', 'field': 'Export term', 'term': term},
+            'The selected export term scope is not available for this class record.',
+            'Choose the current term, Terms 1–2 from Term 2, or all three terms.', ['export'],
+        ))
+        return issues
+    if not (all_terms or through_term):
+        return issues
+
+    periods = tuple(range(1, (through_term or 3) + 1))
+    query = select(Gradebook).where(
+        Gradebook.school_year_id == book.school_year_id,
+        Gradebook.grade_level_id == book.grade_level_id,
+        Gradebook.section_id == book.section_id,
+        Gradebook.subject_id == book.subject_id,
+        Gradebook.grading_period.has(GradingPeriod.deleted_at.is_(None)),
+        Gradebook.subject.has(Subject.deleted_at.is_(None)),
+        Gradebook.term_order.in_(periods),
+    )
+    if allowed_teacher_id is not None or all_terms or through_term:
+        query = query.where(Gradebook.teacher_user_id == book.teacher_user_id)
+    siblings = db.scalars(query.order_by(Gradebook.term_order)).all()
+    by_term = {}
+    for sibling in siblings:
+        if sibling.term_order in by_term:
+            issues.append(create_validation_issue(
+                'EXPORT_DUPLICATE_TERM_RECORD', 'export_requirements',
+                {'type': 'gradebook', 'term': sibling.term_order,
+                 'subjectName': full.get('gradebook', {}).get('subject_name')},
+                f"Multiple class records match this subject for Term {sibling.term_order}.",
+                'Resolve the duplicate subject assignment for this term before exporting.', ['export'],
+            ))
+        by_term[sibling.term_order] = sibling
+    for missing in (period for period in periods if period not in by_term):
+        issues.append(create_validation_issue(
+            'EXPORT_TERM_RECORD_MISSING', 'export_requirements',
+            {'type': 'gradebook', 'term': missing, 'subjectName': full.get('gradebook', {}).get('subject_name')},
+            f'No saved class record was found for requested Term {missing}.',
+            'Complete and finalize the requested term records for this section, subject, and teacher.', ['export'],
+        ))
+    for period, sibling in by_term.items():
+        sibling_full = full if sibling.id == book.id else get_gradebook_full(db, sibling.id)
+        if not sibling_full or sibling_full['gradebook'].get('status') not in {'Finalized', 'Locked'} or sibling_full['statistics'].get('incomplete', 0):
+            issues.append(create_validation_issue(
+                'EXPORT_TERM_NOT_COMPLETE', 'export_requirements',
+                {'type': 'gradebook', 'term': period, 'subjectName': full.get('gradebook', {}).get('subject_name')},
+                f'Term {period} is not finalized with complete learner scores.',
+                'Complete and finalize every requested term before exporting them together.', ['export'],
+            ))
+    return issues
+
+
 def export_adaptive(db, book, full, region, division, school_id, allowed_teacher_id=None, all_terms=False, through_term=None):
     from .reports import _complete_finalized_record, _write_class_record_workbook, new_report_path, EXPORT_DIR, _safe_name
+    from .gradebook_validation import raise_export_validation
+    raise_export_validation(validate_adaptive_class_record_export(
+        db, book, full, region, division, school_id, allowed_teacher_id,
+        all_terms=all_terms, through_term=through_term,
+    ))
     if allowed_teacher_id is not None and book.teacher_user_id != allowed_teacher_id:
         raise HTTPException(403, 'This saved class record belongs to another teacher.')
     if not _complete_finalized_record(full):

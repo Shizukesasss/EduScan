@@ -37,6 +37,11 @@ MIGRATIONS = (
     ("0024_replace_quarter_with_term_order", "Rename stored grading period identifiers to term order"),
     ("0025_person_date_of_birth", "Store person date of birth for calculated age"),
     ("0026_annex_g_enrollment_and_comments", "Add verified school-year learner placements and Annex G adviser comments"),
+    ("0027_shs_track_clusters", "Store SHS elective clusters on class sections"),
+    ("0028_shs_subject_elective_clusters", "Store and backfill SHS subject elective clusters"),
+    ("0029_rename_shs_maritime_cluster", "Rename the SHS Maritime Transport cluster to Maritime"),
+    ("0030_subject_names_unique_by_category", "Scope subject-name uniqueness to category while retaining globally unique codes"),
+    ("0031_subject_names_group_shs_categories", "Treat legacy SHS category labels as one level for subject-name uniqueness"),
 )
 
 
@@ -83,6 +88,83 @@ def run_migrations(engine: Engine) -> list[str]:
                 Base.metadata.create_all(bind=connection)
                 _add_column_if_missing(connection, "roster_import_audits", "import_mode", "VARCHAR(30) NOT NULL DEFAULT 'roster'")
                 _create_index_if_missing(connection, "roster_import_audits", "ix_roster_import_audits_import_mode", "import_mode")
+            elif version == "0027_shs_track_clusters":
+                _add_column_if_missing(connection, "school_sections", "track_cluster", "VARCHAR(120) NULL")
+            elif version == "0028_shs_subject_elective_clusters":
+                _add_column_if_missing(connection, "subjects", "elective_cluster", "VARCHAR(120) NULL")
+                cluster_prefixes = {
+                    "SHS-AC-ASH-T1-": "Arts, Social Sciences, and Humanities",
+                    "SHS-AC-ASH-T2-": "Arts, Social Sciences, and Humanities",
+                    "SHS-AC-BE-T1-": "Business and Entrepreneurship",
+                    "SHS-AC-BE-T2-": "Business and Entrepreneurship",
+                    "SHS-AC-STEM-T1-": "Science, Technology, Engineering, and Mathematics (STEM)",
+                    "SHS-AC-SHW-T1-": "Sports, Health, and Wellness",
+                    "SHS-AC-SHW-T2-": "Sports, Health, and Wellness",
+                    "SHS-TP-AWHC-": "Aesthetic, Wellness, and Human Care",
+                    "SHS-TP-AFBI-": "Agri-Fishery Business and Food Innovation",
+                    "SHS-TP-ACE-": "Artisanry and Creative Enterprise",
+                    "SHS-TP-ASET-": "Automotive and Small Engine Technologies",
+                    "SHS-TP-CBT-": "Construction and Building Technologies",
+                    "SHS-TP-CADT-": "Creative Arts and Design Technologies",
+                    "SHS-TP-HT-": "Hospitality and Tourism",
+                    "SHS-TP-ICT-": "ICT Support and Computer Programming Technologies",
+                    "SHS-TP-IT-": "Industrial Technologies",
+                    "SHS-TP-MT-": "Maritime Transport",
+                }
+                for code_prefix, cluster in cluster_prefixes.items():
+                    connection.execute(text(
+                        "UPDATE subjects SET elective_cluster=:cluster "
+                        "WHERE category LIKE 'SHS%' AND is_elective = TRUE "
+                        "AND code LIKE :code_prefix AND elective_cluster IS NULL"
+                    ), {"cluster": cluster, "code_prefix": f"{code_prefix}%"})
+            elif version == "0029_rename_shs_maritime_cluster":
+                connection.execute(text(
+                    "UPDATE school_sections SET track_cluster='Maritime' "
+                    "WHERE track_cluster='Maritime Transport'"
+                ))
+                connection.execute(text(
+                    "UPDATE subjects SET elective_cluster='Maritime' "
+                    "WHERE category LIKE 'SHS%' AND is_elective = TRUE "
+                    "AND elective_cluster='Maritime Transport'"
+                ))
+            elif version == "0030_subject_names_unique_by_category":
+                name_collisions = connection.execute(text(
+                    "SELECT UPPER(TRIM(category)), UPPER(TRIM(name)), COUNT(*) "
+                    "FROM subjects GROUP BY UPPER(TRIM(category)), UPPER(TRIM(name)) "
+                    "HAVING COUNT(*) > 1 LIMIT 1"
+                )).first()
+                if name_collisions:
+                    raise ValueError(
+                        "Cannot scope subject names by category: duplicate names already exist "
+                        f"within category {name_collisions[0]!r}. Resolve that duplicate first."
+                    )
+                for index in inspect(connection).get_indexes("subjects"):
+                    if index.get("unique") and index.get("column_names") == ["name"]:
+                        quoted_name = connection.dialect.identifier_preparer.quote(index["name"])
+                        connection.execute(text(f"DROP INDEX IF EXISTS {quoted_name}"))
+                _create_index_if_missing(connection, "subjects", "ix_subjects_name", "name")
+                connection.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_subject_category_name_ci "
+                    "ON subjects (UPPER(TRIM(category)), UPPER(TRIM(name)))"
+                ))
+            elif version == "0031_subject_names_group_shs_categories":
+                name_collisions = connection.execute(text(
+                    "SELECT CASE WHEN UPPER(TRIM(category)) LIKE 'SHS%' THEN 'SHS' ELSE 'JHS' END, "
+                    "UPPER(TRIM(name)), COUNT(*) FROM subjects "
+                    "GROUP BY CASE WHEN UPPER(TRIM(category)) LIKE 'SHS%' THEN 'SHS' ELSE 'JHS' END, "
+                    "UPPER(TRIM(name)) HAVING COUNT(*) > 1 LIMIT 1"
+                )).first()
+                if name_collisions:
+                    raise ValueError(
+                        "Cannot group SHS subject categories: duplicate names already exist "
+                        f"within level {name_collisions[0]!r}. Resolve that duplicate first."
+                    )
+                connection.execute(text("DROP INDEX IF EXISTS uq_subject_category_name_ci"))
+                connection.execute(text(
+                    "CREATE UNIQUE INDEX uq_subject_category_name_ci ON subjects "
+                    "((CASE WHEN UPPER(TRIM(category)) LIKE 'SHS%' THEN 'SHS' ELSE 'JHS' END), "
+                    "UPPER(TRIM(name)))"
+                ))
             elif version == "0024_replace_quarter_with_term_order":
                 for table in ("grading_periods", "gradebooks", "gradebook_states", "grade_change_audits"):
                     _rename_column_if_needed(connection, table, "quarter", "term_order")

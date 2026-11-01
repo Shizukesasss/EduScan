@@ -195,6 +195,30 @@ def _xlsx_cell_xml(attributes: bytes, value: object) -> bytes:
     return attributes + content + b"</c>"
 
 
+def _nearest_xlsx_cell_style(sheet_xml: bytes, row_number: int, column_number: int) -> bytes | None:
+    rows = re.compile(rb'<row\b(?=[^>]*\br="(\d+)")[^>]*(?:/>|>.*?</row>)', re.DOTALL)
+    cells = re.compile(rb'<c\b[^>]*(?:/>|>.*?</c>)', re.DOTALL)
+    candidates = []
+    for row in rows.finditer(sheet_xml):
+        candidate_row = int(row.group(1))
+        if candidate_row == row_number:
+            continue
+        for cell in cells.finditer(row.group(0)):
+            opening = cell.group(0)[:cell.group(0).find(b">") + 1]
+            reference = re.search(rb'\br="([A-Z]+)(\d+)"', opening)
+            style = re.search(rb'\bs="([^"]+)"', opening)
+            if not reference or not style:
+                continue
+            candidate_column = 0
+            for letter in reference.group(1).decode("ascii"):
+                candidate_column = candidate_column * 26 + ord(letter) - ord("A") + 1
+            if candidate_column == column_number:
+                candidates.append((abs(candidate_row - row_number), candidate_row < row_number, style.group(1)))
+    if not candidates:
+        return None
+    return b' s="' + min(candidates)[2] + b'"'
+
+
 def _set_xlsx_cell(sheet_xml: bytes, coordinate: str, value: object) -> bytes:
     pattern = re.compile(rb'<c\b(?=[^>]*\br="' + re.escape(coordinate.encode("ascii")) + rb'")[^>]*?(?:/>|>.*?</c>)', re.DOTALL)
     match = pattern.search(sheet_xml)
@@ -207,15 +231,28 @@ def _set_xlsx_cell(sheet_xml: bytes, coordinate: str, value: object) -> bytes:
         replacement = _xlsx_cell_xml(attributes, value)
         return sheet_xml[:match.start()] + replacement + sheet_xml[match.end():]
 
-    row_number = re.search(r"\d+$", coordinate).group()
+    row_number = int(re.search(r"\d+$", coordinate).group())
     column_letters = re.match(r"[A-Z]+", coordinate).group()
     column_number = 0
     for letter in column_letters:
         column_number = column_number * 26 + ord(letter) - ord("A") + 1
-    row_pattern = re.compile(rb'<row\b(?=[^>]*\br="' + row_number.encode("ascii") + rb'")[^>]*(?:/>|>.*?</row>)', re.DOTALL)
+    row_pattern = re.compile(rb'<row\b(?=[^>]*\br="' + str(row_number).encode("ascii") + rb'")[^>]*(?:/>|>.*?</row>)', re.DOTALL)
     row_match = row_pattern.search(sheet_xml)
     if not row_match:
-        raise ValueError(f"Template row {row_number} for cell {coordinate} is missing")
+        sheet_data = re.search(rb'<sheetData\b[^>]*>(.*?)</sheetData>', sheet_xml, re.DOTALL)
+        if not sheet_data:
+            raise ValueError("Template worksheet data is missing")
+        cell_style = _nearest_xlsx_cell_style(sheet_xml, row_number, column_number)
+        attributes = b'<c r="' + coordinate.encode("ascii") + b'"' + (cell_style or b"")
+        new_row = b'<row r="' + str(row_number).encode("ascii") + b'">' + _xlsx_cell_xml(attributes, value) + b"</row>"
+        rows = re.compile(rb'<row\b(?=[^>]*\br="(\d+)")[^>]*(?:/>|>.*?</row>)', re.DOTALL)
+        insertion = len(sheet_data.group(1))
+        for existing_row in rows.finditer(sheet_data.group(1)):
+            if int(existing_row.group(1)) > row_number:
+                insertion = existing_row.start()
+                break
+        updated_data = sheet_data.group(1)[:insertion] + new_row + sheet_data.group(1)[insertion:]
+        return sheet_xml[:sheet_data.start(1)] + updated_data + sheet_xml[sheet_data.end(1):]
     original_row = row_match.group(0)
     opening_end = original_row.find(b">") + 1
     opening = original_row[:opening_end]
@@ -231,13 +268,13 @@ def _set_xlsx_cell(sheet_xml: bytes, coordinate: str, value: object) -> bytes:
         for letter in reference.group(1).decode("ascii"):
             number = number * 26 + ord(letter) - ord("A") + 1
         cells.append((cell.start(), cell.end(), number, cell_opening))
-    nearest_style = None
+    nearest_style = _nearest_xlsx_cell_style(sheet_xml, row_number, column_number)
     insertion = len(body)
     for start, _, number, cell_opening in cells:
         if number > column_number:
             insertion = start
             break
-    if cells:
+    if not nearest_style and cells:
         nearest = min(cells, key=lambda cell: abs(cell[2] - column_number))
         style = re.search(rb'\bs="([^"]+)"', nearest[3])
         if style:
@@ -391,10 +428,84 @@ def _complete_finalized_record(full: dict | None) -> bool:
     )
 
 
-def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str = "", division: str = "", school_id: str = "", allowed_teacher_id: int | None = None, all_terms: bool = False, through_term: int | None = None) -> Path:
+def _complete_draft_preview_record(full: dict | None) -> bool:
+    return bool(
+        full
+        and full["gradebook"]["status"] == "Draft"
+        and full["students"]
+        and full["statistics"]["incomplete"] == 0
+    )
+
+
+def validate_gradebook_report_xlsx(
+    db: Session,
+    gradebook_id: int,
+    region: str = '',
+    division: str = '',
+    school_id: str = '',
+    allowed_teacher_id: int | None = None,
+    all_terms: bool = False,
+    through_term: int | None = None,
+    draft_preview: bool = False,
+) -> list[dict]:
+    """Dispatch to the same read-only validation rules used by each XLSX format."""
+    from ..models_grading import Gradebook
+    from .grading import get_gradebook_full
+    from .adaptive_class_record import validate_adaptive_class_record_export
+
+    full = get_gradebook_full(db, gradebook_id)
+    book = db.get(Gradebook, gradebook_id)
+    if not full or not book:
+        raise HTTPException(status_code=404, detail='Gradebook not found')
+    if allowed_teacher_id is not None and book.teacher_user_id != allowed_teacher_id:
+        raise HTTPException(status_code=403, detail='This saved class record belongs to another teacher.')
+
+    if is_senior_high(full['gradebook']['grade_name']):
+        from .shs_class_record_export import is_supported_shs_ecr_school_year, validate_shs_ecr_export
+        if is_supported_shs_ecr_school_year(full['gradebook']['school_year_name']):
+            return validate_shs_ecr_export(
+                db, book, full, region, division, school_id, allowed_teacher_id,
+                all_terms=all_terms, through_term=through_term, draft_preview=draft_preview,
+            )
+
+    uses_term_exams = any(component.get('component_type') == 'Term Examinations' for component in full['components'])
+    fixed_rounding = full['policy']['rounding_method'] == 'half_up' and full['policy']['rounding_decimal_places'] == 2
+    fixed_jhs = not is_senior_high(full['gradebook']['grade_name']) and (
+        (uses_term_exams and fixed_rounding)
+        or full['gradebook']['subject_name'].strip().upper() in {'ARALING PANLIPUNAN', 'MAPEH'}
+    )
+    if fixed_jhs:
+        from .class_record_export import subject_template, validate_jhs_class_record_export
+        try:
+            kind, filename = subject_template(full['gradebook']['subject_name'] or '', book.subject.is_elective is True)
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+        else:
+            template = TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename
+            return validate_jhs_class_record_export(
+                db, book, full, kind, template, region, division, school_id,
+                allowed_teacher_id, all_terms=all_terms, through_term=through_term,
+            )
+    if draft_preview:
+        from .gradebook_validation import create_validation_issue
+        return [create_validation_issue(
+            'DRAFT_PREVIEW_UNSUPPORTED', 'export_requirements',
+            {'type': 'gradebook', 'field': 'Status'},
+            'Draft previews are available only for Grade 11–12 SHS records in SY 2026–2027.',
+            'Use a supported SHS record or finalize the class record before exporting.', ['export'],
+        )]
+    return validate_adaptive_class_record_export(
+        db, book, full, region, division, school_id, allowed_teacher_id,
+        all_terms=all_terms, through_term=through_term,
+    )
+
+
+def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str = "", division: str = "", school_id: str = "", allowed_teacher_id: int | None = None, all_terms: bool = False, through_term: int | None = None, draft_preview: bool = False) -> Path:
     from .grading import get_gradebook_full
     from ..models_grading import Gradebook
     from .adaptive_class_record import export_adaptive
+    from .gradebook_validation import create_validation_issue, export_rule_issue, raise_export_validation
 
     full = get_gradebook_full(db, gradebook_id)
     book = db.get(Gradebook, gradebook_id)
@@ -412,9 +523,44 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
             if exc.status_code != 409:
                 raise
         else:
-            return export_jhs(db, book, full, kind, TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename,
-                              region, division, school_id, allowed_teacher_id, all_terms=all_terms, through_term=through_term)
-    return export_adaptive(db, book, full, region, division, school_id, allowed_teacher_id, all_terms=all_terms, through_term=through_term)
+            try:
+                return export_jhs(db, book, full, kind, TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename,
+                                  region, division, school_id, allowed_teacher_id, all_terms=all_terms, through_term=through_term)
+            except HTTPException as exc:
+                if isinstance(exc.detail, dict) and exc.detail.get('code') == 'EXPORT_VALIDATION_FAILED':
+                    raise
+                if exc.status_code in {409, 422}:
+                    raise_export_validation([export_rule_issue(exc.detail, full, template_name='fixed JHS workbook')])
+                raise
+    if is_senior_high(full['gradebook']['grade_name']):
+        from .shs_class_record_export import export_shs_ecr
+        from .shs_class_record_export import is_supported_shs_ecr_school_year
+
+        if is_supported_shs_ecr_school_year(full['gradebook']['school_year_name']):
+            try:
+                return export_shs_ecr(db, book, full, region, division, school_id, allowed_teacher_id,
+                                      all_terms=all_terms, through_term=through_term, draft_preview=draft_preview)
+            except HTTPException as exc:
+                if isinstance(exc.detail, dict) and exc.detail.get('code') == 'EXPORT_VALIDATION_FAILED':
+                    raise
+                if exc.status_code in {409, 422}:
+                    raise_export_validation([export_rule_issue(exc.detail, full, template_name='official SHS ECR')])
+                raise
+    if draft_preview:
+        raise_export_validation([create_validation_issue(
+            'DRAFT_PREVIEW_UNSUPPORTED', 'export_requirements',
+            {'type': 'gradebook', 'field': 'Status'},
+            'Draft previews are available only for Grade 11–12 SHS records in SY 2026–2027.',
+            'Use a supported SHS record or finalize the class record before exporting.', ['export'],
+        )])
+    try:
+        return export_adaptive(db, book, full, region, division, school_id, allowed_teacher_id, all_terms=all_terms, through_term=through_term)
+    except HTTPException as exc:
+        if isinstance(exc.detail, dict) and exc.detail.get('code') == 'EXPORT_VALIDATION_FAILED':
+            raise
+        if exc.status_code in {409, 422}:
+            raise_export_validation([export_rule_issue(exc.detail, full, template_name='adaptive class record')])
+        raise
 
 
 def gradebook_report_html(db: Session, gradebook_id: int) -> str:
