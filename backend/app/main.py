@@ -31,13 +31,13 @@ from .models import (
     AttendanceCorrection, AttendanceEvent, AttendanceResetAudit, BiometricAuditEvent, BiometricModel, BiometricSample, CalendarException,
     BackupRun, ClassSchedule, ExcusedAbsence, GeneratedReport, GradeChangeAudit, GradeComponent, GradebookState,
     GradeLevel, GradeScore, GradingPeriod, Intervention, LegalHold, Person, PersonnelSchedule, RecognitionReview,
-    RecordDisposalAudit, RetentionExecution, RosterImportAudit, LearnerEnrollment, AnnexGTermComment,
+    RecordDisposalAudit, RetentionExecution, LearnerEnrollment, AnnexGTermComment,
     SchoolSection, SchoolYear, SmsOutbox,
     Subject, SubjectTeachingAssignment, SystemAuditEvent, User,
 )
 from .schemas import (
     AttendanceCorrectionPayload, AttendanceResetPayload, AttendanceSettingsPayload, BiometricChangeReason, CalendarExceptionPayload,
-    BackupSchedulePayload, BiometricRuntimeSettingsPayload, CompliancePayload, ExcusedAbsencePayload,
+    BackupSchedulePayload, BiometricRuntimeSettingsPayload, ExcusedAbsencePayload,
     GradebookActionPayload, GradebookPayload, GradeLevelPayload, GradingPeriodPayload, LegalHoldPayload,
     LegalHoldReleasePayload, RecognitionReviewResolutionPayload, ReportReviewPayload, RetentionExecutionPayload,
     RetentionPolicyPayload,
@@ -56,7 +56,6 @@ from .services.gate_presence import gate_presence
 from .services.gate_exports import update_gate_export
 from .services.gate_defaults import configure_fast_gate
 from .services.disposal import dispose_person_records
-from .services.roster import import_roster
 from .services.annex_g import (import_annex_g_enrollments, backfill_annex_g_dobs,
                                build_annex_g_section, render_annex_g_html)
 from .services.scheduler import attendance_scheduler
@@ -662,8 +661,18 @@ def admin_persons(db: Session = Depends(get_db), _: User = Depends(require_roles
 
 @app.get("/api/my/advisory-sections")
 def my_advisory_sections(school_year_id: int | None = None, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> list[dict]:
+    sections = adviser_sections(db, user, school_year_id)
+    names = section_adviser_names(db, school_year_id or current_school_year_id(db))
     return [{"id": item.id, "grade": item.grade_level.name, "section": item.name,
-             "adviser_name": user.full_name if user.role == "teacher" else (adviser_for_section(db, school_year_id or current_school_year_id(db), item.id).full_name if adviser_for_section(db, school_year_id or current_school_year_id(db), item.id) else None)} for item in adviser_sections(db, user, school_year_id)]
+             "adviser_name": user.full_name if user.role == "teacher" else names.get(item.id)} for item in sections]
+
+
+def section_adviser_names(db: Session, school_year_id: int | None) -> dict[int, str]:
+    if not school_year_id:
+        return {}
+    return dict(db.execute(select(SectionAdviserAssignment.section_id, User.full_name)
+        .join(User, User.id == SectionAdviserAssignment.teacher_user_id)
+        .where(SectionAdviserAssignment.school_year_id == school_year_id)).all())
 
 
 @app.get("/api/my/report-sections")
@@ -683,8 +692,10 @@ def my_report_sections(
         report_year = matched_years[0] if len(matched_years) == 1 else None
     else:
         report_year = current_school_year_id(db)
+    sections = report_sections(db, user, starts_on, ends_on)
+    names = section_adviser_names(db, report_year)
     return [{"id": item.id, "grade": item.grade_level.name, "section": item.name,
-             "adviser_name": adviser_for_section(db, report_year, item.id).full_name if report_year and adviser_for_section(db, report_year, item.id) else None} for item in report_sections(db, user, starts_on, ends_on)]
+             "adviser_name": names.get(item.id)} for item in sections]
 
 
 @app.post("/api/admin/persons/{person_id}/active")
@@ -719,28 +730,6 @@ def disposal_audits(db: Session = Depends(get_db), _: User = Depends(require_rol
     return [{"id": item.id, "disposal_reference": item.subject_reference_hash[:12], "reason": item.reason,
              "authorization_reference": item.authorization_reference, "removed_counts": json.loads(item.removed_counts_json),
              "actor_name": item.actor_name, "actor_role": item.actor_role, "created_at": item.created_at} for item in items]
-
-
-@app.post("/api/admin/roster/import")
-async def roster_import(file: UploadFile = File(...), approved_reference: str = Form(...),
-                        dry_run: bool = Form(True), db: Session = Depends(get_db),
-                        user: User = Depends(require_roles("admin"))) -> dict:
-    filename = file.filename or "roster.xlsx"
-    if not filename.lower().endswith(".xlsx"):
-        raise HTTPException(
-            status_code=422, detail="Upload an approved .xlsx roster workbook")
-    return import_roster(db, await file.read(), filename, approved_reference, user, dry_run)
-
-
-@app.get("/api/admin/roster/imports")
-def roster_imports(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))) -> list[dict]:
-    items = db.scalars(select(RosterImportAudit).order_by(
-        RosterImportAudit.created_at.desc()).limit(200)).all()
-    return [{"id": item.id, "filename": item.filename, "file_sha256": item.file_sha256,
-             "approved_reference": item.approved_reference, "inserted_count": item.inserted_count,
-             "updated_count": item.updated_count, "skipped_count": item.skipped_count,
-             "import_mode": item.import_mode,
-             "actor_name": item.actor_name, "created_at": item.created_at} for item in items]
 
 
 @app.post("/api/admin/annex-g/enrollments/import")
@@ -1315,6 +1304,7 @@ def station_health(db: Session = Depends(get_db),
     gateway = gateway_diagnostics(db)
     readiness = biometric_service.model_readiness(db)
     return {"api": True, "database": database_ok,
+            "attendance_auto_visit_ready": True,
             "recognition_model": readiness["available"], "model_version": active.version if active else None,
             "recognition_message": readiness["message"], "recognition_code": readiness["code"],
             "gateway_enabled": gateway["enabled"], "gateway_reachable": gateway["reachable"],
@@ -1338,13 +1328,14 @@ def process_gate_frames(background_tasks: BackgroundTasks, frame_data: list[byte
         matches = biometric_service.recognize_frames(db, frame_data, verified_present=gate_presence.current_visits(station_id),
                                                     require_single=require_single, station_id=station_id)
     except HTTPException as error:
-        if error.status_code == 422:
+        if error.status_code == 422 and isinstance(error.detail, dict) and error.detail.get('code') == 'no_faces_in_burst':
             gate_presence.observe(station_id, set())
         raise
     results = []
     export_days = set()
     with gate_presence.lock:
-        gate_presence.observe(station_id, {match['person'].id for match in matches if match['person']})
+        gate_presence.observe(station_id, {match['person'].id for match in matches if match['person']},
+                              count_absence=all(match['person'] is not None for match in matches))
         for match in matches:
             person, distance, quality, box = match['person'], match['distance'], match['quality'], match['box']
             result = {'recognized': person is not None, 'liveness_verified': match['liveness_verified'],
@@ -2213,7 +2204,6 @@ def read_settings(db: Session = Depends(get_db), _: User = Depends(require_roles
         "attendance": {"absence_cutoff": "09:00", "duplicate_cooldown_seconds": 5,
                        "auto_close_enabled": True, **get_json(db, "attendance", {})},
         "sms": {**sms, "password": "", "password_configured": bool(sms["password"])},
-        "compliance": get_json(db, "compliance", {}),
         "retention": get_json(db, "retention", {"sms_days": 90, "correction_audit_years": 5}),
     }
 
@@ -2268,22 +2258,6 @@ def save_sms_settings(payload: SmsSettingsPayload, db: Session = Depends(get_db)
     add_audit(db, user, "Update", "SmsSettings", "sms",
               "SMS gateway settings updated", before, after, commit=True)
     return {"saved": True, "held_messages": held}
-
-
-@app.put("/api/settings/compliance")
-def save_compliance(payload: CompliancePayload, db: Session = Depends(get_db),
-                    user: User = Depends(require_roles("admin", "privacy_officer"))) -> dict:
-    before = get_json(db, "compliance", {})
-    set_json(db, "compliance", payload.model_dump())
-    add_audit(db, user, "Update", "ComplianceSettings", "compliance",
-              "Compliance evidence register updated", before, payload.model_dump(), commit=True)
-    return payload.model_dump()
-
-
-@app.get("/api/settings/compliance")
-def read_compliance(db: Session = Depends(get_db),
-                    _: User = Depends(require_roles("admin", "privacy_officer"))) -> dict:
-    return get_json(db, "compliance", {})
 
 
 @app.get("/api/retention")

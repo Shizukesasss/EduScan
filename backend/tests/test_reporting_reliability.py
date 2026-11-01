@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -24,7 +25,7 @@ from openpyxl import load_workbook
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from app.database import Base
-from app.models import AttendanceEvent, Person, User
+from app.models import AttendanceCorrection, AttendanceEvent, Person, User
 from app.services import gate_exports, reports, scheduler, sf2
 from app.services.attendance import MANILA
 from app.services.settings_store import set_json
@@ -118,6 +119,50 @@ class ReportingReliabilityTest(unittest.TestCase):
         self.assertNotEqual(first[0], second[0])
         self.assertEqual(first[0].name, second[0].name)
         self.assertEqual((first[1], second[1]), ("School One", "School Two"))
+
+    def test_sf2_uses_supplied_template_with_fixed_sex_rows_and_explicit_daily_marks(self):
+        learners = [
+            Person(external_id="F-RIVERA", full_name="Rivera, Alyssa", sex="Female",
+                   role="Student", grade="7", section="Demo", enrollment_start_date=date(2026, 11, 1)),
+            Person(external_id="M-SANTOS", full_name="Santos, Rafael", sex="Male",
+                   role="Student", grade="7", section="Demo", enrollment_start_date=date(2026, 11, 1)),
+            Person(external_id="F-AQUINO", full_name="Aquino, Isabella", sex="Female",
+                   role="Student", grade="7", section="Demo", enrollment_start_date=date(2026, 11, 1)),
+            Person(external_id="M-AGUILAR", full_name="Aguilar, Mateo", sex="Male",
+                   role="Student", grade="7", section="Demo", enrollment_start_date=date(2026, 11, 1)),
+        ]
+        self.db.add_all(learners)
+        self.db.flush()
+        for learner in learners:
+            for day in (2, 3, 4):
+                self.db.add(AttendanceCorrection(
+                    id=f"{learner.external_id}-{day}", person_id=learner.id,
+                    attendance_date=date(2026, 11, day),
+                    status="Absent" if day == 4 else "Present",
+                    reason="Test fixture", actor_user_id=self.teacher.id,
+                    actor_name="Test", actor_role="teacher", before_json="{}"))
+        self.db.commit()
+        with patch.object(sf2, "_school_days", return_value=[date(2026, 11, day) for day in (2, 3, 4)]):
+            output = sf2.generate_sf2(self.db, 2026, 11, "7", "Demo",
+                                      "301874", "2026-2027", "SAN JOSE NATIONAL HIGH SCHOOL")
+        template = sf2.template_path()
+        with zipfile.ZipFile(template) as original, zipfile.ZipFile(output) as generated:
+            self.assertEqual(set(original.namelist()), set(generated.namelist()))
+            for member in ("xl/styles.xml", "xl/workbook.xml", "xl/drawings/drawing1.xml"):
+                self.assertEqual(original.read(member), generated.read(member), member)
+        workbook = load_workbook(output, read_only=True, data_only=True)
+        try:
+            sheet = workbook[sf2.SHEET_NAME]
+            self.assertEqual([sheet.cell(11, column).value for column in (4, 5, 6)], [2, 3, 4])
+            self.assertEqual([sheet.cell(row, 2).value for row in (14, 15, 36, 37)],
+                             ["AGUILAR, MATEO", "SANTOS, RAFAEL", "AQUINO, ISABELLA", "RIVERA, ALYSSA"])
+            for row in (14, 15, 36, 37):
+                self.assertEqual([sheet.cell(row, column).value for column in (4, 5, 6)],
+                                 ["✓", "✓", "X"])
+            self.assertEqual([sheet.cell(62, column).value for column in (4, 5, 6)], [4, 4, 0])
+            self.assertIn("✓", sheet["Q65"].value)
+        finally:
+            workbook.close()
 
     def test_failed_export_retries_on_next_tick_without_reclosing_attendance(self):
         set_json(self.db, "attendance", {"auto_close_enabled": True, "absence_cutoff": "09:00"})

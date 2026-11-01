@@ -121,6 +121,73 @@ class DuplicateEnrollmentTest(unittest.TestCase):
         self.assertEqual(result["accepted"], 15)
         self.assertEqual(result["model"]["person_count"], 2)
 
+    def test_mixed_unenrolled_faces_cannot_share_one_enrollment(self):
+        frames = face_set()[:12] + face_set(horizontal=True)[:3]
+        with self.assertRaises(HTTPException) as failure:
+            self.enroll(self.first, frames)
+        self.assertEqual(failure.exception.status_code, 422)
+        self.assertEqual(failure.exception.detail['code'], 'mixed_enrollment_faces')
+        self.assertEqual(self.samples(self.first), [])
+        self.assertEqual(self.db.scalars(select(BiometricModel)).all(), [])
+
+    def test_near_threshold_different_faces_cannot_share_one_enrollment(self):
+        first_feature = np.zeros(128, dtype=np.float32)
+        first_feature[0] = 1
+        second_feature = np.zeros(128, dtype=np.float32)
+        second_feature[0] = .4
+        second_feature[1] = np.sqrt(1 - .4 ** 2)
+        faces = [replace(face, identity_feature=first_feature if index < 12 else second_feature)
+                 for index, face in enumerate(face_set())]
+        with patch.object(self.service, 'process_frame', side_effect=faces):
+            with self.assertRaises(HTTPException) as failure:
+                self.service.validate_enrollment_frames([b'frame'] * len(faces))
+        self.assertEqual(failure.exception.detail['code'], 'mixed_enrollment_faces')
+
+    def test_enrollment_requires_three_reusable_identity_references(self):
+        vector = np.zeros(128, dtype=np.float32)
+        vector[0] = 1
+        faces = [replace(face, identity_feature=vector) for face in face_set()]
+        calls = 0
+        def stored_reference(_image):
+            nonlocal calls
+            calls += 1
+            if calls > 2:
+                raise HTTPException(422, 'Stored crop could not be aligned')
+            return vector
+        with patch.object(self.service, 'process_frame', side_effect=faces), \
+             patch.object(self.service, '_identity_feature', side_effect=stored_reference):
+            with self.assertRaises(HTTPException) as failure:
+                self.service.validate_enrollment_frames([b'frame'] * len(faces))
+        self.assertEqual(failure.exception.detail['code'], 'insufficient_identity_references')
+
+    def test_saved_references_must_agree_with_each_other(self):
+        full = np.zeros(128, dtype=np.float32)
+        full[0] = 1
+        left = np.zeros(128, dtype=np.float32)
+        left[0], left[1] = .7, np.sqrt(1 - .7 ** 2)
+        right = np.zeros(128, dtype=np.float32)
+        right[0], right[1] = .7, -np.sqrt(1 - .7 ** 2)
+        faces = [replace(face, identity_feature=full) for face in face_set()]
+        stored = iter([left] * 12 + [right] * 3)
+        with patch.object(self.service, 'process_frame', side_effect=faces), \
+             patch.object(self.service, '_identity_feature', side_effect=lambda _image: next(stored)):
+            with self.assertRaises(HTTPException) as failure:
+                self.service.validate_enrollment_frames([b'frame'] * len(faces))
+        self.assertEqual(failure.exception.detail['code'], 'inconsistent_identity_references')
+
+    def test_legacy_mixed_gallery_fails_closed_until_reenrollment(self):
+        self.enroll(self.first, face_set())
+        first_feature = np.zeros(128, dtype=np.float32)
+        first_feature[0] = 1
+        second_feature = np.zeros(128, dtype=np.float32)
+        second_feature[1] = 1
+        self.service._identity_cache = {}
+        with patch.object(self.service, '_identity_feature', side_effect=[first_feature] * 12 + [second_feature] * 3):
+            with self.assertRaises(HTTPException) as failure:
+                self.service._identity_gallery(self.db)
+        self.assertEqual(failure.exception.status_code, 503)
+        self.assertEqual(failure.exception.detail['code'], 'identity_verifier_unavailable')
+
     def test_lbph_texture_similarity_cannot_block_a_different_identity(self):
         self.enroll(self.first, face_set())
         before = {table.name: self.db.execute(select(table)).all() for table in Base.metadata.sorted_tables}
@@ -152,7 +219,7 @@ class DuplicateEnrollmentTest(unittest.TestCase):
         frames = face_set(offset=1)[:3] + face_set(horizontal=True)[:12]
         with self.assertRaises(HTTPException) as failure:
             self.enroll(self.second, frames)
-        self.assertEqual(failure.exception.detail['code'], 'duplicate_face')
+        self.assertEqual(failure.exception.detail['code'], 'mixed_enrollment_faces')
         self.assertEqual(self.samples(self.second), [])
 
     def test_non_nearest_identity_is_also_checked_for_duplicates(self):
@@ -213,7 +280,9 @@ class DuplicateEnrollmentTest(unittest.TestCase):
         self.enroll(self.first, face_set())
         self.enroll(self.second, face_set(horizontal=True))
         for scores in ([(self.first.id, .2), (self.second.id, .1)],
-                       [(self.first.id, .7), (self.second.id, .65)]):
+                       [(self.first.id, .7), (self.second.id, .65)],
+                       [(self.first.id, .364), (self.second.id, .362)],
+                       [(self.first.id, .44), (self.second.id, .40)]):
             with self.subTest(scores=scores), patch.object(self.service, '_identity_scores', return_value=scores), \
                  patch.object(self.service, 'process_faces', return_value=[face_set()[0]]), \
                  patch.object(self.service, 'verify_liveness') as blink:
@@ -258,7 +327,7 @@ class DuplicateEnrollmentTest(unittest.TestCase):
                 for repetition in range(2):
                     with patch.object(self.service, 'process_faces', side_effect=observations):
                         response = client.post('/api/biometrics/recognize-many',
-                                               data={'station_id': 'isolated-two-person-test'}, files=uploads)
+                                               data={'station_id': 'isolated-two-person-test', 'direction': 'Time In'}, files=uploads)
                     self.assertEqual(response.status_code, 200, response.text)
                     results = response.json()['results']
                     self.assertEqual({item['person']['id'] for item in results}, {self.first.id, self.second.id})
@@ -316,20 +385,114 @@ class DuplicateEnrollmentTest(unittest.TestCase):
         self.assertEqual({table.name: self.db.execute(select(table)).all() for table in Base.metadata.sorted_tables}, before)
         self.assertEqual({path: path.read_bytes() for path in Path(self.directory.name).rglob('*.enc')}, files)
 
-    def test_burst_returns_only_people_in_the_latest_frame(self):
+    def test_burst_keeps_distinct_people_seen_in_different_frames(self):
         self.enroll(self.first, face_set())
         self.enroll(self.second, face_set(horizontal=True))
         with patch.object(self.service, 'process_faces', side_effect=[[face_set()[0]], [face_set(horizontal=True)[0]]]):
             result = self.service.recognize_frames(self.db, [b'old', b'current'], diagnostics={})
-        self.assertEqual([item['person'].id for item in result], [self.second.id])
+        self.assertEqual({item['person'].id for item in result}, {self.first.id, self.second.id})
 
-    def test_no_face_at_end_does_not_return_an_earlier_identity(self):
+    def test_one_face_with_conflicting_labels_in_burst_records_neither_person(self):
+        self.enroll(self.first, face_set())
+        self.enroll(self.second, face_set(horizontal=True))
+        one_face = face_set()[0]
+        with patch.object(self.service, 'process_faces', return_value=[one_face]), \
+             patch.object(self.service, '_identity_scores', side_effect=[
+                 [(self.first.id, .8), (self.second.id, .1)],
+                 [(self.second.id, .8), (self.first.id, .1)],
+             ]), patch.object(self.service, 'verify_liveness', return_value=(True, 'Verified')):
+            results = self.service.recognize_frames(self.db, [b'one', b'two'], diagnostics={})
+        self.assertTrue(all(item['person'] is None for item in results))
+
+    def test_later_unknown_or_ambiguous_observation_invalidates_early_match(self):
+        self.enroll(self.first, face_set())
+        self.enroll(self.second, face_set(horizontal=True))
+        one_face = face_set()[0]
+        for later_scores in ([(self.first.id, .2), (self.second.id, .1)],
+                             [(self.first.id, .7), (self.second.id, .65)]):
+            with self.subTest(later_scores=later_scores), \
+                 patch.object(self.service, 'process_faces', return_value=[one_face]), \
+                 patch.object(self.service, '_identity_scores', side_effect=[
+                     [(self.first.id, .8), (self.second.id, .1)], later_scores,
+                 ]), patch.object(self.service, 'verify_liveness', return_value=(True, 'Verified')):
+                results = self.service.recognize_frames(self.db, [b'known', b'uncertain'], diagnostics={})
+            self.assertTrue(all(item['person'] is None for item in results))
+
+    def test_fifty_identity_gallery_accepts_only_unique_matches_for_five_faces(self):
+        people = [self.first, self.second]
+        people.extend(Person(external_id=f'P{i:02}', full_name=f'Person {i}', sex='Male', role='Student', biometric_consent=True)
+                      for i in range(2, 50))
+        self.db.add_all(people)
+        self.db.commit()
+        gallery = []
+        probes = []
+        for index, person in enumerate(people):
+            feature = np.zeros(128, dtype=np.float32)
+            feature[index] = 1
+            probes.append(feature)
+            gallery.extend((person.id, feature) for _ in range(20))
+        faces = [replace(face_set()[0], identity_feature=probes[index]) for index in range(5)]
+        unknown = np.zeros(128, dtype=np.float32)
+        unknown[60] = 1
+        ambiguous = (probes[0] + probes[1]) / np.sqrt(2)
+        checker = MagicMock()
+        with patch.object(self.service, 'process_faces', side_effect=[faces, [replace(face_set()[0], identity_feature=unknown)],
+                                                               [replace(face_set()[0], identity_feature=ambiguous)]]), \
+             patch.object(self.service, '_active_recognizer', return_value=(checker, None)), \
+             patch.object(self.service, '_identity_gallery', return_value=([], gallery)), \
+             patch.object(cv2.face, 'StandardCollector_create', return_value=MagicMock()), \
+             patch.object(self.service, 'verify_liveness', return_value=(True, 'Verified')):
+            accepted = self.service.recognize_frames(self.db, [b'five'], diagnostics={})
+            rejected_unknown = self.service.recognize_frames(self.db, [b'unknown'], diagnostics={})
+            rejected_ambiguous = self.service.recognize_frames(self.db, [b'ambiguous'], diagnostics={})
+        self.assertEqual({item['person'].id for item in accepted}, {person.id for person in people[:5]})
+        self.assertIsNone(rejected_unknown[0]['person'])
+        self.assertIsNone(rejected_ambiguous[0]['person'])
+
+    def test_one_spurious_reference_cannot_identify_a_person_in_large_gallery(self):
+        probe = np.zeros(128, dtype=np.float32)
+        probe[0] = 1
+        unrelated = np.zeros(128, dtype=np.float32)
+        unrelated[1] = 1
+        gallery = [(self.first.id, unrelated)] * 19 + [(self.first.id, probe)]
+        scores = dict(self.service._identity_scores(None, gallery, probe))
+        self.assertLess(scores[self.first.id], biometrics.MIN_SIMILARITY)
+        gallery.extend([(self.first.id, probe)] * 2)
+        scores = dict(self.service._identity_scores(None, gallery, probe))
+        self.assertGreaterEqual(scores[self.first.id], biometrics.MIN_SIMILARITY)
+
+    def test_lbph_training_handles_fifty_people_with_fifteen_samples_each(self):
+        people = [self.first, self.second]
+        people.extend(Person(external_id=f'TRAIN-{index}', full_name=f'Train Person {index}', sex='Male',
+                             role='Student', biometric_consent=True) for index in range(2, 50))
+        self.db.add_all(people)
+        self.db.flush()
+        for person in people:
+            for index in range(15):
+                self.db.add(BiometricSample(id=f'synthetic-{person.id}-{index}', person_id=person.id,
+                                            encrypted_path='synthetic-only', sha256=f'{person.id:064x}', quality_score=95))
+        self.db.commit()
+        images = {person.id: np.random.default_rng(person.id).integers(0, 255, (64, 64), dtype=np.uint8)
+                  for person in people}
+        with patch.object(self.service, '_load_sample_image', side_effect=lambda sample: images[sample.person_id]):
+            result = self.service.train(self.db)
+        self.assertEqual(result['person_count'], 50)
+        self.assertEqual(result['sample_count'], 750)
+        self.assertTrue((Path(self.directory.name) / 'models' / f"lbph-{result['version']}.yml.enc").is_file())
+
+    def test_no_face_at_end_keeps_an_earlier_identity(self):
         self.enroll(self.first, face_set())
         with patch.object(self.service, 'process_faces', side_effect=[
                 [face_set()[0]], HTTPException(422, 'No frontal human face was detected')]):
+            result = self.service.recognize_frames(self.db, [b'old', b'empty'], diagnostics={})
+        self.assertEqual([item['person'].id for item in result], [self.first.id])
+
+    def test_wholly_empty_burst_is_distinguished_from_an_unusable_face(self):
+        empty = HTTPException(422, 'No frontal human face was detected')
+        with patch.object(self.service, 'process_faces', side_effect=[empty, empty]):
             with self.assertRaises(HTTPException) as failure:
-                self.service.recognize_frames(self.db, [b'old', b'empty'], diagnostics={})
-        self.assertEqual(failure.exception.status_code, 422)
+                self.service.recognize_frames(self.db, [b'empty-one', b'empty-two'], diagnostics={})
+        self.assertEqual(failure.exception.detail['code'], 'no_faces_in_burst')
 
     def test_group_identity_collision_is_not_assigned_to_the_first_face(self):
         self.enroll(self.first, face_set())
@@ -340,6 +503,19 @@ class DuplicateEnrollmentTest(unittest.TestCase):
         self.assertTrue(all(item['person'] is None and not item['liveness_verified'] for item in result))
         self.assertTrue(all('same identity' in item['message'] for item in result))
         self.assertEqual({table.name: self.db.execute(select(table)).all() for table in Base.metadata.sorted_tables}, before)
+
+    def test_identity_collision_later_in_burst_invalidates_earlier_match(self):
+        self.enroll(self.first, face_set())
+        face = face_set()[0]
+        with patch.object(self.service, 'process_faces', side_effect=[[face], [face, face]]):
+            result = self.service.recognize_frames(self.db, [b'first', b'collision'], diagnostics={})
+        self.assertTrue(all(item['person'] is None for item in result))
+
+    def test_more_than_five_faces_in_one_frame_is_rejected(self):
+        with patch.object(self.service, 'process_faces', return_value=face_set()[:6]):
+            with self.assertRaises(HTTPException) as failure:
+                self.service.recognize_frames(self.db, [b'group'], diagnostics={})
+        self.assertEqual(failure.exception.status_code, 422)
 
     def test_group_recognizes_two_distinct_enrolled_people_independently(self):
         self.enroll(self.first, face_set())
@@ -374,7 +550,7 @@ class DuplicateEnrollmentTest(unittest.TestCase):
             self.assertIsNone(review.resolved_at)
             self.assertEqual(self.db.scalars(select(biometrics.RecognitionReview)).all(), [review])
 
-    def test_camera_test_api_is_read_only_for_success_replay_and_groups_up_to_ten(self):
+    def test_camera_test_api_is_read_only_for_success_replay_and_groups_up_to_five(self):
         from fastapi.testclient import TestClient
         from app import main
         from app.auth import current_user
@@ -395,7 +571,7 @@ class DuplicateEnrollmentTest(unittest.TestCase):
         checker = MagicMock(wraps=recognizer)
         checker.predict.side_effect = lambda image: (-1, 100.0) if np.array_equal(image, unknown.image) else recognizer.predict(image)
         try:
-            for group_count, score in ((3, .99), (3, .01), (5, .99), (10, .99)):
+            for group_count, score in ((3, .99), (3, .01), (5, .99)):
                 observations = [[replace(first, eye_count=count, presentation_score=score), replace(second, eye_count=count)] + [unknown] * (group_count - 2)
                                 for count in [2, 0, 2] + [2] * 37]
                 with patch.object(main, 'biometric_service', self.service), \
@@ -512,6 +688,7 @@ class DuplicateEnrollmentTest(unittest.TestCase):
         with patch.object(main, 'biometric_service', self.service), \
              patch.object(self.service, 'detector', haar), \
              patch.object(self.service, '_human_detections', return_value=self.human_detection()[None, :]), \
+             patch.object(biometrics, 'feature_from_detection', return_value=self.service._identity_feature(face_set()[0].image)), \
              patch.object(self.service, '_processed_face', side_effect=face_set()):
             result = main.test_camera_frames([data.tobytes()] * 15, self.engine, 'enrollment')
         self.assertTrue(result['enrollment']['can_enroll'])
@@ -567,7 +744,7 @@ class DuplicateEnrollmentTest(unittest.TestCase):
                  patch.object(self.service, 'process_faces', return_value=[replace(face_set()[0], eye_count=2)]), \
                  patch.object(main, 'record_gate_match') as attendance:
                 for route in ('recognize', 'recognize-many'):
-                    response = client.post('/api/biometrics/' + route,
+                    response = client.post('/api/biometrics/' + route, data={'direction': 'Time In'},
                                            files={'frame': ('frame.jpg', b'test', 'image/jpeg')})
                     self.assertEqual(response.status_code, 200, response.text)
                     result = response.json()

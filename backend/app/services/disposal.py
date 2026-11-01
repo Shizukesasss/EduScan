@@ -10,7 +10,7 @@ from sqlalchemy import delete, select, func
 from sqlalchemy.orm import Session
 
 from ..models import (AttendanceCorrection, AttendanceEvent, BiometricAuditEvent, BiometricSample,
-                      ExcusedAbsence, GradeChangeAudit, GradeScore, Intervention, Person,
+                      ExcusedAbsence, GradeChangeAudit, GradeScore, Intervention, LearnerEnrollment, Person,
                       RecordDisposalAudit, SmsOutbox, User)
 from .biometrics import biometric_service
 
@@ -39,6 +39,7 @@ def dispose_person_records(db: Session, person: Person, actor: User, reason: str
                 "sms_records": db.query(SmsOutbox).filter_by(person_id=person.id).count(),
                 "interventions": db.query(Intervention).filter_by(person_id=person.id).count(),
                 "biometric_audits": db.query(BiometricAuditEvent).filter_by(person_id=person.id).count(),
+                "learner_enrollments": db.query(LearnerEnrollment).filter_by(person_id=person.id).count(),
             }
             db.execute(delete(AttendanceEvent).where(AttendanceEvent.person_id == person.id))
             db.execute(delete(AttendanceCorrection).where(AttendanceCorrection.person_id == person.id))
@@ -47,6 +48,7 @@ def dispose_person_records(db: Session, person: Person, actor: User, reason: str
             db.execute(delete(SmsOutbox).where(SmsOutbox.person_id == person.id))
             db.execute(delete(Intervention).where(Intervention.person_id == person.id))
             db.execute(delete(BiometricAuditEvent).where(BiometricAuditEvent.person_id == person.id))
+            db.execute(delete(LearnerEnrollment).where(LearnerEnrollment.person_id == person.id))
             from ..models import RecognitionReview
             from ..models_grading import StudentScore, GradeAdjustmentRequest, GradebookAuditEntry
             db.execute(delete(RecognitionReview).where(RecognitionReview.candidate_person_id == person.id))

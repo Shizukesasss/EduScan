@@ -138,6 +138,20 @@ class AttendanceSyncTest(unittest.TestCase):
         self.scan(16)
         self.assertEqual(self.student_row()["status"], "Late")
 
+    def test_successive_gate_visits_alternate_automatically(self):
+        self.assertEqual(self.scan(7, 30)['direction'], 'Time In')
+        self.assertEqual(self.scan(12)['direction'], 'Time Out')
+        self.assertEqual(self.scan(13)['direction'], 'Time In')
+        self.assertEqual(len(self.db.scalars(select(AttendanceEvent)).all()), 3)
+
+    def test_attendance_row_exposes_latest_gate_movement_after_reentry(self):
+        self.scan(7, 30)
+        self.scan(12)
+        self.scan(13)
+        row = self.student_row()
+        self.assertEqual(row['last_gate_time'], '13:00:00')
+        self.assertEqual(row['last_gate_direction'], 'Time In')
+
     def test_new_registration_appears_without_creating_a_false_attendance_event(self):
         invalid = self.client.post("/api/persons", headers=self.admin_headers, json={
             "external_id": "INVALID-PLACEMENT", "first_name": "Learner", "sex": "Female",

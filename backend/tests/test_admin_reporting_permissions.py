@@ -10,7 +10,7 @@ from unittest.mock import patch
 import test_attendance_sync as fixtures
 from sqlalchemy import select
 from app import main
-from app.models import AttendanceEvent, ClassSchedule, GeneratedReport, SchoolYear, Subject, User
+from app.models import AttendanceEvent, ClassSchedule, GeneratedReport, SchoolYear, SectionAdviserAssignment, SchoolSection, Subject, User
 from app.services import reports, sf2
 from app.auth import create_token
 
@@ -141,6 +141,16 @@ class AdminReportingPermissionsTest(unittest.TestCase):
         self.assertEqual(history[0]['id'],item.id)
         self.assertEqual(self.client.get(f'/api/reports/history/{item.id}/preview',headers=self.teacher_headers).status_code,200)
         self.assertEqual(self.db.query(GeneratedReport).count(),1)
+
+    def test_sf2_section_without_adviser_remains_available_for_admin_export(self):
+        self.db.query(SectionAdviserAssignment).delete()
+        self.db.query(SchoolSection).update({SchoolSection.adviser_user_id: None})
+        self.db.commit()
+        structure = self.client.get('/api/admin/academic-structure', headers=self.admin_headers)
+        self.assertEqual(structure.status_code, 200, structure.text)
+        self.assertIn('Rizal', [row['name'] for row in structure.json()['sections'] if row['adviser_name'] is None])
+        response = self.client.get('/api/sf2/export?year=2026&month=10&grade=10&section=Rizal&school_year=2026-2027', headers=self.admin_headers)
+        self.assertEqual(response.status_code, 200, response.text)
 
     def test_unresolved_past_attendance_blocks_official_export_without_writing_absences(self):
         student = self.fixture.student

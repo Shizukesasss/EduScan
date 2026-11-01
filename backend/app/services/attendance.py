@@ -120,6 +120,7 @@ def _attendance_row(person: Person, day: date, events: list[AttendanceEvent],
                     exception: CalendarException | None, excused: ExcusedAbsence | None) -> dict:
     time_in_event = next((event for event in events if event.direction == "Time In"), None)
     time_out_event = next((event for event in reversed(events) if event.direction == "Time Out"), None)
+    last_gate_event = next((event for event in reversed(events) if event.direction in {"Time In", "Time Out"}), None)
     absence_event = next((event for event in events if event.status == "Absent"), None)
     status = "No scan"
     source = f"Clean slate started by {reset.actor_name}" if reset else "—"
@@ -127,7 +128,6 @@ def _attendance_row(person: Person, day: date, events: list[AttendanceEvent],
     if blocked:
         status, source = blocked, f"Enrollment / service period: {person.enrollment_start_date or 'start not recorded'} to {person.enrollment_end_date or 'end not recorded'}"
     elif time_in_event:
-        last_gate_event = next((event for event in reversed(events) if event.direction in {"Time In", "Time Out"}), time_in_event)
         status = time_in_event.status
         source = last_gate_event.source
     elif excused:
@@ -155,6 +155,8 @@ def _attendance_row(person: Person, day: date, events: list[AttendanceEvent],
         "transfer_school": person.transfer_school,
         "time_in": time_in_event.event_time if time_in_event else None,
         "time_out": time_out_event.event_time if time_out_event else None,
+        "last_gate_time": last_gate_event.event_time if last_gate_event else None,
+        "last_gate_direction": last_gate_event.direction if last_gate_event else None,
         "status": status,
         "source": source,
         "correction_reason": None,
@@ -248,8 +250,7 @@ def record_gate_match(db: Session, person: Person, distance: float, now: datetim
     if recent and (utc_now - recent.created_at).total_seconds() < int(config["duplicate_cooldown_seconds"]):
         remaining = int(config["duplicate_cooldown_seconds"] - (utc_now - recent.created_at).total_seconds())
         return {"recorded": False, "message": f"Duplicate scan ignored; try again in {max(1, remaining)} seconds"}
-    last_direction = day_events[-1].direction if day_events else None
-    direction = "Time Out" if last_direction == "Time In" else "Time In"
+    direction = 'Time Out' if recent and recent.direction == 'Time In' else 'Time In'
     first_arrival = direction == "Time In" and not any(item.direction == "Time In" for item in day_events)
     schedule = applicable_schedule(db, person, day) if first_arrival else None
     status = "Present" if direction == "Time In" else "Time Out"

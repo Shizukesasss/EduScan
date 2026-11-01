@@ -23,7 +23,8 @@ function AdminSF2ReportGenerator() {
   const { showSuccess, showError } = useToast();
 
   useEffect(() => {
-    Promise.all([api.get('/my/advisory-sections'), api.get('/sf2/template'), api.get('/admin/academic-structure')]).then(([sections, status, academic]) => {
+    Promise.all([api.get('/sf2/template'), api.get('/admin/academic-structure')]).then(([status, academic]) => {
+      const sections = academic.sections.filter((item) => item.active).map((item) => ({ ...item, section: item.name }));
       const years = [...academic.school_years].sort((a,b) => a.name.localeCompare(b.name)); setSchoolYears(years); setSchoolYear(years.find(item => item.starts_on.slice(0,7) <= localDate().slice(0,7) && item.ends_on.slice(0,7) >= localDate().slice(0,7))?.name || '');
       setAvailableSections(sections); setTemplate(status);
       if (sections.length) { setGrade(sections[0].grade); setSection(sections[0].section); }
@@ -73,11 +74,11 @@ function AdminSF2ReportGenerator() {
 
   return <div className="page-stack">
     <section className="card-static">
-      <div className="section-heading"><div><p className="eyebrow">Official XLSX generation</p><h2>SF2 monthly attendance report</h2><p className="section-copy">Select one adviser section. Learners are deduplicated by ID/LRN, alphabetized within the male/female blocks, and transfer/departure remarks are written into the official remarks field.</p></div><FileSpreadsheet size={28} /></div>
-      {availableSections.length === 0 && <div className="notice notice-warning">No active section is available. Administrators must create a grade/section and assign an adviser account before official reports can be generated.</div>}
+      <div className="section-heading"><div><p className="eyebrow">Official XLSX generation</p><h2>SF2 monthly attendance report</h2><p className="section-copy">Select an active section. An assigned adviser is optional. Learners are deduplicated by ID/LRN, alphabetized within the male/female blocks, and transfer/departure remarks are written into the official remarks field.</p></div><FileSpreadsheet size={28} /></div>
+      {availableSections.length === 0 && <div className="notice notice-warning">No active section is available. Create a grade and section in Administration before generating an SF2.</div>}
       <div className="form-grid three-columns">
         <label><span className="field-label">Reporting month</span><input title="Choose the reporting month and year" className="input-field" type="month" value={month} onChange={event => { const value = event.target.value; setMonth(value); const selected = schoolYears.find(item => item.starts_on.slice(0,7) <= value && item.ends_on.slice(0,7) >= value); setSchoolYear(selected?.name || ''); }} /></label>
-        <label><span className="field-label">Adviser section</span><select className="input-field" value={sectionKey} onChange={(event) => chooseSection(event.target.value)}>{availableSections.map((item) => <option key={item.id} value={`${item.grade}|${item.section}`}>Grade {item.grade} — {item.section}{item.adviser_name ? ` · ${item.adviser_name}` : ''}</option>)}</select></label>
+        <label><span className="field-label">Section</span><select className="input-field" value={sectionKey} onChange={(event) => chooseSection(event.target.value)}>{availableSections.map((item) => <option key={item.id} value={`${item.grade}|${item.section}`}>Grade {item.grade} — {item.section}{item.adviser_name ? ` · ${item.adviser_name}` : ' · No adviser assigned'}</option>)}</select></label>
         <label><span className="field-label">School year</span><select className="input-field" value={schoolYear} onChange={event => setSchoolYear(event.target.value)}><option value="">Choose a school year</option>{schoolYears.map(item => <option key={item.id}>{item.name}</option>)}</select></label>
         <label><span className="field-label">School ID</span><input placeholder="Enter school id" className="input-field" value={schoolId} readOnly /></label>
       </div>

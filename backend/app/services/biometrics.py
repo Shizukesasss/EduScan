@@ -28,6 +28,13 @@ FACE_SIZE = (200, 200)
 MIN_BLUR_VARIANCE = 45.0
 MIN_BRIGHTNESS = 35.0
 MAX_BRIGHTNESS = 220.0
+# Enrollment frames are a controlled single-person capture. Require stronger
+# agreement than the cross-person gate cutoff before saving any face samples.
+MIN_ENROLLMENT_SIMILARITY = 0.65
+# Provisional fail-closed gate band above OpenCV's pairwise reference cutoff.
+# Field calibration must measure false matches and missed matches before use.
+MIN_GATE_SIMILARITY = MIN_SIMILARITY + 0.05
+MIN_IDENTITY_MARGIN = 0.05
 HUMAN_FACE_MODEL = Path(__file__).resolve().parents[2] / "resources" / "face_detection_yunet_2023mar.onnx"
 HUMAN_FACE_MODEL_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
 
@@ -296,7 +303,19 @@ class BiometricService:
                     feature = self._identity_cache.get(key)
                     if feature is None:
                         feature = self._identity_feature(self._load_sample_image(sample))
-                except (OSError, RuntimeError, ValueError, InvalidToken, cv2.error, HTTPException) as error:
+                except HTTPException as error:
+                    # LBPH samples are tight face crops. Some valid crops cannot be
+                    # re-detected by YuNet after reload, even though they were
+                    # verified from the original camera frame during enrollment.
+                    # Skip only that unusable SFace reference; other storage,
+                    # integrity, and verifier failures must still fail closed.
+                    if error.status_code == 422:
+                        continue
+                    raise HTTPException(503, detail={
+                        'code': 'identity_verifier_unavailable',
+                        'message': 'An existing face enrollment cannot be verified. No identity was accepted; use staff assistance.',
+                    }) from error
+                except (OSError, RuntimeError, ValueError, InvalidToken, cv2.error) as error:
                     raise HTTPException(503, detail={
                         'code': 'identity_verifier_unavailable',
                         'message': 'An existing face enrollment cannot be verified. No identity was accepted; use staff assistance.',
@@ -304,15 +323,42 @@ class BiometricService:
                 refreshed[key] = feature
                 gallery.append((sample.person_id, feature))
             self._identity_cache = refreshed
+        reference_counts = {}
+        for person_id, _feature in gallery:
+            reference_counts[person_id] = reference_counts.get(person_id, 0) + 1
+        people_without_references = {sample.person_id for sample in samples if reference_counts.get(sample.person_id, 0) < 3}
+        if people_without_references:
+            raise HTTPException(503, detail={
+                'code': 'identity_verifier_unavailable',
+                'message': 'At least one enrolled person has fewer than three usable SFace references. Ask an administrator to re-enroll that person before recognition.',
+            })
+        references_by_person = {}
+        for person_id, feature in gallery:
+            references_by_person.setdefault(person_id, []).append(feature)
+        if any(np.any(np.stack(features) @ np.stack(features).T < MIN_ENROLLMENT_SIMILARITY)
+               for features in references_by_person.values()):
+            raise HTTPException(503, detail={
+                'code': 'identity_verifier_unavailable',
+                'message': 'An existing face enrollment contains inconsistent identity references. Ask an administrator to re-enroll that person before recognition.',
+            })
         return samples, gallery
 
     def _identity_scores(self, image, gallery, feature=None):
         feature = self._identity_feature(image) if feature is None else feature
-        scores = {}
-        for person_id, stored in gallery:
-            score = float(np.clip(feature @ stored, -1, 1))
-            scores[person_id] = max(score, scores.get(person_id, -1))
-        return sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        if not gallery:
+            return []
+        person_ids, references = zip(*gallery)
+        similarities = np.clip(np.stack(references) @ feature, -1, 1)
+        unique_ids, slots = np.unique(person_ids, return_inverse=True)
+        # The third-best stored sample must clear the identity cutoff.
+        # A single accidental nearest neighbor becomes more likely as the
+        # gallery grows; one matching sample must never decide attendance.
+        corroborated = np.full(len(unique_ids), -1.0)
+        for index in range(len(unique_ids)):
+            own_scores = similarities[slots == index]
+            if len(own_scores) >= 3:
+                corroborated[index] = np.partition(own_scores, -3)[-3]
+        return sorted(zip(unique_ids.tolist(), corroborated.tolist()), key=lambda item: item[1], reverse=True)
 
     def _check_duplicate_enrollment(self, db: Session, person: Person,
                                     accepted: list[ProcessedFace]) -> None:
@@ -362,6 +408,46 @@ class BiometricService:
                 rejected.append(f"Frame {index + 1}: {detail}")
         if len(accepted) < settings.min_samples:
             raise HTTPException(status_code=422, detail={"message": f"Only {len(accepted)} quality frames were accepted; at least {settings.min_samples} are required", "rejected": rejected})
+
+        # A capture burst must contain one identity throughout. A stranger who
+        # enters the frame before enrollment is saved must not become a sample
+        # of this person's face, even when that stranger is not yet enrolled.
+        features = np.stack([face.identity_feature if face.identity_feature is not None
+                             else self._identity_feature(face.image) for face in accepted])
+        similarities = features @ features.T
+        if np.any(similarities < MIN_ENROLLMENT_SIMILARITY):
+            raise HTTPException(status_code=422, detail={
+                'code': 'mixed_enrollment_faces',
+                'message': 'The enrollment frames do not consistently show one person. Clear the camera area and capture this person again.',
+            })
+
+        # Gate matching reloads the saved crops. Check that this same path can
+        # recover enough references before writing samples or a trained model.
+        usable_references = []
+        for face in accepted:
+            try:
+                stored_feature = self._identity_feature(face.image)
+            except HTTPException as error:
+                if error.status_code == 422:
+                    continue
+                raise
+            if float(stored_feature @ features[0]) < MIN_ENROLLMENT_SIMILARITY:
+                raise HTTPException(status_code=422, detail={
+                    'code': 'inconsistent_identity_references',
+                    'message': 'A saved face crop would not match the captured person. Capture a new clear set of frames.',
+                })
+            usable_references.append(stored_feature)
+        if len(usable_references) < 3:
+            raise HTTPException(status_code=422, detail={
+                'code': 'insufficient_identity_references',
+                'message': 'Too few saved face crops can be used for reliable recognition. Face the camera directly and capture again.',
+            })
+        stored_similarities = np.stack(usable_references) @ np.stack(usable_references).T
+        if np.any(stored_similarities < MIN_ENROLLMENT_SIMILARITY):
+            raise HTTPException(status_code=422, detail={
+                'code': 'inconsistent_identity_references',
+                'message': 'The saved face crops do not agree on one identity. Capture a new clear set of frames.',
+            })
 
         return accepted, rejected
 
@@ -685,8 +771,12 @@ class BiometricService:
         completed_blinks = set()
         people = {}
         matches = {}
+        collided_labels = set()
+        conflicted_labels = set()
+        observed_features = []
         unknown = []
         last_error = None
+        empty_frames = 0
         test_state = {} if diagnostics is not None else None
         verified_present = (verified_present or set()) if diagnostics is None else set()
         if diagnostics is not None:
@@ -698,7 +788,8 @@ class BiometricService:
                 if error.status_code != 422:
                     raise
                 last_error = error
-                matches = {}
+                if error.detail == 'No frontal human face was detected':
+                    empty_frames += 1
                 unknown = []
                 if diagnostics is not None:
                     diagnostics['identity_comparisons'] = []
@@ -707,6 +798,8 @@ class BiometricService:
                 diagnostics['frames_checked'] += 1
                 diagnostics['max_faces_in_frame'] = max(diagnostics['max_faces_in_frame'], len(processed_faces))
                 diagnostics['identity_comparisons'] = []
+            if len(processed_faces) > 5:
+                raise HTTPException(status_code=422, detail='Too many faces are visible; process at most 5 people in one frame')
             if recognizer is None:
                 recognizer, _model = self._active_recognizer(db)
                 config = self.runtime_config(db)
@@ -717,14 +810,16 @@ class BiometricService:
             unknown = []
             predictions = []
             for processed in processed_faces:
+                feature = processed.identity_feature if processed.identity_feature is not None else self._identity_feature(processed.image)
                 try:
-                    ranked = self._identity_scores(processed.image, gallery, processed.identity_feature)
+                    ranked = self._identity_scores(processed.image, gallery, feature)
                 except HTTPException as error:
                     if error.status_code != 422:
                         raise
                     ranked = []
-                qualified = [key for key, score in ranked if score >= MIN_SIMILARITY]
-                label = qualified[0] if len(qualified) == 1 else -1
+                qualified = [key for key, score in ranked if score >= MIN_GATE_SIMILARITY]
+                near_tie = len(ranked) > 1 and ranked[0][1] - ranked[1][1] < MIN_IDENTITY_MARGIN
+                label = qualified[0] if len(qualified) == 1 and not near_tie else -1
                 collector = cv2.face.StandardCollector_create(float('inf'))
                 with self._lock:
                     recognizer.predict_collect(processed.image, collector)
@@ -732,9 +827,20 @@ class BiometricService:
                 distances = [(int(key), float(value)) for key, value in collector.getResults() if math.isfinite(value)]
                 selected = [value for key, value in distances if label == -1 or key == label]
                 distance = min(selected) if selected else 1e9
-                predictions.append((label, distance, ranked, len(qualified) > 1))
-            valid_labels = [label for label, _, _, _ in predictions if label != -1]
-            for processed, (label, distance, ranked, ambiguous) in zip(processed_faces, predictions):
+                predictions.append((label, distance, ranked, len(qualified) > 1 or near_tie, feature))
+            valid_labels = [label for label, _, _, _, _ in predictions if label != -1]
+            collided_labels.update(label for label in valid_labels if valid_labels.count(label) > 1)
+            for label, _, _, _, feature in predictions:
+                for prior_label, prior_feature in observed_features:
+                    similarity = float(feature @ prior_feature)
+                    if label == prior_label and label != -1 and similarity < MIN_SIMILARITY:
+                        conflicted_labels.add(label)
+                    elif similarity >= MIN_SIMILARITY and label != prior_label:
+                        conflicted_labels.update(person_id for person_id in (label, prior_label) if person_id != -1)
+                observed_features.append((label, feature))
+            for label in collided_labels | conflicted_labels:
+                matches.pop(label, None)
+            for processed, (label, distance, ranked, ambiguous, _) in zip(processed_faces, predictions):
                 if diagnostics is not None:
                     comparison = []
                     for candidate_id, similarity in ranked[:2]:
@@ -744,9 +850,9 @@ class BiometricService:
                         if candidate:
                             comparison.append({'name': candidate.full_name, 'similarity': round(similarity, 4)})
                     diagnostics['identity_comparisons'].append({'face': len(diagnostics['identity_comparisons']) + 1,
-                                                               'threshold': MIN_SIMILARITY, 'candidates': comparison})
+                                                               'threshold': MIN_GATE_SIMILARITY, 'candidates': comparison})
                 person = None
-                collision = label != -1 and valid_labels.count(label) > 1
+                collision = label in collided_labels or label in conflicted_labels
                 if label != -1 and not collision:
                     if label not in people:
                         people[label] = db.get(Person, label)
@@ -754,7 +860,8 @@ class BiometricService:
                     if candidate and candidate.active and candidate.biometric_consent:
                         person = candidate
                 live = False
-                message = ('Two faces matched the same identity. Please scan separately so each person can be verified.'
+                message = ('Identity changed or conflicted during this capture. Please scan separately and verify with staff.'
+                           if label in conflicted_labels else 'Two faces matched the same identity. Please scan separately so each person can be verified.'
                            if collision else 'This face resembles multiple enrollments; identity is uncertain.' if ambiguous else 'Face was not recognized with sufficient confidence')
                 if person:
                     # Keep a completed blink verified for the rest of this burst.
@@ -776,10 +883,13 @@ class BiometricService:
                     current_matches[person.id] = match
                 else:
                     unknown.append(match)
-            # Return the current frame only; earlier identities are used solely for blink continuity.
-            matches = current_matches
+            # Keep each distinct person seen in this burst, even if the final frame misses them.
+            matches.update(current_matches)
         results = list(matches.values()) + unknown
         if not results:
+            if empty_frames == len(frames):
+                raise HTTPException(status_code=422, detail={'code': 'no_faces_in_burst',
+                                                            'message': 'No frontal human face was detected'})
             raise last_error or HTTPException(status_code=422, detail='No frontal human face was detected')
         # Audit only the final outcome, rather than writing on every blink frame.
         for match in results:

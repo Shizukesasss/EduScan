@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..config import EXPORT_DIR, TEMPLATE_DIR, settings
 from ..models import Person
-from .attendance import active_people, is_instructional_day, raw_row, rows_for_people, local_now, MANILA
+from .attendance import active_people, is_instructional_day, rows_for_people, local_now, MANILA
 from .export_files import new_report_path
 from .enrollment import enrollment_remark
 
@@ -276,10 +276,24 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
         column = DAY_COLUMNS[index]
         _set_number(_cell(worksheet, 11, column), day.day)
         _set_text(_cell(worksheet, 12, column), day.strftime("%a")[0])
+    legend = _cell(worksheet, 65, 17)
+    legend_text = "".join(node.text or "" for node in legend.iter(f"{{{NS_SHEET}}}t"))
+    if legend.get("t") == "s" and "xl/sharedStrings.xml" in members:
+        shared_index = legend.find(f"{{{NS_SHEET}}}v")
+        if shared_index is not None and shared_index.text is not None:
+            strings = ET.fromstring(members["xl/sharedStrings.xml"])
+            entry = strings.findall(f"{{{NS_SHEET}}}si")[int(shared_index.text)]
+            legend_text = "".join(node.text or "" for node in entry.iter(f"{{{NS_SHEET}}}t"))
+    if "blank- Present" in legend_text:
+        _set_text(legend, legend_text.replace("blank- Present", "✓- Present"))
 
     tardy_positions: list[tuple[int, int]] = []
     male_present = [0] * len(days)
     female_present = [0] * len(days)
+    daily_status = {
+        day: {row["person_id"]: row["status"] for row in rows_for_people(db, students, day)}
+        for day in days
+    }
     for group, row_numbers in ((males, MALE_ROWS), (females, FEMALE_ROWS)):
         for person, row_number in zip(group, row_numbers):
             _set_text(_cell(worksheet, row_number, 2), person.full_name.upper())
@@ -289,7 +303,7 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
             absent_count = 0
             late_count = 0
             for index, day in enumerate(days):
-                status = raw_row(db, person, day)["status"]
+                status = daily_status[day][person.id]
                 attendance_cell = _cell(worksheet, row_number, DAY_COLUMNS[index])
                 if status == "Absent":
                     _set_text(attendance_cell, "X")
@@ -298,8 +312,10 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
                     _clear(attendance_cell)
                     tardy_positions.append((row_number, DAY_COLUMNS[index]))
                     late_count += 1
+                elif status in {"Present", "Time Out"}:
+                    _set_text(attendance_cell, "✓")
                 else:
-                    _clear(attendance_cell)  # Official convention: blank means present.
+                    _clear(attendance_cell)  # Pending/no scan stays blank.
                 if status in {"Present", "Late", "Time Out"}:
                     (male_present if person.sex == "Male" else female_present)[index] += 1
             _set_number(_cell(worksheet, row_number, 29), absent_count or None)
@@ -340,7 +356,7 @@ def generate_temporary_log(db: Session, day: date, grade: str | None = None,
                   "Enrollment Status", "Enrollment Start", "Enrollment End", "Transfer School",
                   "Time In", "Time Out", "Status", "Source"])
     people = active_people(db, grade, section, students_only=bool(grade or section), include_departed=True)
-    for row in [raw_row(db, person, day) for person in people]:
+    for row in rows_for_people(db, people, day):
         sheet.append([day, row["external_id"], row["lrn"], row["full_name"], row["sex"], row["role"],
                       row["grade"], row["section"], row["enrollment_status"], row["enrollment_start_date"],
                       row["enrollment_end_date"], row["transfer_school"], row["time_in"], row["time_out"],

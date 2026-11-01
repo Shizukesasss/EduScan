@@ -13,14 +13,13 @@ import Dashboard from './pages/Dashboard/Dashboard';
 import Attendance from './pages/Attendance/Attendance';
 import Grading from './pages/Grading/Grading';
 import Reports from './pages/Reports/Reports';
-import SF2Dashboard from './pages/Teacher/SF2Dashboard';
 import TruancyInterventions from './pages/Teacher/TruancyInterventions';
 import MyAdvisory from './pages/Teacher/MyAdvisory';
 import MySchedules from './pages/Teacher/MySchedules';
 import SystemSetup from './pages/Setup/SystemSetup';
 import Administration from './pages/Administration/Administration';
 import AccountSecurity from './pages/Account/AccountSecurity';
-import Oversight from './pages/Oversight/Oversight';
+import OperationalControls from './pages/Operations/OperationalControls';
 import { auth } from './api/client';
 
 function RoleGuard({ roles, children, allowPasswordChange = false }) {
@@ -33,7 +32,7 @@ function WorkspaceHome() {
   const role = auth.role();
   if (role === 'school_head') return <Navigate to="/dashboard/grading" replace />;
   if (role === 'records_officer') return <Navigate to="/dashboard/reports" replace />;
-  if (role === 'privacy_officer' || role === 'ict') return <Navigate to="/dashboard/oversight" replace />;
+  if (role === 'privacy_officer' || role === 'ict') return <Navigate to="/dashboard/administration" replace />;
   return <Dashboard />;
 }
 
@@ -54,17 +53,16 @@ function App() {
           {/* Protected Routes (Authentication required in a real app) */}
           <Route path="/dashboard" element={<RoleGuard roles={['admin', 'records_officer', 'privacy_officer', 'ict', 'school_head']}><AdminLayout /></RoleGuard>}>
             <Route index element={<WorkspaceHome />} />
-            <Route path="attendance" element={<RoleGuard roles={['admin']}><Attendance /></RoleGuard>} />
+            <Route path="attendance" element={<RoleGuard roles={['admin', 'records_officer', 'privacy_officer']}>{auth.role() === 'admin' ? <Attendance /> : <OperationalControls view="reviews" />}</RoleGuard>} />
             <Route path="grading" element={<RoleGuard roles={['admin', 'records_officer', 'school_head']}><Grading /></RoleGuard>} />
             <Route path="reports" element={<RoleGuard roles={['admin', 'records_officer', 'school_head']}><Reports /></RoleGuard>} />
-            <Route path="oversight" element={<RoleGuard roles={['admin', 'records_officer', 'privacy_officer', 'ict']}><Oversight /></RoleGuard>} />
-            <Route path="setup" element={<RoleGuard roles={['admin']}><SystemSetup /></RoleGuard>} />
-            <Route path="administration" element={<RoleGuard roles={['admin']}><Administration /></RoleGuard>} />
+            <Route path="setup" element={<RoleGuard roles={['admin', 'records_officer']}><SystemSetup /></RoleGuard>} />
+            <Route path="administration" element={<RoleGuard roles={['admin', 'records_officer', 'privacy_officer', 'ict']}><Administration /></RoleGuard>} />
           </Route>
 
           {/* Teacher Routes */}
           <Route path="/teacher" element={<RoleGuard roles={['teacher']}><TeacherLayout /></RoleGuard>}>
-            <Route index element={<SF2Dashboard />} />
+            <Route index element={<Navigate to="attendance" replace />} />
             <Route path="truancy" element={<TruancyInterventions />} />
             <Route path="roster" element={<MyAdvisory />} />
             <Route path="attendance" element={<Attendance />} />

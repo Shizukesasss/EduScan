@@ -1,9 +1,8 @@
 import { Outlet, NavLink } from 'react-router-dom';
-import { AlertTriangle, BookOpen, CalendarClock, ClipboardCheck, FileSpreadsheet, FileText, KeyRound, LogOut, Users } from 'lucide-react';
+import { AlertTriangle, CalendarClock, ClipboardCheck, FileSpreadsheet, FileText, KeyRound, LogOut, Users } from 'lucide-react';
 import { auth } from '../api/client';
 
 const navigation = [
-  ['/teacher', 'Class workspace', BookOpen, true],
   ['/teacher/attendance', 'Attendance', ClipboardCheck],
   ['/teacher/grading', 'Grading', FileSpreadsheet],
   ['/teacher/reports', 'Reports', FileText],

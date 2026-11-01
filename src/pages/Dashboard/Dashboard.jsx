@@ -1,4 +1,5 @@
 import PaginatedBody from '../../components/Common/PaginatedBody';
+import OperationalControls from '../Operations/OperationalControls';
 import { useCallback, useEffect, useState } from 'react';
 import { api, displayTime, localDate } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
@@ -54,6 +55,7 @@ export default function Dashboard() {
         {!health?.active_model && <small>Enroll people to create the first model.</small>}
       </div>
     </section>
+    <OperationalControls view="health" />
 
     <dl className="admin-overview__summary" aria-label="Today’s attendance and SMS summary">
       <div className="admin-overview__stat">
