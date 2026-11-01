@@ -1,10 +1,16 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { auth } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
+import { isSeniorHighGrade } from '../../services/academicContext';
+import { getExportReviewCopy, isDraftPreviewAvailable } from '../../services/gradebookExport';
 import FinalizeValidationDialog from './FinalizeValidationDialog';
+import ValidationIssueGroups from './ValidationIssueGroups';
+import './GradebookActions.css';
 
 export default function GradebookActions({
   gradebook,
+  exportSubject = null,
+  assessmentComponents = [],
   isDirty = false,
   isSaving = false,
   onSaveDraft,
@@ -18,8 +24,10 @@ export default function GradebookActions({
   onToggleValidation,
   onExportXlsx,
   onExportAllTerms,
+  onExportDraftPreview,
   disabled = false,
   onValidateFinalize,
+  onValidateExport,
   finalizationContext,
 }) {
   const userRole = auth.role();
@@ -39,8 +47,118 @@ export default function GradebookActions({
   const [acting, setActing] = useState(false);
   const [validatingFinalize, setValidatingFinalize] = useState(false);
   const [finalizationIssue, setFinalizationIssue] = useState(null);
+  const [exportRequest, setExportRequest] = useState(null);
+  const [exportValidation, setExportValidation] = useState({ issues: [], loading: false, error: '', checked: false });
+  const [generatingExport, setGeneratingExport] = useState(false);
   const finalizeButtonRef = useRef(null);
+  const exportDialogRef = useRef(null);
+  const exportTriggerRef = useRef(null);
   const { showError } = useToast();
+
+  useEffect(() => {
+    if (!exportRequest) return undefined;
+    const previousFocus = document.activeElement;
+    const returnFocusTarget = exportTriggerRef.current;
+    exportDialogRef.current?.querySelector('button:not([disabled])')?.focus();
+    return () => {
+      const target = returnFocusTarget?.isConnected ? returnFocusTarget : previousFocus;
+      if (target?.isConnected) target.focus();
+    };
+  }, [exportRequest]);
+
+  const runExportValidation = async (scope) => {
+    setExportValidation((current) => ({ ...current, loading: true, error: '' }));
+    try {
+      const result = await onValidateExport?.(scope);
+      setExportValidation({
+        issues: result?.issues || [],
+        loading: false,
+        error: result?.error || '',
+        checked: result?.checked !== false,
+      });
+    } catch (error) {
+      setExportValidation({ issues: [], loading: false, error: error.message || 'Could not validate this export.', checked: false });
+    }
+  };
+
+  const openExportReview = (scope, event) => {
+    exportTriggerRef.current = event.currentTarget;
+    setExportRequest(scope);
+    setExportValidation({ issues: [], loading: false, error: '', checked: false });
+    void runExportValidation(scope);
+  };
+
+  const closeExportReview = () => setExportRequest(null);
+
+  const confirmExport = async () => {
+    if (generatingExport || exportValidation.loading || exportValidation.error || !exportValidation.checked || exportValidation.issues.length) return;
+    const request = exportRequest;
+    setGeneratingExport(true);
+    setExportValidation((current) => ({ ...current, error: '' }));
+    try {
+      const result = request === 'draft_preview'
+        ? await onExportDraftPreview?.()
+        : request === 'all_terms'
+          ? await onExportAllTerms?.()
+          : await onExportXlsx?.();
+      if (result?.issues) {
+        setExportValidation({ issues: result.issues, loading: false, error: '', checked: true });
+        return;
+      }
+      setExportRequest(null);
+    } catch (error) {
+      setExportValidation((current) => ({ ...current, error: error.message || 'The export could not be generated.', checked: false }));
+    } finally {
+      setGeneratingExport(false);
+    }
+  };
+
+  const handleExportDialogKeyDown = (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeExportReview();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+
+    const focusable = exportDialogRef.current?.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])');
+    if (!focusable?.length) {
+      event.preventDefault();
+      exportDialogRef.current?.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  const isShsGrade = isSeniorHighGrade(gradebook?.grade_name);
+  const isDraftPreview = exportRequest === 'draft_preview';
+  const exportReviewCopy = getExportReviewCopy(isDraftPreview);
+  const subjectIsShs = String(exportSubject?.category || '').trim().toUpperCase().startsWith('SHS');
+  const electiveCluster = !isShsGrade
+    ? 'Not applicable'
+    : !subjectIsShs
+      ? 'Not available'
+      : exportSubject.is_elective
+        ? exportSubject.elective_cluster || 'Not available'
+        : 'Not applicable — core subject';
+  const exportTermLabel = exportRequest === 'all_terms'
+    ? `Terms 1–${Math.max(1, Number(gradebook?.term_order) || 1)}`
+    : gradebook?.grading_period_name || (gradebook?.term_order ? `Term ${gradebook.term_order}` : 'Not available');
+  const componentWeightSummary = (assessmentComponents || [])
+    .filter((component) => component?.name && component.weight !== null && component.weight !== undefined)
+    .map((component) => {
+      const weight = Number(component.weight);
+      return `${component.name} ${Number.isFinite(weight) ? `${Number(weight.toFixed(2))}%` : 'Not available'}`;
+    })
+    .join(' · ') || 'Not available';
 
   const openActionDialog = (type) => {
     setActiveDialog(type);
@@ -181,10 +299,19 @@ export default function GradebookActions({
           <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onToggleValidation} title="Run pre-flight validation checklist">
             <span>Validation</span>
           </button>
+          {isDraftPreviewAvailable(gradebook, userRole) && <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={(event) => openExportReview('draft_preview', event)}
+            disabled={disabled || isSaving}
+            title="Preview this term using saved scores. The clearly marked Draft file will not change the saved record."
+          >
+            <span>Preview Draft XLSX</span>
+          </button>}
           {userRole !== 'admin' && <button
             type="button" 
             className="btn btn-secondary" 
-            onClick={() => onExportXlsx?.()}
+            onClick={(event) => openExportReview('term', event)}
             disabled={disabled || isSaving || (!isFinalized && !isLocked)}
             title={(!isFinalized && !isLocked) ? "Gradebook must be Finalized before exporting" : "Download Excel spreadsheet (XLSX)"}
           >
@@ -193,7 +320,7 @@ export default function GradebookActions({
           {(isRecordsOfficer || userRole === 'teacher') && !gradebook?.is_legacy_readonly && [2, 3].includes(Number(gradebook?.term_order)) && <button
             type="button"
             className="btn btn-secondary"
-            onClick={onExportAllTerms}
+            onClick={(event) => openExportReview('all_terms', event)}
             disabled={disabled || isSaving || (!isFinalized && !isLocked)}
             title={`Export Terms 1 through ${gradebook.term_order} in one workbook. All included terms must be complete and finalized or locked.`}
           >
@@ -207,6 +334,59 @@ export default function GradebookActions({
       </div>
 
       <FinalizeValidationDialog issue={finalizationIssue} onClose={() => setFinalizationIssue(null)} returnFocusRef={finalizeButtonRef} />
+
+      {exportRequest && (
+        <div className="modal-backdrop">
+          <section
+            ref={exportDialogRef}
+            className="modal-card modal-md"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="export-review-title"
+            aria-describedby="export-review-description"
+            onKeyDown={handleExportDialogKeyDown}
+            tabIndex={-1}
+          >
+            <div className="modal-header">
+              <h3 id="export-review-title">{exportReviewCopy.title}</h3>
+            </div>
+            <div className="modal-body export-review-body" id="export-review-description">
+              <p className="text-muted text-sm mb-3">{exportReviewCopy.description}</p>
+              {isDraftPreview && <p className="notice notice-warning compact-notice mb-3" role="status">
+                <strong>{exportReviewCopy.label}</strong>
+              </p>}
+              <dl className="export-review-grid">
+                <div className="export-review-item"><dt>School year</dt><dd>{gradebook?.school_year_name || 'Not available'}</dd></div>
+                <div className="export-review-item"><dt>Grade</dt><dd>{gradebook?.grade_name || 'Not available'}</dd></div>
+                <div className="export-review-item"><dt>Section</dt><dd>{gradebook?.section_name || 'Not available'}</dd></div>
+                <div className="export-review-item"><dt>SHS track</dt><dd>{isShsGrade ? (gradebook?.section_track || 'Not available') : 'Not applicable'}</dd></div>
+                <div className="export-review-item"><dt>Subject</dt><dd>{gradebook?.subject_name || 'Not available'}</dd></div>
+                <div className="export-review-item"><dt>SHS elective cluster</dt><dd>{electiveCluster}</dd></div>
+                <div className="export-review-item"><dt>Term</dt><dd>{exportTermLabel}</dd></div>
+                <div className="export-review-item"><dt>Grading policy</dt><dd>{gradebook?.policy_name || 'Not available'}</dd></div>
+                <div className="export-review-item export-review-item-wide"><dt>Component weights</dt><dd>{componentWeightSummary}</dd></div>
+              </dl>
+              <ValidationIssueGroups
+                issues={exportValidation.issues}
+                action="export"
+                loading={exportValidation.loading}
+                error={exportValidation.error}
+                checked={exportValidation.checked}
+                onRefresh={() => runExportValidation(exportRequest)}
+              />
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn btn-secondary" onClick={closeExportReview} disabled={generatingExport}>Cancel</button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={confirmExport}
+                disabled={disabled || isSaving || generatingExport || exportValidation.loading || Boolean(exportValidation.error) || !exportValidation.checked || exportValidation.issues.some((issue) => issue.blocks?.includes('export'))}
+              >{generatingExport ? 'Generating…' : exportReviewCopy.buttonLabel}</button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {/* Workflow Action Confirmation Dialog */}
       {activeDialog && (

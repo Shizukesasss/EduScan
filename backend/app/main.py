@@ -62,7 +62,7 @@ from .services.scheduler import attendance_scheduler
 from .services import grading as grading_service
 from .services.grading import gradebook_summary
 from .services.grading_engine import reporting_method_for_school_year
-from .services.academic_context import elective_track_for_subject, is_junior_high, is_senior_high
+from .services.academic_context import SHS_TRACK_CLUSTERS, elective_track_for_subject, is_junior_high, is_senior_high
 from .models_grading import (
     AssessmentItem, GradeAdjustmentRequest, GradeCriteriaAdjustmentRequest, Gradebook, GradebookAuditEntry,
     GradebookComponent, GradingPolicy, StudentScore,
@@ -1634,7 +1634,10 @@ def save_schedule(payload: SchedulePayload, db: Session = Depends(get_db),
     from .services.academic_context import subject_matches_grade
     scheduled_subject = db.get(Subject, subject_id)
     track = elective_track_for_subject(scheduled_subject.category, scheduled_subject.is_elective, scheduled_subject.elective_track)
-    if not subject_matches_grade(scheduled_subject, grade_level.name) or (track and (section.track or '').casefold() != track.casefold()):
+    cluster = (scheduled_subject.elective_cluster or '').strip()
+    if (not subject_matches_grade(scheduled_subject, grade_level.name)
+            or (track and (section.track or '').casefold() != track.casefold())
+            or (cluster and (section.track_cluster or '').strip().casefold() != cluster.casefold())):
         raise HTTPException(422, 'This subject is not allowed for the selected grade and program')
     record = db.get(
         ClassSchedule, payload.id) if payload.id else ClassSchedule()
@@ -1873,7 +1876,7 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
         "sections": [{"id": item.id, "grade_level_id": item.grade_level_id, "grade": item.grade_level.name,
                       "name": item.name, "adviser_user_id": annual_advisers.get(item.id),
                       "adviser_name": adviser_names.get(annual_advisers.get(item.id)),
-                      "track": item.track, "active": item.active} for item in sections],
+                      "track": item.track, "track_cluster": item.track_cluster, "active": item.active} for item in sections],
         "adviser_assignments": [{"school_year_id": item.school_year_id, "section_id": item.section_id, "teacher_user_id": item.teacher_user_id,
             "adviser_name": db.get(User, item.teacher_user_id).full_name} for item in db.scalars(select(SectionAdviserAssignment)).all()
             if user.role != 'teacher' or item.teacher_user_id == user.id],
@@ -1881,6 +1884,7 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
                       "is_elective": item.is_elective,
                       "allowed_grades": item.allowed_grades,
                       "elective_track": elective_track_for_subject(item.category, item.is_elective, item.elective_track),
+                       "elective_cluster": item.elective_cluster,
                       "active": item.active} for item in subjects],
         "subject_assignments": [{
             "id": item.id, "school_year_id": item.school_year_id,
@@ -1906,6 +1910,13 @@ def _term_order_from_name(name: str) -> int:
     return int(orders.pop())
 
 
+def _subject_category_condition(model, category: str):
+    category_expression = func.upper(func.trim(model.category))
+    if category.strip().upper().startswith("SHS"):
+        return category_expression.like("SHS%")
+    return ~category_expression.like("SHS%")
+
+
 def _matching_deleted_reference(db: Session, model, payload, term_order: int | None = None):
     """Reuse a soft-deleted row when its unique academic key is entered again."""
     if model is SchoolYear or model is GradeLevel:
@@ -1915,7 +1926,14 @@ def _matching_deleted_reference(db: Session, model, payload, term_order: int | N
     elif model is SchoolSection:
         condition = (model.grade_level_id == payload.grade_level_id) & (model.name == payload.name)
     elif model is Subject:
-        condition = or_(model.code == payload.code, model.name == payload.name)
+        same_category = _subject_category_condition(model, payload.category)
+        same_name = same_category & (func.upper(func.trim(model.name)) == payload.name.strip().upper())
+        condition = same_name
+        if payload.code:
+            condition = or_(
+                condition,
+                same_category & (func.upper(func.trim(model.code)) == payload.code.strip().upper()),
+            )
     else:
         return None
     matches = db.scalars(select(model).where(model.deleted_at.is_not(None), condition)).all()
@@ -2002,8 +2020,20 @@ def save_section(payload: SectionPayload, db: Session = Depends(get_db), actor: 
         if payload.track and payload.track.strip().upper() not in {"BEP", "STE"}:
             raise HTTPException(status_code=422, detail="Junior high sections must use the BEP or STE program")
         payload.track = payload.track.strip().upper() if payload.track else None
-    elif not is_senior_high(parent_grade.name):
+        payload.track_cluster = None
+    elif is_senior_high(parent_grade.name):
+        payload.track = payload.track.strip() if payload.track else None
+        payload.track_cluster = payload.track_cluster.strip() if payload.track_cluster else None
+        if payload.track in SHS_TRACK_CLUSTERS:
+            if payload.track_cluster not in SHS_TRACK_CLUSTERS[payload.track]:
+                raise HTTPException(status_code=422, detail="Choose an elective cluster available to the selected SHS track")
+        else:
+            existing = db.get(SchoolSection, payload.id) if payload.id else None
+            if not payload.track or not existing or payload.track != existing.track or payload.track_cluster != existing.track_cluster:
+                raise HTTPException(status_code=422, detail="Choose an SHS track and one of its elective clusters")
+    else:
         payload.track = None
+        payload.track_cluster = None
     try:
         result = _save_reference(db, SchoolSection, payload, actor, exclude={'id', 'school_year_id', 'adviser_user_id', 'adviser_name'}, commit=False)
         previous = adviser_for_section(db, year_id, result['id'])
@@ -2021,6 +2051,8 @@ def save_section(payload: SectionPayload, db: Session = Depends(get_db), actor: 
 
 @app.post("/api/admin/subjects")
 def save_subject(payload: SubjectPayload, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))) -> dict:
+    payload.category = " ".join(payload.category.split())
+    payload.name = " ".join(payload.name.split())
     if not payload.is_elective and not payload.category.strip().upper().startswith("SHS"):
         approved_jhs_subjects = {
             "AP": {"ARALING PANLIPUNAN", "AP"},
@@ -2042,6 +2074,65 @@ def save_subject(payload: SubjectPayload, db: Session = Depends(get_db), actor: 
                 if existing.deleted_at is not None:
                     raise HTTPException(409, "Restore this deleted item before editing it")
             raise HTTPException(422, "Choose an approved JHS subject and matching subject code.")
+    payload.code = " ".join(payload.code.split()).upper()
+    if payload.is_elective and not payload.code:
+        subject_name = " ".join(payload.name.split())
+        prefix = "SHS-EL" if payload.category.strip().upper().startswith("SHS") else "JHS-EL"
+        base_code = f"{prefix}-{re.sub(r'[^A-Z0-9]+', '-', subject_name.upper()).strip('-') or 'SUBJECT'}"
+        base_code = base_code[:40].rstrip("-")
+        payload.code = base_code
+        suffix = 2
+        while True:
+            code_query = select(Subject.id).where(func.upper(Subject.code) == payload.code)
+            if payload.id:
+                code_query = code_query.where(Subject.id != payload.id)
+            if db.scalar(code_query) is None:
+                break
+            suffix_text = f"-{suffix}"
+            payload.code = f"{base_code[:40 - len(suffix_text)].rstrip('-')}{suffix_text}"
+            suffix += 1
+    is_shs_subject = payload.category.strip().upper().startswith("SHS")
+    if is_shs_subject:
+        payload.code = " ".join(payload.code.split()).upper()
+        payload.name = " ".join(payload.name.split()).upper()
+        approved_shs_core_subjects = {
+            "SHS-CORE-EC": "EFFECTIVE COMMUNICATION / MABISANG KOMUNIKASYON",
+            "SHS-CORE-GM": "GENERAL MATHEMATICS",
+            "SHS-CORE-GS": "GENERAL SCIENCE",
+            "SHS-CORE-LCS": "LIFE AND CAREER SKILLS",
+            "SHS-CORE-PKLP": "PAG-AARAL NG KASAYSAYAN AT LIPUNANG PILIPINO",
+        }
+        if not payload.is_elective:
+            approved_name = approved_shs_core_subjects.get(payload.code)
+            if approved_name and payload.name != approved_name:
+                raise HTTPException(422, "Choose the approved SHS core subject name that matches its code.")
+            if not payload.id and not approved_name:
+                raise HTTPException(422, "Choose an approved SHS core subject.")
+
+    category_key = "SHS" if payload.category.strip().upper().startswith("SHS") else "JHS"
+    category_condition = _subject_category_condition(Subject, category_key)
+    duplicate_name_query = select(Subject.id).where(
+        Subject.deleted_at.is_(None),
+        category_condition,
+        func.upper(func.trim(Subject.name)) == payload.name.strip().upper(),
+    )
+    if payload.id:
+        duplicate_name_query = duplicate_name_query.where(Subject.id != payload.id)
+    if db.scalar(duplicate_name_query):
+        raise HTTPException(409, "A subject with this name already exists in this category. Edit the existing subject instead.")
+
+    if payload.code:
+        duplicate_code_query = select(Subject.id).where(
+            func.upper(func.trim(Subject.code)) == payload.code.strip().upper(),
+            or_(
+                Subject.deleted_at.is_(None),
+                ~category_condition,
+            ),
+        )
+        if payload.id:
+            duplicate_code_query = duplicate_code_query.where(Subject.id != payload.id)
+        if db.scalar(duplicate_code_query):
+            raise HTTPException(409, "A subject with this code already exists. Subject codes must be unique.")
     if payload.is_elective and not payload.category.strip().upper().startswith('SHS'):
         grades = payload.allowed_grades if payload.allowed_grades is not None else [7, 8, 9, 10]
         if not grades or any(grade not in (7, 8, 9, 10) for grade in grades):
@@ -2051,10 +2142,18 @@ def save_subject(payload: SubjectPayload, db: Session = Depends(get_db), actor: 
         raise HTTPException(status_code=422, detail="Choose the SHS track allowed to take this elective")
     if payload.category.strip().upper().startswith("SHS") and payload.is_elective:
         payload.elective_track = payload.elective_track.strip()
+        if payload.elective_track in SHS_TRACK_CLUSTERS:
+            payload.elective_cluster = (payload.elective_cluster or "").strip()
+            if payload.elective_cluster not in SHS_TRACK_CLUSTERS[payload.elective_track]:
+                raise HTTPException(status_code=422, detail="Choose a cluster available to the selected SHS track")
+        else:
+            payload.elective_cluster = None
     elif payload.is_elective:
         payload.elective_track = "STE"
+        payload.elective_cluster = None
     else:
         payload.elective_track = None
+        payload.elective_cluster = None
     return _save_reference(db, Subject, payload, actor)
 
 
@@ -2124,6 +2223,16 @@ def save_subject_teaching_assignments(
         if required_track and (section.track or "").strip().casefold() != required_track.casefold():
             scope = "track" if (subject.category or "JHS").strip().upper().startswith("SHS") else "program"
             raise HTTPException(status_code=422, detail=f"{subject.name} is only available to the {required_track} {scope}")
+        required_cluster = (subject.elective_cluster or "").strip()
+        if required_cluster and (section.track_cluster or "").strip().casefold() != required_cluster.casefold():
+            retained = db.scalar(select(SubjectTeachingAssignment.id).where(
+                SubjectTeachingAssignment.school_year_id == year.id,
+                SubjectTeachingAssignment.subject_id == subject.id,
+                SubjectTeachingAssignment.section_id == section.id,
+                SubjectTeachingAssignment.active.is_(True),
+            ))
+            if not retained:
+                raise HTTPException(status_code=422, detail=f"{subject.name} belongs to the {required_cluster} cluster; choose a matching section")
 
     existing_rows = db.scalars(select(SubjectTeachingAssignment).where(
         SubjectTeachingAssignment.school_year_id == year.id,
@@ -3070,6 +3179,7 @@ def list_gradebooks(
 ):
     query = select(Gradebook).options(
         joinedload(Gradebook.grading_period), joinedload(Gradebook.grading_policy),
+        joinedload(Gradebook.section),
     ).where(
         Gradebook.school_year.has(SchoolYear.deleted_at.is_(None)),
         Gradebook.grading_period.has(GradingPeriod.deleted_at.is_(None)),
@@ -3127,6 +3237,8 @@ def list_gradebooks(
             "term_order": b.term_order,
             "grade_name": b.grade_name,
             "section_name": b.section_name,
+            "section_track": b.section.track if b.section else None,
+            "section_cluster": b.section.track_cluster if b.section else None,
             "subject_name": b.subject_name,
             "learning_area": b.learning_area,
             "teacher_user_id": b.teacher_user_id,
@@ -3708,11 +3820,10 @@ def gradebook_report_xlsx_new(
     school_id: str = "",
     all_terms: bool = False,
     through_term: int | None = None,
+    draft_preview: bool = False,
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("teacher", "records_officer", "school_head")),
 ):
-    if through_term not in (None, 2) or (through_term and all_terms):
-        raise HTTPException(422, 'Choose a single term, Terms 1–2, or all three terms.')
     if (all_terms or through_term) and user.role not in {'teacher', 'records_officer'}:
         raise HTTPException(status_code=403, detail="Only the assigned teacher or records officer can export multiple terms")
     book = db.get(Gradebook, gradebook_id)
@@ -3720,23 +3831,46 @@ def gradebook_report_xlsx_new(
         ensure_gradebook_access(db, user, book)
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
-    if through_term and book.term_order != 2:
-        raise HTTPException(422, 'Select Term 2 to export Terms 1–2 together.')
-    if book.status not in {"Finalized", "Locked"}:
-        raise HTTPException(status_code=409, detail="Finalize the complete class record before exporting XLSX")
-    full = grading_service.get_gradebook_full(db, book.id)
-    if not full["students"] or full["statistics"]["incomplete"]:
-        raise HTTPException(status_code=409, detail="Cannot export official grades with missing or incomplete learner scores")
     path = generate_gradebook_report_xlsx(db, book.id, region=region, division=division, school_id=school_id,
-                                        allowed_teacher_id=user.id if user.role == 'teacher' else None, all_terms=all_terms, through_term=through_term)
+                                        allowed_teacher_id=user.id if user.role == 'teacher' else None, all_terms=all_terms, through_term=through_term,
+                                        draft_preview=draft_preview)
     report = register_report(db, path, "Grading Summary", {
         "gradebook_id": book.id, "grade": book.grade_name, "section": book.section_name,
         "school_year": book.school_year_name, "term_order": book.term_order, "subject": book.subject_name,
         "all_terms": all_terms,
         "through_term": through_term,
+        "draft_preview": draft_preview,
     }, user)
     return FileResponse(report.file_path, filename=report.filename,
                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.get("/api/gradebooks/{gradebook_id}/report/validation")
+def gradebook_report_validation(
+    gradebook_id: int,
+    region: str = "",
+    division: str = "",
+    school_id: str = "",
+    all_terms: bool = False,
+    through_term: int | None = None,
+    draft_preview: bool = False,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("teacher", "records_officer", "school_head")),
+):
+    if (all_terms or through_term) and user.role not in {'teacher', 'records_officer'}:
+        raise HTTPException(status_code=403, detail="Only the assigned teacher or records officer can validate multiple terms")
+    book = db.get(Gradebook, gradebook_id)
+    if book:
+        ensure_gradebook_access(db, user, book)
+    if not book:
+        raise HTTPException(status_code=404, detail="Gradebook was not found")
+    from .services.reports import validate_gradebook_report_xlsx
+    issues = validate_gradebook_report_xlsx(
+        db, book.id, region, division, school_id,
+        allowed_teacher_id=user.id if user.role == 'teacher' else None,
+        all_terms=all_terms, through_term=through_term, draft_preview=draft_preview,
+    )
+    return {"issues": issues}
 
 
 @app.get("/api/gradebooks/{gradebook_id}/report/print", response_class=HTMLResponse)

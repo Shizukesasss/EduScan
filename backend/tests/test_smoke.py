@@ -253,7 +253,7 @@ class EduScanSmokeTest(unittest.TestCase):
 
     def test_legacy_database_migration_repairs_partial_attendance_schema(self) -> None:
         from sqlalchemy import create_engine, inspect, text
-        from app.migrations import run_migrations
+        from app.migrations import MIGRATIONS, run_migrations
 
         legacy_path = Path(TEST_DIR.name) / "legacy-upgrade.db"
         legacy_engine = create_engine(f"sqlite:///{legacy_path.as_posix()}")
@@ -271,37 +271,13 @@ class EduScanSmokeTest(unittest.TestCase):
                 "sex VARCHAR(20), role VARCHAR(40), biometric_consent BOOLEAN, active BOOLEAN, created_at DATETIME)"
             ))
         applied = run_migrations(legacy_engine)
-        self.assertEqual(applied, [
-            "0002_attendance_reporting_controls",
-            "0003_attendance_reporting_schema_repair",
-            "0004_section_adviser_account_link",
-            "0005_station_security_sms_controls",
-            "0006_remove_station_direction_mode",
-            "0007_personnel_attendance_schedules",
-            "0008_completion_workflows",
-            "0009_grading_policy_engine",
-            "0010_subject_categories",
-            "0011_person_name_parts",
-            "0012_recoverable_academic_deletion",
-            "0013_recoverable_academic_calendar_deletion",
-            "0014_person_assignment",
-            "0015_remove_grade_level_sequence",
-            "0016_grade_adjustment_notifications",
-            "0017_subject_teaching_assignments_and_electives",
-            "0018_grade_criteria_adjustment_requests",
-            "0019_enrollment_departure_notes",
-            "0020_admin_schedules_and_report_roles",
-            "0021_jhs_elective_allowed_grades",
-            "0022_annual_advisers_demo_setup",
-            "0023_school_year_grading_reporting_mode",
-            "0024_replace_quarter_with_term_order",
-            "0025_person_date_of_birth",
-            "0026_annex_g_enrollment_and_comments",
-        ])
+        self.assertEqual(applied, [version for version, _ in MIGRATIONS[1:]])
         inspector = inspect(legacy_engine)
         self.assertTrue(inspector.has_table("attendance_reset_audits"))
         columns = {item["name"] for item in inspector.get_columns("persons")}
         self.assertTrue({"enrollment_status", "enrollment_start_date", "enrollment_end_date", "transfer_school"} <= columns)
+        self.assertIn("track_cluster", {item["name"] for item in inspector.get_columns("school_sections")})
+        self.assertIn("elective_cluster", {item["name"] for item in inspector.get_columns("subjects")})
         legacy_engine.dispose()
 
     def test_sms_gateway_reachability_check_does_not_send(self) -> None:
