@@ -1,124 +1,58 @@
 import React from 'react';
-import { AlertTriangle, XCircle, X } from 'lucide-react';
+import { X } from 'lucide-react';
+import ValidationIssueGroups from './ValidationIssueGroups';
 
 export default function ValidationChecklist({
+  issues = [],
   components = [],
   students = [],
-  status = 'Draft',
-  passingGrade = 75,
+  loading = false,
+  error = '',
+  checked = true,
   hasPendingEdits = false,
+  onRefresh,
   onClose,
 }) {
-  const totalWeight = components.reduce((sum, c) => sum + (Number(c.weight) || 0), 0);
-  const isWeightValid = Math.abs(totalWeight - 100.0) < 0.01;
-
-  const emptyComponents = components.filter((c) => !c.items || c.items.length === 0);
-  const hasItemsInAllComponents = components.length > 0 && emptyComponents.length === 0;
-
-  const incompleteStudents = students.filter((s) => !s.complete || s.reported_grade == null);
-  const allScoresComplete = students.length > 0 && incompleteStudents.length === 0;
-
-  const checks = [
-    {
-      id: 'weights',
-      title: 'Component Weights Total 100%',
-      description: isWeightValid
-        ? 'Weights sum to exactly 100% across all components.'
-        : `Current total is ${totalWeight.toFixed(1)}%. Weights must equal 100.0%.`,
-      status: isWeightValid ? 'pass' : 'error',
-    },
-    {
-      id: 'items',
-      title: 'Assessment Items Defined',
-      description: hasItemsInAllComponents
-        ? `All ${components.length} component(s) have assessment activities defined.`
-        : emptyComponents.length > 0
-        ? `Component(s) without items: ${emptyComponents.map((c) => c.name).join(', ')}.`
-        : 'No components defined for this gradebook.',
-      status: hasItemsInAllComponents ? 'pass' : 'error',
-    },
-    {
-      id: 'scores',
-      title: 'Learner Scores Completion',
-      description: hasPendingEdits
-        ? 'Unsaved score changes are waiting. Save them to refresh this completion check.'
-        : allScoresComplete
-        ? `All ${students.length} enrolled learner(s) have complete computed scores.`
-        : `${incompleteStudents.length} of ${students.length} learner(s) have missing, excused, or blank scores.`,
-      status: hasPendingEdits ? 'warn' : allScoresComplete ? 'pass' : status === 'Draft' ? 'warn' : 'error',
-      hint: hasPendingEdits ? 'The checklist reflects saved scores; pending edits are visible in the grade sheet.' : 'Required prior to Finalization. Drafts may be saved with partial scores.',
-    },
-    {
-      id: 'policy',
-      title: 'DepEd Transmutation & Passing Rule',
-      description: `Official transmutation active with passing threshold set at ${passingGrade}.`,
-      status: 'pass',
-    },
-  ];
-
-  const hasErrors = checks.some((c) => c.status === 'error');
-  const hasWarnings = checks.some((c) => c.status === 'warn');
+  const finalizationCount = issues.filter((issue) => issue.blocks?.includes('finalization')).length;
+  const exportCount = issues.filter((issue) => issue.blocks?.includes('export')).length;
+  const hasAssessmentIssue = issues.some((issue) => issue.group === 'assessment_setup' || /WEIGHT|POLICY/.test(issue.code || ''));
+  const hasScoreIssue = issues.some((issue) => issue.group === 'scores');
+  const passedChecks = [];
+  if (components.length && !hasAssessmentIssue) passedChecks.push('Assessment components and weights are set.');
+  if (students.length && !hasScoreIssue) passedChecks.push(`All ${students.length} learners have complete scores.`);
 
   return (
-    <div className="validation-checklist-panel card-static">
+    <section className="validation-checklist-panel card-static" aria-labelledby="validation-checklist-title">
       <div className="section-heading">
         <div>
           <p className="eyebrow">Quality & Compliance Guard</p>
-          <h3>Pre-Flight Validation Checklist</h3>
+          <h3 id="validation-checklist-title">Gradebook validation</h3>
         </div>
-        {onClose && (
-          <button type="button" className="btn-icon" onClick={onClose} aria-label="Close checklist">
-            <X size={18} /><span className="control-label">Close</span>
-          </button>
-        )}
+        {onClose && <button type="button" className="btn-icon" onClick={onClose} aria-label="Close checklist">
+          <X size={18} /><span className="control-label">Close</span>
+        </button>}
       </div>
 
-      <div className="validation-summary-banner">
-        {hasErrors ? (
-          <div className="notice notice-danger compact-notice">
-            <XCircle size={18} />
-            <span><strong>Finalization Blocked:</strong> Resolve these errors before finalizing.</span>
-          </div>
-        ) : hasWarnings ? (
-          <div className="notice notice-warning compact-notice">
-            <AlertTriangle size={18} />
-            <span><strong>Draft only:</strong> Partial scores may be saved. Complete every activity used in this class for every learner before finalizing.</span>
-          </div>
-        ) : null}
-      </div>
-
-      <div className="validation-items-list">
-        {checks.map((check) => {
-          const statusMeta = {
-            pass: { label: 'Pass', barClass: 'val-bar-pass' },
-            warn: { label: 'Warning', barClass: 'val-bar-warn' },
-            error: { label: 'Error', barClass: 'val-bar-error' },
-          }[check.status];
-
-          return (
-            <div key={check.id} className={`validation-item validation-item-${check.status}`}>
-              <div className={`validation-status-bar ${statusMeta.barClass}`} />
-              <div className="validation-item-content">
-                <div className="validation-item-header">
-                  <strong>{check.title}</strong>
-                  <span className={`val-status-badge val-badge-${check.status}`}>{statusMeta.label}</span>
-                </div>
-                <p className="validation-item-desc">{check.description}</p>
-                {check.hint && <p className="validation-item-hint">{check.hint}</p>}
-                {check.action && (
-                  <button
-                    type="button"
-                    className="val-action-btn"
-                    onClick={check.action.onClick}
-                  >
-                    {check.action.label} →
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
+      {hasPendingEdits && <p className="notice notice-warning compact-notice" role="status">
+        Save pending scores before using saved-record export validation.
+      </p>}
+      {!loading && checked && !error && (
+        <div className="validation-summary-banner" role="status">
+          <p className={finalizationCount ? 'notice notice-danger compact-notice' : 'notice notice-success compact-notice'}>
+            Finalization: {finalizationCount ? `${finalizationCount} blocker${finalizationCount === 1 ? '' : 's'}` : 'No blockers'}
+          </p>
+          <p className={exportCount ? 'notice notice-danger compact-notice' : 'notice notice-success compact-notice'}>
+            Export: {exportCount ? `${exportCount} blocker${exportCount === 1 ? '' : 's'}` : 'No blockers'}
+          </p>
+        </div>
+      )}
+      <ValidationIssueGroups issues={issues} loading={loading} error={error} checked={checked} onRefresh={onRefresh} />
+      {!loading && checked && !error && passedChecks.length > 0 && (
+        <section className="validation-passing-checks" aria-labelledby="validation-passing-title">
+          <h4 id="validation-passing-title">Passed checks</h4>
+          <ul>{passedChecks.map((check) => <li key={check}>{check}</li>)}</ul>
+        </section>
+      )}
+    </section>
   );
 }

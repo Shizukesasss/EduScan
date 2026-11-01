@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { availableOptionId, isJuniorHighGrade } from './academicContext.js';
+import { availableOptionId, isJuniorHighGrade, subjectMatchesGrade } from './academicContext.js';
+
+test('official Work Immersion is assigned only in Grade 12', () => {
+  for (const name of ['WORK IMMERSION FOR ACADEMIC TRACK', 'WORK IMMERSION FOR TECH-PRO TRACK (320 HOURS)']) {
+    const subject = { category: 'SHS', is_elective: true, name };
+    assert.equal(subjectMatchesGrade(subject, 'Grade 11'), false);
+    assert.equal(subjectMatchesGrade(subject, 'Grade 12'), true);
+  }
+});
 
 test('junior-high programs apply only to grades 7 through 10', () => {
   for (const grade of ['7', 'Grade 8', '9', 'grade 10']) assert.equal(isJuniorHighGrade(grade), true);

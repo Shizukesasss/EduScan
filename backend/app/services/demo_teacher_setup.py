@@ -25,7 +25,7 @@ def _state(db, year_id):
         (GradeLevel, ('id', 'name', 'active', 'deleted_at')),
         (SchoolYear, ('id', 'name', 'active', 'deleted_at')),
         (SchoolSection, ('id', 'grade_level_id', 'name', 'track', 'active', 'deleted_at')),
-        (Subject, ('id', 'name', 'category', 'is_elective', 'elective_track', 'allowed_grades_json', 'active', 'deleted_at')),
+        (Subject, ('id', 'name', 'category', 'is_elective', 'elective_track', 'elective_cluster', 'allowed_grades_json', 'active', 'deleted_at')),
         (SubjectTeachingAssignment, ('id', 'school_year_id', 'subject_id', 'section_id', 'teacher_user_id', 'active')),
         (SectionAdviserAssignment, ('id', 'school_year_id', 'section_id', 'teacher_user_id')),
         (Gradebook, ('id', 'school_year_id', 'section_id', 'subject_id', 'teacher_user_id', 'status')),
@@ -78,7 +78,11 @@ def preview_demo_teacher_setup(db, school_year_id, section_ids, actor):
     for section in sections:
         for subject in subjects:
             track = elective_track_for_subject(subject.category, subject.is_elective, subject.elective_track)
-            if subject_matches_grade(subject, section.grade_level.name) and (not track or track.casefold() == (section.track or '').casefold()) and (section.id, subject.id) not in reserved:
+            cluster = (subject.elective_cluster or '').strip()
+            if (subject_matches_grade(subject, section.grade_level.name)
+                    and (not track or track.casefold() == (section.track or '').casefold())
+                    and (not cluster or cluster.casefold() == (section.track_cluster or '').casefold())
+                    and (section.id, subject.id) not in reserved):
                 groups[(section.grade_level_id, subject.id)].append(section.id)
     proposals = [dict(grade_level_id=grade, subject_id=subject, section_ids=ids, adviser_section_id=None) for (grade, subject), ids in sorted(groups.items())]
     unresolved = []

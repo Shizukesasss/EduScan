@@ -13,6 +13,7 @@ from ..models import GradingPeriod, Subject
 from .academic_context import is_junior_high
 from .grading import get_gradebook_full
 from .grading_engine import apply_transmutation, round_value
+from .gradebook_validation import collect_common_export_issues, create_validation_issue, export_rule_issue
 from .settings_store import get_json
 
 
@@ -260,8 +261,134 @@ def fill_term(full, kind, sheet_name, changes, cached, males, females, table, fo
             )
 
 
+def validate_jhs_class_record_export(
+    db, book, full, kind, template, region, division, school_id,
+    allowed_teacher_id=None, all_terms=False, through_term=None,
+):
+    """Read-only checks for the fixed JHS workbook before any XLSX is written."""
+    issues = collect_common_export_issues(full, region, division, school_id)
+    gradebook = full.get('gradebook', {})
+    if not is_junior_high(gradebook.get('grade_name')):
+        issues.append(create_validation_issue(
+            'JHS_GRADE_UNSUPPORTED', 'export_requirements',
+            {'type': 'gradebook', 'field': 'Grade', 'value': gradebook.get('grade_name')},
+            'This fixed subject workbook supports Grade 7 through Grade 10 only.',
+            'Select a Grade 7–10 class record or use the matching gradebook export format.', ['export'],
+        ))
+    term = gradebook.get('term_order')
+    if term not in (1, 2, 3) or through_term not in (None, 2) or (through_term and all_terms) or (through_term == 2 and term != 2):
+        issues.append(create_validation_issue(
+            'EXPORT_TERM_SCOPE_INVALID', 'export_requirements',
+            {'type': 'setting', 'field': 'Export term', 'term': term},
+            'The selected export term scope is not available for this class record.',
+            'Choose the current term, Terms 1–2 from Term 2, or all three terms.', ['export'],
+        ))
+    if not template.is_file():
+        issues.append(create_validation_issue(
+            'EXPORT_TEMPLATE_MISSING', 'export_requirements',
+            {'type': 'setting', 'field': 'Class record template', 'template': template.name},
+            f"The required subject workbook '{template.name}' is missing.",
+            'Restore the approved class record workbook in the subject templates folder.', ['export'],
+        ))
+        return issues
+
+    try:
+        from .reports import _student_groups
+        males, females = _student_groups(full.get('students', []))
+    except HTTPException as exc:
+        issues.append(export_rule_issue(exc.detail, full, template_name='fixed JHS workbook'))
+        return issues
+
+    # Reuse the exact spreadsheet calculation path in memory. This reads the template
+    # and fills temporary dictionaries only; it never creates or registers an XLSX.
+    if not any(issue['code'] in {'SCORE_MISSING', 'SCORE_INVALID'} for issue in issues):
+        try:
+            fill_term(full, kind, 'Term 1', {}, {}, males, females, template_table(template), {})
+        except HTTPException as exc:
+            issues.append(export_rule_issue(exc.detail, full, template_name='fixed JHS workbook'))
+        except AssertionError:
+            issues.append(export_rule_issue(
+                'The workbook calculation differs from the saved grades.', full, template_name='fixed JHS workbook',
+                group='grade_calculation',
+            ))
+
+    periods = tuple(range(1, (through_term or 3) + 1)) if all_terms or through_term else (term,)
+    query = select(Gradebook).where(
+        Gradebook.school_year_id == book.school_year_id,
+        Gradebook.grade_level_id == book.grade_level_id,
+        Gradebook.section_id == book.section_id,
+        Gradebook.grading_period.has(GradingPeriod.deleted_at.is_(None)),
+        Gradebook.subject.has(Subject.deleted_at.is_(None)),
+        Gradebook.term_order.in_(periods),
+    )
+    if kind != 'mapeh':
+        query = query.where(Gradebook.subject_id == book.subject_id)
+    if book.learning_area:
+        query = query.where(
+            Gradebook.subject_id == book.subject_id,
+            Gradebook.learning_area.in_(['music_arts', 'pe_health']),
+            Gradebook.teacher_user_id == book.teacher_user_id,
+            Gradebook.is_legacy_readonly.is_(False),
+        )
+    elif kind == 'mapeh':
+        query = query.where(Gradebook.learning_area == '')
+        if book.is_legacy_readonly:
+            query = query.where(Gradebook.subject_id == book.subject_id, Gradebook.teacher_user_id == book.teacher_user_id)
+    if allowed_teacher_id is not None:
+        query = query.where(Gradebook.teacher_user_id == allowed_teacher_id)
+    if all_terms or through_term:
+        query = query.where(Gradebook.teacher_user_id == book.teacher_user_id)
+
+    matched = {}
+    from .grading import get_gradebook_full
+    from .reports import _complete_finalized_record
+    for sibling in db.scalars(query.order_by(Gradebook.term_order)).all():
+        try:
+            sibling_kind, _ = subject_template(sibling.subject_name, sibling.subject.is_elective is True)
+        except HTTPException:
+            continue
+        if sibling_kind != kind or sibling.term_order not in periods:
+            continue
+        suffix = (' PE and H' if sibling.learning_area == 'pe_health' or (not sibling.learning_area and 'HEALTH' in sibling.subject_name.upper()) else ' M and A') if kind == 'mapeh' else ''
+        sheet_name = f'TERM {sibling.term_order}{suffix}'
+        if sheet_name in matched:
+            issues.append(create_validation_issue(
+                'EXPORT_DUPLICATE_TERM_RECORD', 'export_requirements',
+                {'type': 'gradebook', 'term': sibling.term_order, 'subjectName': gradebook.get('subject_name')},
+                f'Multiple finalized records match the same workbook area for Term {sibling.term_order}.',
+                'Resolve the duplicate subject assignment for this term before exporting.', ['export'],
+            ))
+        matched[sheet_name] = sibling
+        sibling_full = full if sibling.id == book.id else get_gradebook_full(db, sibling.id)
+        if not _complete_finalized_record(sibling_full):
+            issues.append(create_validation_issue(
+                'EXPORT_TERM_NOT_COMPLETE', 'export_requirements',
+                {'type': 'gradebook', 'term': sibling.term_order, 'subjectName': sibling.subject_name},
+                f'Term {sibling.term_order} is not finalized with complete learner scores.',
+                'Complete and finalize every requested term before exporting the fixed workbook.', ['export'],
+            ))
+
+    suffix = (' PE and H' if book.learning_area == 'pe_health' or (not book.learning_area and 'HEALTH' in gradebook.get('subject_name', '').upper()) else ' M and A') if kind == 'mapeh' else ''
+    required = ({f'TERM {period}{area}' for period in periods for area in (' M and A', ' PE and H')}
+                if book.learning_area else {f'TERM {period}{suffix}' for period in periods})
+    for missing in sorted(required - set(matched)):
+        term_number = next((period for period in periods if f'TERM {period}' in missing), term)
+        issues.append(create_validation_issue(
+            'EXPORT_TERM_RECORD_MISSING', 'export_requirements',
+            {'type': 'gradebook', 'term': term_number, 'subjectName': gradebook.get('subject_name')},
+            f'No saved class record matches {missing.replace("TERM ", "Term ")} for this section and subject.',
+            'Complete the matching subject or MAPEH area record before exporting.', ['export'],
+        ))
+    return issues
+
+
 def export_jhs(db, book, full, kind, template, region, division, school_id, allowed_teacher_id=None, all_terms=False, through_term=None):
     from .reports import _student_groups, _complete_finalized_record, _write_class_record_workbook, _safe_name, new_report_path, EXPORT_DIR
+    from .gradebook_validation import raise_export_validation
+    raise_export_validation(validate_jhs_class_record_export(
+        db, book, full, kind, template, region, division, school_id,
+        allowed_teacher_id, all_terms=all_terms, through_term=through_term,
+    ))
     if not template.is_file():
         raise HTTPException(409, f"The required subject workbook '{template.name}' is missing.")
     if not region.strip() or not division.strip() or not school_id.strip().isdigit():

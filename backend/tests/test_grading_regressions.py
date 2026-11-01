@@ -85,6 +85,35 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.assertEqual(full['gradebook']['grade_name'], '11')
         self.assertEqual({row['person_id'] for row in full['students']}, {self.first.id, self.second.id})
 
+    def test_shs_track_and_cluster_are_in_full_and_list_gradebook_responses(self):
+        from app.main import list_gradebooks
+
+        self.section.track = 'Academic Track'
+        self.section.track_cluster = 'Business and Entrepreneurship'
+        book = self.create()
+
+        full = grading.get_gradebook_full(self.db, book.id)
+        listed = next(row for row in list_gradebooks(db=self.db, user=self.admin) if row['id'] == book.id)
+
+        expected = ('Academic Track', 'Business and Entrepreneurship')
+        self.assertEqual((full['gradebook']['section_track'], full['gradebook']['section_cluster']), expected)
+        self.assertEqual((listed['section_track'], listed['section_cluster']), expected)
+
+    def test_shs_elective_subject_metadata_is_in_full_gradebook_response(self):
+        self.section.track = 'Academic Track'
+        self.section.track_cluster = 'Field Experience'
+        self.subject.category = 'SHS'
+        self.subject.is_elective = True
+        self.subject.elective_track = 'Academic Track'
+        self.subject.elective_cluster = 'Field Experience'
+        book = self.create(self.general)
+
+        gradebook = grading.get_gradebook_full(self.db, book.id)['gradebook']
+
+        self.assertEqual(gradebook.get('subject_category'), 'SHS')
+        self.assertIs(gradebook.get('subject_is_elective'), True)
+        self.assertEqual(gradebook.get('subject_elective_cluster'), 'Field Experience')
+
     def test_school_head_access_is_read_only(self):
         from app.main import app, list_gradebooks, get_gradebook_endpoint, report_history
         from app.models import GeneratedReport

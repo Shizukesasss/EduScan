@@ -2,7 +2,9 @@ import { MAPEH_AREAS, formatMapehFinalizeIssue, mapehAreaContext, sameMapehConte
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { api, auth } from '../../api/client';
 import { normalizeGradeName, subjectMatchesGrade, availableOptionId } from '../../services/academicContext';
-import { buildScoreUpdates, validateGradebookForFinalization } from '../../services/gradingWorkflow';
+import { buildGradebookExportQuery, filterPreviewIssues } from '../../services/gradebookExport';
+import { buildScoreUpdates } from '../../services/gradingWorkflow';
+import { collectGradebookValidationIssues, mergeValidationIssues, normalizeValidationIssues } from '../../services/gradebookValidation';
 import { groupAdminGradebooks } from '../../services/gradebookSelection';
 import { watchGradebookUpdates } from '../../services/gradebookRefresh';
 
@@ -69,6 +71,9 @@ export default function Grading() {
   const [showAudit, setShowAudit] = useState(false);
   const [showAdjustments, setShowAdjustments] = useState(false);
   const [showValidation, setShowValidation] = useState(false);
+  const [validationIssues, setValidationIssues] = useState([]);
+  const [validationError, setValidationError] = useState('');
+  const [validationLoading, setValidationLoading] = useState(false);
   const [breakdownData, setBreakdownData] = useState(null);
   const [auditList, setAuditList] = useState([]);
   const [adjustmentsList, setAdjustmentsList] = useState([]);
@@ -249,6 +254,8 @@ export default function Grading() {
       if (!subjectMatchesGrade(s, structure.grade_levels.find(grade => grade.id === Number(gradeId))?.name) && !(isTeacher && assignedHere)) return false;
       if (s.is_elective && s.elective_track
         && selectedSection?.track?.trim().toLowerCase() !== s.elective_track.trim().toLowerCase()) return false;
+      if (s.elective_cluster
+        && selectedSection?.track_cluster?.trim().toLowerCase() !== s.elective_cluster.trim().toLowerCase()) return false;
       if (!isTeacher) return true;
       if (teacherSubjectIds.size > 1) return false;
       const subjectAssignments = assignments.filter((assignment) => assignment.subject_id === s.id);
@@ -476,70 +483,118 @@ export default function Grading() {
   };
 
   // 6. Workflow Transitions
-  const validateHeaderFields = () => {
-    const missingFields = [];
-    if (!region.trim()) missingFields.push('REGION');
-    if (!division.trim()) missingFields.push('DIVISION');
-    if (!schoolId.trim()) missingFields.push('SCHOOL ID');
-
-    if (missingFields.length > 0) {
-      showError(`Please complete the following fields: ${missingFields.join(', ')}`);
-      return false;
-    }
-
-    const romanRegex = /^[IVXLCDM\s-]+$/i;
-
-    if (!romanRegex.test(region.trim())) {
-      showError('REGION must use ONLY Roman Numerals (e.g., I, II, IV, IV-A).');
-      return false;
-    }
-
-    if (!/^\d+$/.test(schoolId.trim())) {
-      showError('SCHOOL ID must contain only numbers.');
-      return false;
-    }
-
-    return true;
-  };
-
   const handleValidateFinalize = async () => {
-    // 1. Validate required header fields
-    if (!validateHeaderFields()) {
-      return false;
+    const gradebook = fullGradebook?.gradebook;
+    const context = {
+      ...(gradebook?.learning_area ? { learningArea: activeMapehArea?.label || 'MAPEH learning area' } : {}),
+      term: gradebook?.term_order,
+    };
+    const issues = collectGradebookValidationIssues({
+      gradebook,
+      students: fullGradebook?.students || [],
+      components: fullGradebook?.components || [],
+      scoreEdits,
+      statusEdits,
+      region,
+      division,
+      schoolId,
+      hasPendingEdits: isDirty,
+    }).filter((issue) => issue.blocks.includes('finalization'));
+
+    if (issues.length) {
+      return { issues, context, message: 'Resolve the listed issues before finalizing this gradebook.' };
     }
 
-    try {
-      const valid = validateGradebookForFinalization(fullGradebook.students, fullGradebook.components, scoreEdits, statusEdits);
-      if (fullGradebook.gradebook.learning_area) {
+    if (gradebook?.learning_area) {
+      try {
         const validation = await api.post(`/gradebooks/${gradebookId}/validate`, {});
         const partnerIssue = validation.issues?.find(issue => issue.code === 'MAPEH_PARTNER_INCOMPLETE');
         if (partnerIssue) {
-          showError(partnerIssue.message);
-          return false;
+          return {
+            issues: [{
+              code: partnerIssue.code,
+              group: 'assessment_setup',
+              severity: 'blocker',
+              location: { type: 'subject', subjectName: activeMapehArea?.label || 'MAPEH learning area' },
+              message: partnerIssue.message,
+              correction: 'Complete the matching MAPEH learning-area class record for this term.',
+              blocks: ['finalization', 'export'],
+            }],
+            context,
+          };
         }
+      } catch (error) {
+        const message = formatMapehFinalizeIssue(error.message, activeMapehArea?.label || 'learning area', gradebook.term_order);
+        showError(message);
+        return false;
       }
-      return valid;
-    } catch (error) {
-      const gradebook=fullGradebook?.gradebook;
-      const context = {
-        ...(gradebook?.learning_area ? { learningArea: activeMapehArea?.label || 'MAPEH learning area' } : {}),
-        term: gradebook?.term_order,
-      };
-      if (error.finalizationIssues) {
-        return {
-          ...error.finalizationIssues,
-          message: gradebook?.learning_area
-            ? formatMapehFinalizeIssue(error.message, context.learningArea, gradebook.term_order)
-            : error.message,
-          context,
-        };
-      }
-      const message=gradebook?.learning_area
-        ? formatMapehFinalizeIssue(error.message,activeMapehArea?.label||'learning area',gradebook.term_order)
-        : error.message;
-      showError(message);
-      return false;
     }
+    return true;
+  };
+
+  const handleValidateExport = async (scope = 'term') => {
+    if (!gradebookId || !fullGradebook) return { issues: [] };
+    const draftPreview = scope === 'draft_preview';
+    const localIssues = collectGradebookValidationIssues({
+      gradebook: fullGradebook.gradebook,
+      students: fullGradebook.students || [],
+      components: fullGradebook.components || [],
+      scoreEdits,
+      statusEdits,
+      region,
+      division,
+      schoolId,
+      hasPendingEdits: isDirty,
+    });
+    if (isDirty) {
+      const exportIssues = localIssues.filter((issue) => issue.blocks.includes('export'));
+      return { issues: filterPreviewIssues(exportIssues, draftPreview) };
+    }
+
+    const gb = fullGradebook.gradebook;
+    const query = buildGradebookExportQuery({
+      region,
+      division,
+      schoolId,
+      scope: draftPreview ? 'term' : scope,
+      termOrder: gb.term_order,
+      draftPreview,
+    });
+    try {
+      const result = await api.get(`/gradebooks/${gradebookId}/report/validation?${query.toString()}`);
+      return { issues: normalizeValidationIssues(result.issues || []), checked: true };
+    } catch (error) {
+      if (Array.isArray(error.details?.issues)) {
+        return { issues: normalizeValidationIssues(error.details.issues), checked: true };
+      }
+      return { issues: [], error: error.message || 'Could not validate this export.', checked: false };
+    }
+  };
+
+  const handleRefreshValidation = async () => {
+    if (!fullGradebook) return;
+    setValidationLoading(true);
+    setValidationError('');
+    const localIssues = collectGradebookValidationIssues({
+      gradebook: fullGradebook.gradebook,
+      students: fullGradebook.students || [],
+      components: fullGradebook.components || [],
+      scoreEdits,
+      statusEdits,
+      region,
+      division,
+      schoolId,
+      hasPendingEdits: isDirty,
+    });
+    if (isDirty) {
+      setValidationIssues(localIssues);
+      setValidationLoading(false);
+      return;
+    }
+    const result = await handleValidateExport('term');
+    setValidationIssues(mergeValidationIssues(localIssues, result.issues || []));
+    setValidationError(result.error || '');
+    setValidationLoading(false);
   };
 
   const handleFinalizeGradebook = async (reason) => {
@@ -633,32 +688,50 @@ export default function Grading() {
   };
 
   // 9. Export & Print Handlers
-  const handleExportXlsx = async (allTerms = false, throughTerm = null) => {
+  const handleExportXlsx = async (allTerms = false, throughTerm = null, draftPreview = false) => {
     if (!gradebookId || !fullGradebook) return;
-    if (isDirty) return showError('Save your scores before exporting the class record.');
-
-    // Validate required fields
-    if (!validateHeaderFields()) {
-      return;
+    if (isDirty) {
+      const localIssues = collectGradebookValidationIssues({
+        gradebook: fullGradebook.gradebook,
+        students: fullGradebook.students || [],
+        components: fullGradebook.components || [],
+        scoreEdits,
+        statusEdits,
+        region,
+        division,
+        schoolId,
+        hasPendingEdits: true,
+      });
+      const exportIssues = localIssues.filter((issue) => issue.blocks.includes('export'));
+      return { issues: filterPreviewIssues(exportIssues, draftPreview) };
     }
 
     const gb = fullGradebook.gradebook;
-    const filename = `ClassRecord-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-${throughTerm === 2 ? 'Terms1-2' : allTerms ? 'AllTerms' : `Term${gb.term_order}`}.xlsx`;
+    const baseFilename = `ClassRecord-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-${throughTerm === 2 ? 'Terms1-2' : allTerms ? 'AllTerms' : `Term${gb.term_order}`}.xlsx`;
+    const filename = `${draftPreview ? 'DRAFT-PREVIEW-NOT-FINAL-' : ''}${baseFilename}`;
     try {
-      const q = new URLSearchParams({
+      const q = buildGradebookExportQuery({
         region,
         division,
-        school_id: schoolId,
-        all_terms: String(allTerms)
+        schoolId,
+        scope: allTerms || throughTerm ? 'all_terms' : 'term',
+        termOrder: throughTerm || gb.term_order,
+        draftPreview,
       });
-      if (throughTerm) q.set('through_term', String(throughTerm));
       await api.download(`/gradebooks/${gradebookId}/report.xlsx?${q.toString()}`, filename);
+      return { ok: true };
     } catch (err) {
-      showError(err.message);
+      if (Array.isArray(err.details?.issues)) return { issues: normalizeValidationIssues(err.details.issues) };
+      throw err;
     }
   };
 
   const gb = fullGradebook?.gradebook;
+  const exportSubject = gb ? {
+    category: gb.subject_category,
+    is_elective: gb.subject_is_elective,
+    elective_cluster: gb.subject_elective_cluster,
+  } : null;
   const activeMapehAreaId = isReviewer ? (gb?.learning_area || 'legacy') : mapehArea;
   const activeMapehArea = MAPEH_AREAS.find((area) => area.id === activeMapehAreaId);
   const sheetLoading = structureLoading || loading;
@@ -775,6 +848,9 @@ export default function Grading() {
                     const area = book.learning_area === 'music_arts' ? 'Music and Arts'
                       : book.learning_area === 'pe_health' ? 'PE and Health'
                         : book.is_legacy_readonly ? 'Legacy record' : '';
+                    const sectionTrack = ['Academic Track', 'Technical Professional (TechPro) Track'].includes(book.section_track)
+                      && ['11', '12'].includes(String(normalizeGradeName(book.grade_name) || '').trim())
+                      ? book.section_track : '';
                     return <button type="button" key={book.id}
                       className={`admin-gradebook-record${selected ? ' is-selected' : ''}`}
                       aria-pressed={selected}
@@ -789,7 +865,7 @@ export default function Grading() {
                         <span className={`admin-gradebook-record__status ${statusClass}`}>{status}</span>
                       </span>
                       <span className="admin-gradebook-record__details">
-                        <span>Grade {normalizeGradeName(book.grade_name) || '—'} · Section {book.section_name || 'Unassigned'}</span>
+                        <span>Grade {normalizeGradeName(book.grade_name) || '—'} · Section {book.section_name || 'Unassigned'}{sectionTrack ? ` · ${sectionTrack}` : ''}</span>
                         <span>Teacher: {book.teacher_name || 'Unassigned'}</span>
                       </span>
                       {(area || selected) && <span className="admin-gradebook-record__footer">
@@ -847,11 +923,14 @@ export default function Grading() {
                   {/* Validation Checklist Panel (when toggled) */}
                   {showValidation && sheetData && (
                     <ValidationChecklist
-                      components={fullGradebook.components}
-                      students={fullGradebook.students}
-                      status={fullGradebook.gradebook?.status}
-                      passingGrade={fullGradebook.gradebook?.passing_grade || 75}
+                      issues={validationIssues}
+                      components={fullGradebook.components || []}
+                      students={fullGradebook.students || []}
+                      loading={validationLoading}
+                      error={validationError}
+                      checked={Boolean(validationIssues.length) || (!validationLoading && !validationError)}
                       hasPendingEdits={isDirty}
+                      onRefresh={handleRefreshValidation}
                       onClose={() => setShowValidation(false)}
                     />
                   )}
@@ -920,6 +999,8 @@ export default function Grading() {
                   {/* Action Toolbar */}
                   {sheetData && <GradebookActions
                     gradebook={fullGradebook.gradebook}
+                    exportSubject={exportSubject}
+                    assessmentComponents={fullGradebook.components || []}
                     isDirty={isDirty}
                     isSaving={saving}
                     onSaveDraft={handleSaveDraft}
@@ -930,9 +1011,17 @@ export default function Grading() {
                     onOpenAudit={handleOpenAudit}
                     onOpenAdjustments={handleOpenAdjustments}
                     adjustmentCount={teacherAdjustmentCount}
-                    onToggleValidation={() => setShowValidation((prev) => !prev)}
+                    onToggleValidation={() => {
+                      if (showValidation) setShowValidation(false);
+                      else {
+                        setShowValidation(true);
+                        void handleRefreshValidation();
+                      }
+                    }}
                     onExportXlsx={handleExportXlsx}
                     onExportAllTerms={() => Number(fullGradebook.gradebook.term_order) === 2 ? handleExportXlsx(false, 2) : handleExportXlsx(true)}
+                    onExportDraftPreview={() => handleExportXlsx(false, null, true)}
+                    onValidateExport={handleValidateExport}
                     disabled={loading || saving}
                     onValidateFinalize={handleValidateFinalize}
                     finalizationContext={{

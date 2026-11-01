@@ -1,6 +1,28 @@
 """Shared interpretation of academic labels without changing stored records."""
 import re
 
+SHS_TRACK_CLUSTERS = {
+    "Academic Track": (
+        "Arts, Social Sciences, and Humanities",
+        "Science, Technology, Engineering, and Mathematics (STEM)",
+        "Sports, Health, and Wellness",
+        "Business and Entrepreneurship",
+        "Field Experience",
+    ),
+    "Technical Professional (TechPro) Track": (
+        "Aesthetic, Wellness, and Human Care",
+        "Agri-Fishery Business and Food Innovation",
+        "Artisanry and Creative Enterprise",
+        "Automotive and Small Engine Technologies",
+        "Construction and Building Technologies",
+        "Creative Arts and Design Technologies",
+        "Hospitality and Tourism",
+        "ICT Support and Computer Programming Technologies",
+        "Industrial Technologies",
+        "Maritime",
+    ),
+}
+
 
 def normalize_grade_name(value: str) -> str:
     return re.sub(r"^grade\s*", "", str(value).strip(), flags=re.IGNORECASE).strip()
@@ -23,6 +45,8 @@ def subject_matches_grade(subject, grade_name: str) -> bool:
     senior = (subject.category or 'JHS').strip().upper().startswith('SHS')
     if senior != is_senior_high(grade_name):
         return False
+    if senior and subject.is_elective and "work immersion" in (subject.name or "").casefold():
+        return normalize_grade_name(grade_name) == "12"
     if not senior and subject.is_elective:
         return is_junior_high(grade_name) and int(normalize_grade_name(grade_name)) in subject.allowed_grades
     return True

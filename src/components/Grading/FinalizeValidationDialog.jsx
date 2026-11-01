@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import ValidationIssueGroups from './ValidationIssueGroups';
 
 export default function FinalizeValidationDialog({ issue, onClose, returnFocusRef }) {
   const dialogRef = useRef(null);
@@ -18,6 +19,7 @@ export default function FinalizeValidationDialog({ issue, onClose, returnFocusRe
   const { learningArea, term } = issue.context || {};
   const hasLearners = issue.learners?.length > 0;
   const hasEmptyComponents = issue.componentsWithoutScores?.length > 0;
+  const hasStructuredIssues = Array.isArray(issue.issues);
 
   const handleKeyDown = (event) => {
     if (event.key === 'Escape') {
@@ -51,13 +53,18 @@ export default function FinalizeValidationDialog({ issue, onClose, returnFocusRe
           <h3 id="finalize-validation-title">{learningArea ? `Cannot finalize ${learningArea}` : 'Cannot finalize gradebook'}{term ? ` · Term ${term}` : ''}</h3>
         </div>
         <div className="modal-body" id="finalize-validation-description">
-          {issue.message && (!hasLearners && !hasEmptyComponents) ? (
+          {hasStructuredIssues ? (
+            <>
+              <p className="text-muted">Resolve each item below, then return to the gradebook and try again.</p>
+              <ValidationIssueGroups issues={issue.issues} action="finalization" />
+            </>
+          ) : issue.message && (!hasLearners && !hasEmptyComponents) ? (
             <p className="text-muted" style={{ whiteSpace: 'pre-line' }}>{issue.message}</p>
           ) : (
             <p className="text-muted">Enter a score for each listed activity before finalizing.</p>
           )}
 
-          {hasLearners && (
+          {!hasStructuredIssues && hasLearners && (
             <div className="mb-3">
               <h4 className="mb-2">Learners with incomplete scores</h4>
               <div className="validation-items-list">
@@ -75,7 +82,7 @@ export default function FinalizeValidationDialog({ issue, onClose, returnFocusRe
             </div>
           )}
 
-          {hasEmptyComponents && (
+          {!hasStructuredIssues && hasEmptyComponents && (
             <div>
               <h4 className="mb-2">Components with no scores entered</h4>
               <div className="validation-items-list">
