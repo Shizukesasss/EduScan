@@ -27,7 +27,7 @@ from app.database import Base, get_db
 from app.main import app
 from app.models import (AttendanceEvent, BiometricModel, BiometricSample, GradeComponent,
                         GradeLevel, GradebookState, GradingPeriod, Person, PersonnelSchedule,
-                        SchoolSection, SchoolYear, Subject, User)
+                        SchoolSection, SchoolYear, SectionAdviserAssignment, Subject, User)
 from app.services.attendance import applicable_schedule
 from app.services.biometrics import biometric_service
 from app.services.disposal import dispose_person_records
@@ -37,6 +37,12 @@ from app.services.settings_store import set_json
 
 class AuditRepairsTest(unittest.TestCase):
     def setUp(self):
+        self.biometric_paths = patch.multiple(
+            "app.services.biometrics",
+            BIOMETRIC_DIR=Path(TEST_DIR.name) / "biometrics",
+            MODEL_DIR=Path(TEST_DIR.name) / "models",
+        )
+        self.biometric_paths.start()
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         @event.listens_for(self.engine, "connect")
         def foreign_keys(connection, _):
@@ -47,10 +53,17 @@ class AuditRepairsTest(unittest.TestCase):
         self.teacher = User(username="teacher", role="teacher", full_name="Teacher", password_hash="unused", must_change_password=False)
         self.other = User(username="other", role="teacher", full_name="Other", password_hash="unused", must_change_password=False)
         self.grade = GradeLevel(name="10")
-        self.db.add_all([self.admin, self.teacher, self.other, self.grade])
+        self.year = SchoolYear(name="2026-2027", starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
+        self.db.add_all([self.admin, self.teacher, self.other, self.grade, self.year])
         self.db.flush()
-        self.db.add_all([SchoolSection(grade_level_id=self.grade.id, name="Own", adviser_user_id=self.teacher.id),
-                         SchoolSection(grade_level_id=self.grade.id, name="Other", adviser_user_id=self.other.id),
+        own_section = SchoolSection(grade_level_id=self.grade.id, name="Own", adviser_user_id=self.teacher.id)
+        other_section = SchoolSection(grade_level_id=self.grade.id, name="Other", adviser_user_id=self.other.id)
+        self.db.add_all([own_section, other_section])
+        self.db.flush()
+        self.db.add_all([SectionAdviserAssignment(school_year_id=self.year.id, section_id=own_section.id,
+                                                  teacher_user_id=self.teacher.id),
+                         SectionAdviserAssignment(school_year_id=self.year.id, section_id=other_section.id,
+                                                  teacher_user_id=self.other.id),
                          GradebookState(class_key="other-book", school_year="2026-2027", term_order=1,
                                         subject="Mathematics", grade="10", section="Other")])
         self.db.commit()
@@ -67,6 +80,7 @@ class AuditRepairsTest(unittest.TestCase):
         app.dependency_overrides.clear()
         self.db.close()
         self.engine.dispose()
+        self.biometric_paths.stop()
 
     def payload(self, key="other-book"):
         return {"class_key": key, "grade": "10", "section": "Own", "subject": "Mathematics",
@@ -91,10 +105,10 @@ class AuditRepairsTest(unittest.TestCase):
         self.assertEqual(response.status_code, 403, response.text)
 
     def test_teacher_can_still_create_save_and_read_own_legacy_book(self):
-        year = SchoolYear(name="2026-2027", starts_on=date(2026, 6, 1), ends_on=date(2027, 3, 31))
         student = Person(external_id="OWN-STUDENT", full_name="Own Learner", sex="Male", role="Student", grade="10", section="Own")
-        self.db.add_all([year, student, Subject(code="MATH", name="Mathematics")]); self.db.flush()
-        self.db.add(GradingPeriod(school_year_id=year.id, name="Quarter 1", term_order=1, starts_on=year.starts_on, ends_on=year.ends_on))
+        self.db.add_all([student, Subject(code="MATH", name="Mathematics")]); self.db.flush()
+        self.db.add(GradingPeriod(school_year_id=self.year.id, name="Quarter 1", term_order=1,
+                                  starts_on=self.year.starts_on, ends_on=self.year.ends_on))
         self.db.commit()
         payload = self.payload("own-book")
         payload["scores"] = {str(student.id): {"one": 0}}
@@ -186,7 +200,9 @@ class AuditRepairsTest(unittest.TestCase):
         folder = Path(TEST_DIR.name) / "biometrics" / f"person_{person.id}"
         folder.mkdir(parents=True, exist_ok=True)
         sample_path = folder / "sample.enc"; sample_path.write_bytes(b"test sample")
-        model_path = Path(TEST_DIR.name) / "models" / "old.enc"; model_path.write_bytes(b"test model")
+        model_path = Path(TEST_DIR.name) / "models" / "old.enc"
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        model_path.write_bytes(b"test model")
         sample = BiometricSample(id="sample", person_id=person.id, encrypted_path=str(sample_path), sha256="test", quality_score=1)
         model = BiometricModel(version="test", file_path=str(model_path), sha256="test", threshold=65, person_count=1, sample_count=1, active=True)
         self.db.add_all([sample, model, AttendanceEvent(id="scan", person_id=person.id, event_date=date(2026, 10, 12), event_time=time(8), direction="Time In", status="Present", source="Test")])

@@ -21,6 +21,7 @@ class JHSTemplateRoutingTests(unittest.TestCase):
         db.get.return_value.subject.is_elective = True
         for all_terms in (False, True):
             with patch('app.services.grading.get_gradebook_full', return_value=full), \
+                 patch('app.services.class_record_export.validate_jhs_class_record_export', return_value=[]), \
                  patch('app.services.class_record_export.export_jhs', return_value='elective.xlsx') as export:
                 self.assertEqual(reports.generate_gradebook_report_xlsx(db, 1, all_terms=all_terms), 'elective.xlsx')
                 self.assertEqual(export.call_args.args[4].name, 'ENGLISH - Grade 7-10 Class Record.xlsx')
@@ -32,6 +33,7 @@ class JHSTemplateRoutingTests(unittest.TestCase):
                 with self.subTest(subject=subject, all_terms=all_terms):
                     full = {'policy': {'rounding_method': 'half_up', 'rounding_decimal_places': 2}, 'components': [{'component_type': 'Term Examinations'}], 'gradebook': {'grade_name': '7', 'subject_name': subject}}
                     with patch('app.services.grading.get_gradebook_full', return_value=full), \
+                         patch('app.services.class_record_export.validate_jhs_class_record_export', return_value=[]), \
                          patch('app.services.class_record_export.export_jhs', return_value='template.xlsx') as export:
                         result = reports.generate_gradebook_report_xlsx(Mock(), 1, all_terms=all_terms)
                     self.assertEqual(result, 'template.xlsx')
@@ -41,6 +43,7 @@ class JHSTemplateRoutingTests(unittest.TestCase):
     def test_template_mismatch_is_reported_without_generic_fallback(self):
         full = {'policy': {'rounding_method': 'half_up', 'rounding_decimal_places': 2}, 'components': [{'component_type': 'Term Examinations'}], 'gradebook': {'grade_name': '7', 'subject_name': 'ENGLISH'}}
         with patch('app.services.grading.get_gradebook_full', return_value=full), \
+             patch('app.services.class_record_export.validate_jhs_class_record_export', return_value=[]), \
              patch('app.services.class_record_export.export_jhs', side_effect=HTTPException(409, 'Policy mismatch')), \
              patch('app.services.adaptive_class_record.export_adaptive') as adaptive:
             with self.assertRaises(HTTPException):

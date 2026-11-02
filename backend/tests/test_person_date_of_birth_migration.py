@@ -13,7 +13,9 @@ class PersonDateOfBirthMigrationTests(unittest.TestCase):
                 "CREATE TABLE schema_migrations (version VARCHAR(80) PRIMARY KEY, "
                 "description VARCHAR(255) NOT NULL, applied_at TIMESTAMP NOT NULL)"
             ))
-            for version, description in MIGRATIONS[:-2]:
+            for version, description in MIGRATIONS:
+                if version in {"0025_person_date_of_birth", "0026_annex_g_enrollment_and_comments"}:
+                    continue
                 connection.execute(text(
                     "INSERT INTO schema_migrations VALUES (:version, :description, CURRENT_TIMESTAMP)"
                 ), {"version": version, "description": description})

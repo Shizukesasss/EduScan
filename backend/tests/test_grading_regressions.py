@@ -80,6 +80,14 @@ class ClassRecordRegressionTest(unittest.TestCase):
         context.update(overrides)
         return grading.create_or_get_gradebook(self.db, **context)
 
+    def use_legacy_shs_year(self):
+        self.year.name = self.general.school_year = self.specific.school_year = '2025-2026'
+        self.year.starts_on = date(2025, 6, 1)
+        self.year.ends_on = date(2026, 3, 31)
+        self.section.track = 'Academic Track'
+        self.section.track_cluster = 'Business and Entrepreneurship'
+        self.db.commit()
+
     def test_prefixed_grade_and_trimmed_section_find_correct_students(self):
         full = grading.get_gradebook_full(self.db, self.create().id)
         self.assertEqual(full['gradebook']['grade_name'], '11')
@@ -199,15 +207,16 @@ class ClassRecordRegressionTest(unittest.TestCase):
         with self.assertRaises(HTTPException):
             ensure_gradebook_access(self.db, self.teacher, books[1])
 
-    def test_specific_subject_policy_wins_over_general(self):
-        self.assertEqual(self.create().grading_policy_id, self.specific.id)
+    def test_strengthened_shs_policy_wins_over_legacy_policies(self):
+        book = self.create()
+        self.assertEqual(book.grading_policy.version, 'DO15-SHS-v1')
         self.assertIsNone(grading.get_active_policy_for(self.db, self.year.name, '6', 'SHS-Core'))
 
     def test_fractional_policy_weights_and_item_limits(self):
         book = self.create()
-        self.assertEqual([component.weight for component in book.components], [25, 50, 25])
-        self.assertEqual([len(component.items) for component in book.components], [10, 8, 1])
-        self.assertEqual([component.component_type for component in book.components], ['Written Work', 'Performance Task', 'Quarterly Assessment'])
+        self.assertEqual([component.weight for component in book.components], [20, 50, 30])
+        self.assertEqual([len(component.items) for component in book.components], [5, 3, 3])
+        self.assertEqual([component.component_type for component in book.components], ['Written Work', 'Performance Task', 'Term Examinations'])
 
     def test_existing_fractional_weights_are_read_without_changing_storage(self):
         book = self.create(self.general)
@@ -220,9 +229,9 @@ class ClassRecordRegressionTest(unittest.TestCase):
 
     def test_browser_receives_saved_transmutation_and_rounding_rules(self):
         full = grading.get_gradebook_full(self.db, self.create().id)
-        self.assertEqual(full['policy']['transmutation_table'][0]['value'], 88)
-        self.assertEqual(full['policy']['rounding_decimal_places'], 3)
-        self.assertEqual(full['policy']['rounding_method'], 'floor')
+        self.assertEqual(full['policy']['transmutation_table'][0]['value'], 100)
+        self.assertEqual(full['policy']['rounding_decimal_places'], 2)
+        self.assertEqual(full['policy']['rounding_method'], 'half_up')
 
     def test_gradebook_mutations_use_a_postgresql_row_lock(self):
         from sqlalchemy.dialects import postgresql
@@ -341,19 +350,33 @@ class ClassRecordRegressionTest(unittest.TestCase):
                 self.assertEqual(book.status, 'Draft')
 
     def test_official_download_cannot_bypass_finalization_or_score_completion(self):
-        book = self.create(self.general)
-        with patch('app.main.generate_gradebook_report_xlsx') as export:
-            with self.assertRaises(HTTPException) as draft:
-                gradebook_report_xlsx_new(book.id, db=self.db, user=self.admin)
-            self.assertEqual(draft.exception.status_code, 409)
-            for status in ('Finalized', 'Locked'):
-                book.status = status
-                self.db.commit()
-                with self.assertRaises(HTTPException) as incomplete:
-                    gradebook_report_xlsx_new(book.id, db=self.db, user=self.admin)
-                self.assertEqual(incomplete.exception.status_code, 409)
-                self.assertIn('incomplete', incomplete.exception.detail)
-            export.assert_not_called()
+        self.subject.code, self.subject.name = 'SHS-CORE-GM', 'GENERAL MATHEMATICS'
+        self.section.track = 'Academic Track'
+        self.section.track_cluster = 'Business and Entrepreneurship'
+        self.db.commit()
+        book = self.create()
+        self.score_student(book, 80)
+        with self.assertRaises(HTTPException) as draft:
+            gradebook_report_xlsx_new(book.id, region='V', division='V', school_id='301874', db=self.db, user=self.admin)
+        self.assertEqual(draft.exception.status_code, 409)
+        self.assertIn('GRADEBOOK_NOT_FINALIZED', {issue['code'] for issue in draft.exception.detail['issues']})
+        for status in ('Finalized', 'Locked'):
+            book.status = status
+            self.db.commit()
+            with self.assertRaises(HTTPException) as incomplete:
+                gradebook_report_xlsx_new(book.id, region='V', division='V', school_id='301874', db=self.db, user=self.admin)
+            self.assertEqual(incomplete.exception.status_code, 409)
+            self.assertIn('SCORE_MISSING', {issue['code'] for issue in incomplete.exception.detail['issues']})
+
+    def test_registered_report_keeps_download_name_with_short_storage_path(self):
+        from app.services import reports
+        source = Path(TEST_DIR.name) / ('ClassRecord-2026-2027-AllTerms-Grade7-Berlin-Core-Subject.xlsx')
+        source.write_bytes(b'workbook')
+        with patch.object(reports, 'REPORT_DIR', Path(TEST_DIR.name)):
+            report = reports.register_report(self.db, source, 'Grading Summary', {}, self.admin)
+        self.assertEqual(report.filename, source.name)
+        self.assertLessEqual(len(Path(report.file_path).name), 48)
+        self.assertEqual(Path(report.file_path).read_bytes(), b'workbook')
 
     def test_legacy_blank_manual_grade_cannot_turn_into_a_passing_finalized_record(self):
         self.grade.name = '11'
@@ -636,7 +659,8 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.assertEqual(visible_elective["elective_track"], "STE")
 
     def test_blank_adviser_selection_is_saved_as_unassigned_and_linked_name_is_visible(self):
-        payload = SectionPayload(grade_level_id=self.grade.id, name="No Adviser", adviser_user_id="")
+        payload = SectionPayload(grade_level_id=self.grade.id, name="No Adviser", adviser_user_id="",
+                                 track='Academic Track', track_cluster='Business and Entrepreneurship')
         result = save_section(payload, self.db, self.admin)
         self.assertIsNone(self.db.get(SchoolSection, result["id"]).adviser_user_id)
 
@@ -653,7 +677,8 @@ class ClassRecordRegressionTest(unittest.TestCase):
         with self.assertRaises(HTTPException) as error:
             save_section(SectionPayload(
                 id=other_section.id, grade_level_id=self.grade.id, name=other_section.name,
-                adviser_user_id=self.teacher.id,
+                adviser_user_id=self.teacher.id, track='Academic Track',
+                track_cluster='Business and Entrepreneurship',
             ), self.db, self.admin)
         self.assertEqual(error.exception.status_code, 409)
 
@@ -944,11 +969,11 @@ class ClassRecordRegressionTest(unittest.TestCase):
         entries = [{'assessment_item_id': item.id, 'score': item.max_score * percentage / 100, 'status': 'Scored'} for component in book.components for item in component.items]
         grading.save_gradebook_scores(self.db, book.id, self.admin, {str(self.second.id): entries}, 'Complete second learner scores for export test')
 
-    def export(self, book):
+    def export(self, book, **scope):
         from app.services import reports
         import openpyxl
         with patch.object(reports, 'EXPORT_DIR', Path(TEST_DIR.name)):
-            path = reports.generate_gradebook_report_xlsx(self.db, book.id, 'V', 'Test Division', '123456')
+            path = reports.generate_gradebook_report_xlsx(self.db, book.id, 'V', 'Test Division', '123456', **scope)
         self.export_path = path
         workbook = openpyxl.load_workbook(path)
         full = grading.get_gradebook_full(self.db, book.id)
@@ -1169,6 +1194,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
                     workbook.close()
 
     def test_shs_export_uses_all_three_terms_and_authoritative_results(self):
+        self.use_legacy_shs_year()
         first_semester = self.create(self.general)
         self.score_student(first_semester, 90)
         second = GradingPeriod(school_year_id=self.year.id, term_order=2, name='Term 2', starts_on=date(2026, 9, 1), ends_on=date(2026, 10, 31))
@@ -1190,7 +1216,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.db.commit()
         from app.services.settings_store import set_json
         set_json(self.db, 'school.heads', {str(self.year.id): {'full_name': 'Buen Owogowog', 'title': 'Principal'}})
-        workbook = self.export(third_book)
+        workbook = self.export(third_book, all_terms=True)
         try:
             self.assertEqual(workbook['INPUT DATA']['E16'].value, 'Buen Owogowog')
             self.assertEqual(workbook['INPUT DATA']['E25'].value, '11')
@@ -1227,6 +1253,10 @@ class ClassRecordRegressionTest(unittest.TestCase):
         book.status = 'Finalized'
         self.db.commit()
         before = grading.get_gradebook_full(self.db, book.id)
+        from app.services import reports
+        self.assertEqual(reports.validate_gradebook_report_xlsx(self.db, book.id, 'V', 'Test Division', '123456'), [])
+        missing_division = reports.validate_gradebook_report_xlsx(self.db, book.id, 'V', '', '123456')
+        self.assertIn('SCHOOL_DIVISION_REQUIRED', {issue['code'] for issue in missing_division})
         workbook = self.export(book)
         try:
             sheet = workbook['Term 1']
@@ -1242,6 +1272,44 @@ class ClassRecordRegressionTest(unittest.TestCase):
             from app.services.reports import generate_gradebook_report_xlsx
             generate_gradebook_report_xlsx(self.db, book.id, 'V', 'V', '301874', allowed_teacher_id=book.teacher_user_id + 99999)
         self.assertEqual(error.exception.status_code, 403)
+
+    def test_legacy_jhs_six_written_items_use_adaptive_export(self):
+        self.configure_subject_export()
+        policy_components = json.loads(self.general.component_definitions_json)
+        policy_components[0]['max_items'] = 6
+        self.general.component_definitions_json = json.dumps(policy_components)
+        self.db.commit()
+        book = self.create(self.general)
+        self.label_export_exams(book)
+        self.score_student(book, 80)
+        self.score_second_student(book, 80)
+        book.status = 'Finalized'
+        self.db.commit()
+        before = grading.get_gradebook_full(self.db, book.id)
+        workbook = self.export(book)
+        try:
+            self.assertIn('Term 1', workbook.sheetnames)
+        finally:
+            workbook.close()
+        self.assertEqual(before, grading.get_gradebook_full(self.db, book.id))
+
+    def test_legacy_jhs_custom_conversion_uses_adaptive_export(self):
+        self.configure_subject_export()
+        self.general.transmutation_table_json = json.dumps([{'min': 0, 'max': 100, 'value': 88}])
+        self.db.commit()
+        book = self.create(self.general)
+        self.label_export_exams(book)
+        self.score_student(book, 80)
+        self.score_second_student(book, 80)
+        book.status = 'Finalized'
+        self.db.commit()
+        before = grading.get_gradebook_full(self.db, book.id)
+        workbook = self.export(book)
+        try:
+            self.assertIn('Term 1', workbook.sheetnames)
+        finally:
+            workbook.close()
+        self.assertEqual(before, grading.get_gradebook_full(self.db, book.id))
 
     def test_custom_music_and_health_setups_keep_the_combined_workbook(self):
         self.configure_subject_export('mapeh')
@@ -1338,6 +1406,8 @@ class ClassRecordRegressionTest(unittest.TestCase):
     def check_records_officer_three_term_export(self, grade):
         import openpyxl
         from app.services import reports
+        if grade >= 11:
+            self.use_legacy_shs_year()
         self.grade.name = self.first.grade = self.second.grade = str(grade)
         self.subject.category = 'JHS' if grade < 11 else 'SHS-Core'
         self.outside.grade = '10'
@@ -1431,18 +1501,17 @@ class ClassRecordRegressionTest(unittest.TestCase):
             book.status = 'Finalized'
             books.append(book)
         self.db.commit()
-        workbook = self.export(books[-1])
+        workbook = self.export(books[-1], all_terms=True)
         workbook.close()
         import openpyxl
         workbook = openpyxl.load_workbook(self.export_path, data_only=True)
         try:
-            self.assertEqual(workbook['Term 1']['B12'].value, 'First Student')
-            self.assertEqual(workbook['Term 1']['B13'].value, 'Second Student')
+            self.assertEqual(workbook['INPUT DATA']['K11'].value, 'First Student')
+            self.assertEqual(workbook['INPUT DATA']['N11'].value, 'Second Student')
             for book in books:
-                sheet = workbook[f'Term {book.term_order}']
-                column = next(cell.column for cell in sheet[10] if cell.value == 'TERM GRADE')
+                sheet = workbook[f'TERM {book.term_order}']
                 expected = grading.get_gradebook_full(self.db, book.id)['students'][0]['reported_grade']
-                self.assertEqual(sheet.cell(12, column).value, expected)
+                self.assertEqual(sheet['AC18'].value, expected)
         finally:
             workbook.close()
         from app.services import reports
@@ -1474,7 +1543,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
         import openpyxl
         workbook = openpyxl.load_workbook(self.export_path, data_only=True)
         try:
-            self.assertEqual(workbook['TERM 1']['AC18'].value, 75)
+            self.assertIsNone(workbook['TERM 1']['AC18'].value)
             self.assertIsNone(workbook['TERM 2']['F18'].value)
             self.assertEqual(workbook['TERM 3']['AC18'].value, 77)
         finally:
@@ -1540,7 +1609,8 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.db.commit()
         with self.assertRaises(HTTPException) as error:
             reports.generate_gradebook_report_xlsx(self.db, book.id, 'V', '', '123456')
-        self.assertEqual(error.exception.status_code, 422)
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertIn('SCHOOL_DIVISION_REQUIRED', {issue['code'] for issue in error.exception.detail['issues']})
         self.export(book).close()
         source = reports.TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / 'ENGLISH - Grade 7-10 Class Record.xlsx'
         with ZipFile(source) as original, ZipFile(self.export_path) as exported:

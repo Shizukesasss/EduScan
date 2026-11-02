@@ -8,6 +8,7 @@ import threading
 import unittest
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -47,6 +48,8 @@ class ReportingReliabilityTest(unittest.TestCase):
         self.now = datetime(2026, 10, 12, 10, 0, tzinfo=MANILA)
         self.patches = [patch.object(reports, "EXPORT_DIR", self.root), patch.object(reports, "REPORT_DIR", self.registry),
                         patch.object(sf2, "EXPORT_DIR", self.root),
+                        patch.object(sf2, "settings", replace(sf2.settings,
+                            sf2_template_path=os.environ["SF2_TEMPLATE_PATH"])),
                         patch.object(gate_exports, "SessionLocal", side_effect=lambda: Session(self.engine)),
                         patch.object(scheduler, "SessionLocal", side_effect=lambda: Session(self.engine)),
                         patch.object(scheduler, "dispatch_outbox")]

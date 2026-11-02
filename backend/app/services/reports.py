@@ -35,6 +35,14 @@ REPORT_DIR.mkdir(parents=True, exist_ok=True)
 TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
 
 
+def _uses_custom_jhs_layout(full: dict, fixed_issues: list[dict]) -> bool:
+    from .template_policies import VERSION
+
+    return full['gradebook'].get('policy_version') != VERSION and any(
+        issue['code'] == 'EXPORT_RULE_MISMATCH' for issue in fixed_issues
+    )
+
+
 def _safe_name(value: object) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", str(value)).strip("-._") or "report"
 
@@ -43,7 +51,7 @@ def register_report(db: Session, source: Path, report_type: str, parameters: dic
     if not source.exists():
         raise HTTPException(status_code=500, detail="Generated report file was not found")
     report_id = str(uuid.uuid4())
-    target = REPORT_DIR / f"{report_id}-{source.name}"
+    target = REPORT_DIR / f"{report_id}{source.suffix}"
     shutil.copy2(source, target)
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     record = GeneratedReport(
@@ -483,10 +491,12 @@ def validate_gradebook_report_xlsx(
                 raise
         else:
             template = TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename
-            return validate_jhs_class_record_export(
+            fixed_issues = validate_jhs_class_record_export(
                 db, book, full, kind, template, region, division, school_id,
                 allowed_teacher_id, all_terms=all_terms, through_term=through_term,
             )
+            if not _uses_custom_jhs_layout(full, fixed_issues):
+                return fixed_issues
     if draft_preview:
         from .gradebook_validation import create_validation_issue
         return [create_validation_issue(
@@ -515,7 +525,7 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
     uses_term_exams = any(component.get('component_type') == 'Term Examinations' for component in full['components'])
     fixed_rounding = full['policy']['rounding_method'] == 'half_up' and full['policy']['rounding_decimal_places'] == 2
     if not is_senior_high(full['gradebook']['grade_name']) and ((uses_term_exams and fixed_rounding) or full['gradebook']['subject_name'].strip().upper() in {'ARALING PANLIPUNAN', 'MAPEH'}):
-        from .class_record_export import export_jhs, subject_template
+        from .class_record_export import export_jhs, subject_template, validate_jhs_class_record_export
         try:
             kind, filename = subject_template(full['gradebook']['subject_name'] or '',
                                               book.subject.is_elective is True)
@@ -523,15 +533,21 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
             if exc.status_code != 409:
                 raise
         else:
-            try:
-                return export_jhs(db, book, full, kind, TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename,
-                                  region, division, school_id, allowed_teacher_id, all_terms=all_terms, through_term=through_term)
-            except HTTPException as exc:
-                if isinstance(exc.detail, dict) and exc.detail.get('code') == 'EXPORT_VALIDATION_FAILED':
+            template = TEMPLATES_DIR / 'SUBJECT CLASS RECORDS' / filename
+            fixed_issues = validate_jhs_class_record_export(
+                db, book, full, kind, template, region, division, school_id,
+                allowed_teacher_id, all_terms=all_terms, through_term=through_term,
+            )
+            if not _uses_custom_jhs_layout(full, fixed_issues):
+                try:
+                    return export_jhs(db, book, full, kind, template,
+                                      region, division, school_id, allowed_teacher_id, all_terms=all_terms, through_term=through_term)
+                except HTTPException as exc:
+                    if isinstance(exc.detail, dict) and exc.detail.get('code') == 'EXPORT_VALIDATION_FAILED':
+                        raise
+                    if exc.status_code in {409, 422}:
+                        raise_export_validation([export_rule_issue(exc.detail, full, template_name='fixed JHS workbook')])
                     raise
-                if exc.status_code in {409, 422}:
-                    raise_export_validation([export_rule_issue(exc.detail, full, template_name='fixed JHS workbook')])
-                raise
     if is_senior_high(full['gradebook']['grade_name']):
         from .shs_class_record_export import export_shs_ecr
         from .shs_class_record_export import is_supported_shs_ecr_school_year

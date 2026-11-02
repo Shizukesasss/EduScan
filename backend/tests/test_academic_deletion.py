@@ -22,7 +22,7 @@ from app.auth import create_token
 from app.database import Base, get_db
 from app.main import academic_structure, app, save_grading_period, save_subject, seed_reference_data
 from app.migrations import MIGRATIONS, run_migrations
-from app.models import GradeLevel, GradingPeriod, Person, SchoolSection, SchoolYear, Subject, SubjectTeachingAssignment, SystemAuditEvent, User
+from app.models import GradeLevel, GradingPeriod, Person, SchoolSection, SchoolYear, SectionAdviserAssignment, Subject, SubjectTeachingAssignment, SystemAuditEvent, User
 from app.schemas import GradingPeriodPayload, SubjectPayload
 from app.models_grading import AssessmentItem, Gradebook, GradebookComponent, StudentScore
 
@@ -48,6 +48,15 @@ class AcademicDeletionTest(unittest.TestCase):
         self.period = GradingPeriod(school_year_id=self.year.id, name="Q1", term_order=1, starts_on=date(2026, 6, 1), ends_on=date(2026, 8, 31))
         self.db.add_all([self.section, self.period])
         self.db.flush()
+        self.db.add(SectionAdviserAssignment(
+            school_year_id=self.year.id, section_id=self.section.id,
+            teacher_user_id=self.teacher.id,
+        ))
+        self.assignment = SubjectTeachingAssignment(
+            school_year_id=self.year.id, subject_id=self.subject.id,
+            section_id=self.section.id, teacher_user_id=self.teacher.id,
+        )
+        self.db.add(self.assignment)
         self.book = Gradebook(school_year_id=self.year.id, grading_period_id=self.period.id, grade_level_id=self.grade.id,
                              section_id=self.section.id, subject_id=self.subject.id, teacher_user_id=self.teacher.id,
                              school_year_name=self.year.name, grade_name=self.grade.name, section_name=self.section.name,
@@ -117,8 +126,12 @@ class AcademicDeletionTest(unittest.TestCase):
         }), self.db, self.admin)
         self.assertEqual(self.db.get(Subject, elective["id"]).allowed_grades, [7, 8])
 
+        with self.assertRaisesRegex(HTTPException, "approved SHS core subject"):
+            save_subject(SubjectPayload(**{
+                "code": "SHS-RESEARCH", "name": "Research", "category": "SHS",
+            }), self.db, self.admin)
         shs = save_subject(SubjectPayload(**{
-            "code": "SHS-RESEARCH", "name": "Research", "category": "SHS",
+            "code": "SHS-CORE-GM", "name": "GENERAL MATHEMATICS", "category": "SHS",
         }), self.db, self.admin)
         self.assertGreater(shs["id"], 0)
 
@@ -168,12 +181,7 @@ class AcademicDeletionTest(unittest.TestCase):
         self.assertEqual(self.client.delete(f"/api/admin/reference/subjects/{self.subject.id}").status_code, 401)
 
     def test_current_gradebook_list_only_returns_active_assigned_teacher_records(self):
-        assignment = SubjectTeachingAssignment(
-            school_year_id=self.year.id, subject_id=self.subject.id, section_id=self.section.id,
-            teacher_user_id=self.teacher.id,
-        )
-        self.db.add(assignment)
-        self.db.commit()
+        assignment = self.assignment
         response = self.client.get("/api/gradebooks?current_only=true", headers=self.headers)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn(self.book.id, [row["id"] for row in response.json()])
@@ -299,13 +307,19 @@ class AcademicDeletionTest(unittest.TestCase):
         self.assertEqual(self.client.get('/api/admin/academic-structure', headers=self.headers).json()['grading_periods'], [])
         self.assertEqual(self.client.post(f'/api/admin/reference/grading-periods/{self.period.id}/restore', headers=self.headers).status_code, 200)
 
-    def test_deleted_section_cannot_restore_duplicate_adviser_assignment(self):
+    def test_restoring_section_preserves_year_specific_adviser_assignment(self):
         self.remove("sections", self.section)
         other = SchoolSection(grade_level_id=self.grade.id, name="Oslo", adviser_user_id=self.teacher.id)
         self.db.add(other)
         self.db.commit()
         response = self.client.post(f"/api/admin/reference/sections/{self.section.id}/restore", headers=self.headers)
-        self.assertEqual(response.status_code, 409)
+        # The legacy adviser_user_id on another section is not an annual assignment.
+        self.assertEqual(response.status_code, 200, response.text)
+        assignments = self.db.scalars(select(SectionAdviserAssignment).where(
+            SectionAdviserAssignment.school_year_id == self.year.id,
+            SectionAdviserAssignment.teacher_user_id == self.teacher.id,
+        )).all()
+        self.assertEqual([assignment.section_id for assignment in assignments], [self.section.id])
         self.db.delete(other)
         self.db.commit()
         restored = self.client.post(f"/api/admin/reference/sections/{self.section.id}/restore", headers=self.headers)

@@ -16,7 +16,7 @@ from app.models import AttendanceEvent, BiometricAuditEvent, GradeLevel, Learner
 
 
 class AtomicEnrollmentTest(unittest.TestCase):
-    def test_student_can_register_with_only_lrn_and_keep_legacy_id_on_edit(self):
+    def test_student_can_register_with_only_lrn_and_legacy_edit_does_not_create_placement(self):
         payload = {**self.payload, 'lrn': '123456789012'}
         payload.pop('external_id')
         response = self.client.post('/api/persons', json=payload)
@@ -28,8 +28,8 @@ class AtomicEnrollmentTest(unittest.TestCase):
         response = self.client.patch(f'/api/persons/{self.fixture.first.id}', json=update)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()['external_id'], self.fixture.first.external_id)
-        self.assertEqual(self.db.scalar(select(LearnerEnrollment).where(
-            LearnerEnrollment.person_id == self.fixture.first.id)).school_year_id, self.school_year.id)
+        self.assertIsNone(self.db.scalar(select(LearnerEnrollment).where(
+            LearnerEnrollment.person_id == self.fixture.first.id)))
 
     def test_new_student_requires_school_year_and_enrollment_start_date(self):
         for field in ('school_year_id', 'enrollment_start_date'):

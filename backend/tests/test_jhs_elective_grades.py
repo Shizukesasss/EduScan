@@ -50,9 +50,16 @@ class ElectiveGradeTests(unittest.TestCase):
         self.assertFalse(subject_matches_grade(subject, '11'))
 
     def test_invalid_selections_are_rejected(self):
-        for grades in ([], [11], [7, 12]):
-            with self.subTest(grades=grades), self.assertRaises(HTTPException):
-                save_subject(SubjectPayload(code='R1', name='Research 1', is_elective=True, allowed_grades=grades))
+        f = fixtures.ClassRecordRegressionTest()
+        f.setUp()
+        try:
+            for grades in ([], [11], [7, 12]):
+                with self.subTest(grades=grades), self.assertRaises(HTTPException) as denied:
+                    save_subject(SubjectPayload(code='R1', name='Research 1', is_elective=True,
+                                                allowed_grades=grades), db=f.db, actor=f.admin)
+                self.assertEqual(denied.exception.status_code, 422)
+        finally:
+            f.tearDown()
 
     def test_existing_record_survives_narrowing_but_new_record_is_blocked(self):
         f = fixtures.ClassRecordRegressionTest()

@@ -271,7 +271,9 @@ class AnnexGImportTests(unittest.TestCase):
                 "CREATE TABLE schema_migrations (version VARCHAR(80) PRIMARY KEY, "
                 "description VARCHAR(255) NOT NULL, applied_at TIMESTAMP NOT NULL)"
             ))
-            for version, description in MIGRATIONS[:-1]:
+            for version, description in MIGRATIONS:
+                if version == "0026_annex_g_enrollment_and_comments":
+                    continue
                 connection.execute(text("INSERT INTO schema_migrations VALUES (:version, :description, CURRENT_TIMESTAMP)"),
                                    {"version": version, "description": description})
         self.assertEqual(run_migrations(self.engine), ["0026_annex_g_enrollment_and_comments"])

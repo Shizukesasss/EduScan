@@ -66,14 +66,20 @@ class ExportTermScopeTests(unittest.TestCase):
             self.assertEqual(denied.exception.status_code, 403)
 
     def test_invalid_or_conflicting_scope_is_rejected(self):
+        f = self.fixture
+        book = self.make_book(2)
         for arguments in ({'through_term': 1}, {'through_term': 3}, {'through_term': 2, 'all_terms': True}):
             with self.subTest(arguments=arguments), self.assertRaises(HTTPException) as denied:
-                gradebook_report_xlsx_new(1, **arguments, db=Mock(), user=SimpleNamespace(role='records_officer'))
-            self.assertEqual(denied.exception.status_code, 422)
+                gradebook_report_xlsx_new(book.id, **arguments, db=f.db, user=SimpleNamespace(role='records_officer', id=999))
+            self.assertEqual(denied.exception.status_code, 409)
+            self.assertIn('SHS_ECR_TERM_SCOPE_INVALID', {issue['code'] for issue in denied.exception.detail['issues']})
 
     def test_two_terms_requires_selected_term_two(self):
-        db = Mock()
-        db.get.return_value = SimpleNamespace(term_order=1)
-        with patch('app.main.ensure_gradebook_access'), self.assertRaises(HTTPException) as denied:
-            gradebook_report_xlsx_new(1, through_term=2, db=db, user=SimpleNamespace(role='records_officer'))
-        self.assertEqual(denied.exception.status_code, 422)
+        f = self.fixture
+        book = f.create(f.specific)
+        book.status = 'Finalized'
+        f.db.commit()
+        with self.assertRaises(HTTPException) as denied:
+            gradebook_report_xlsx_new(book.id, through_term=2, db=f.db, user=SimpleNamespace(role='records_officer', id=999))
+        self.assertEqual(denied.exception.status_code, 409)
+        self.assertIn('SHS_ECR_TERM_SCOPE_INVALID', {issue['code'] for issue in denied.exception.detail['issues']})

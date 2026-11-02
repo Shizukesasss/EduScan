@@ -26,13 +26,19 @@ os.environ["SF2_TEMPLATE_PATH"] = str(BACKEND_DIR / "data" / "templates" / "Scho
 
 from fastapi.testclient import TestClient  # noqa: E402
 from app.main import app  # noqa: E402
+from api_test_database import isolated_app_database  # noqa: E402
 
 
 class EduScanSmokeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.addClassCleanup(TEST_DIR.cleanup)
+        cls.database_context = isolated_app_database(database_path, Path(TEST_DIR.name), os.environ["SF2_TEMPLATE_PATH"])
+        cls.database_context.__enter__()
+        cls.addClassCleanup(cls.database_context.__exit__, None, None, None)
         cls.client_context = TestClient(app)
         cls.client = cls.client_context.__enter__()
+        cls.addClassCleanup(cls.client_context.__exit__, None, None, None)
         response = cls.client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
         assert response.status_code == 200, response.text
         cls.headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
@@ -56,13 +62,6 @@ class EduScanSmokeTest(unittest.TestCase):
         assigned = cls.client.post("/api/admin/sections", headers=cls.headers,
                                    json={**section, "adviser_user_id": teacher["id"], "adviser_name": teacher["full_name"]})
         assert assigned.status_code == 200, assigned.text
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls.client_context.__exit__(None, None, None)
-        from app.database import engine
-        engine.dispose()
-        TEST_DIR.cleanup()
 
     def test_biometric_enrollment_crud_and_audit(self) -> None:
         person = self.client.post("/api/persons", headers=self.headers, json={

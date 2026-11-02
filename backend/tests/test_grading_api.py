@@ -22,13 +22,19 @@ os.environ["ATTENDANCE_SCHEDULER_ENABLED"] = "false"
 
 from fastapi.testclient import TestClient  # noqa: E402
 from app.main import app  # noqa: E402
+from api_test_database import isolated_app_database  # noqa: E402
 
 
 class GradingApiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.addClassCleanup(TEST_DIR.cleanup)
+        cls.database_context = isolated_app_database(database_path, Path(TEST_DIR.name))
+        cls.database_context.__enter__()
+        cls.addClassCleanup(cls.database_context.__exit__, None, None, None)
         cls.client_context = TestClient(app)
         cls.client = cls.client_context.__enter__()
+        cls.addClassCleanup(cls.client_context.__exit__, None, None, None)
         # Login admin
         resp = cls.client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
         assert resp.status_code == 200, resp.text
@@ -73,13 +79,6 @@ class GradingApiTest(unittest.TestCase):
             assert changed.status_code == 200, changed.text
             setattr(cls, target, headers)
 
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls.client_context.__exit__(None, None, None)
-        from app.database import engine
-        engine.dispose()
-        TEST_DIR.cleanup()
-
     def assert_exports_match_gradebook(self, gb_id):
         snapshot = self.client.get(f'/api/gradebooks/{gb_id}', headers=self.teacher_headers).json()
         for headers in (self.other_teacher_headers, self.admin_headers):
@@ -93,35 +92,68 @@ class GradingApiTest(unittest.TestCase):
                 formulas = load_workbook(BytesIO(exported.content))
                 values = load_workbook(BytesIO(exported.content), data_only=True)
                 try:
-                    term_name = f"Term {snapshot['gradebook']['term_order']}"
+                    wanted_term = f"Term {snapshot['gradebook']['term_order']}"
+                    term_sheets = [name for name in values.sheetnames if name.strip().casefold() == wanted_term.casefold()]
+                    self.assertEqual(len(term_sheets), 1, values.sheetnames)
+                    term_name = term_sheets[0]
                     sheet = values[term_name]
                     headings = {cell.value: cell.column for cell in sheet[10]}
-                    for heading in ('INITIAL GRADE', 'TERM GRADE'):
-                        self.assertEqual(formulas[term_name].cell(12, headings[heading]).data_type, 'f')
                     metadata = snapshot['gradebook']
-                    for cell, key in (('E15', 'school_year_name'), ('E23', 'teacher_name'), ('E24', 'subject_name'), ('E25', 'grade_name'), ('E26', 'section_name')):
+                    for cell, key in (('E15', 'school_year_name'), ('E23', 'teacher_name'), ('E24', 'subject_name'), ('E26', 'section_name')):
                         self.assertEqual(values['INPUT DATA'][cell].value, metadata[key])
+                    self.assertEqual(str(values['INPUT DATA']['E25'].value), str(metadata['grade_name']))
                     self.assertEqual(values['INPUT DATA']['E13'].value, '301874')
                     self.assertEqual(values['INPUT DATA']['E10'].value, 'V')
                     self.assertEqual(values['INPUT DATA']['E11'].value, 'V')
                     self.assertEqual(values['INPUT DATA']['E16'].value or '', metadata['school_head'] or '')
-                    by_identifier = {student['lrn'] or student['external_id']: student for student in snapshot['students']}
-                    for row in range(12, 12 + len(by_identifier)):
-                        student = by_identifier[sheet.cell(row, 3).value]
-                        self.assertEqual(sheet.cell(row, headings['INITIAL GRADE']).value, student['initial_grade'])
-                        self.assertEqual(sheet.cell(row, headings['TERM GRADE']).value, student['reported_grade'])
-                        column = 5
-                        for component, detail, result in zip(snapshot['components'], student['component_details'], student['component_grades']):
-                            self.assertEqual(formulas[term_name].cell(9, column).value, component['name'])
-                            items = [item for item in component['items'] if item['active']]
-                            for item in items:
-                                self.assertEqual(sheet.cell(11, column).value, item['max_score'])
-                                self.assertEqual(sheet.cell(row, column).value, student['scores'][str(item['id'])])
-                                column += 1
-                            self.assertEqual(sheet.cell(11, column + 2).value, component['weight'] / 100)
-                            for offset, expected in enumerate((detail['total_earned'], result['percentage'], result['weighted_score'])):
-                                self.assertAlmostEqual(sheet.cell(row, column + offset).value, expected, places=10)
-                            column += 3
+                    if 'INITIAL GRADE' in headings and 'TERM GRADE' in headings:
+                        for heading in ('INITIAL GRADE', 'TERM GRADE'):
+                            self.assertEqual(formulas[term_name].cell(12, headings[heading]).data_type, 'f')
+                        by_identifier = {student['lrn'] or student['external_id']: student for student in snapshot['students']}
+                        for row in range(12, 12 + len(by_identifier)):
+                            student = by_identifier[sheet.cell(row, 3).value]
+                            self.assertEqual(sheet.cell(row, headings['INITIAL GRADE']).value, student['initial_grade'])
+                            self.assertEqual(sheet.cell(row, headings['TERM GRADE']).value, student['reported_grade'])
+                            column = 5
+                            for component, detail, result in zip(snapshot['components'], student['component_details'], student['component_grades']):
+                                self.assertEqual(formulas[term_name].cell(9, column).value, component['name'])
+                                items = [item for item in component['items'] if item['active']]
+                                for item in items:
+                                    self.assertEqual(sheet.cell(11, column).value, item['max_score'])
+                                    self.assertEqual(sheet.cell(row, column).value, student['scores'][str(item['id'])])
+                                    column += 1
+                                self.assertEqual(sheet.cell(11, column + 2).value, component['weight'] / 100)
+                                for offset, expected in enumerate((detail['total_earned'], result['percentage'], result['weighted_score'])):
+                                    self.assertAlmostEqual(sheet.cell(row, column + offset).value, expected, places=10)
+                                column += 3
+                    else:
+                        self.assertEqual(str(formulas[term_name]['AB12'].value).upper(), 'INITIAL GRADE')
+                        self.assertEqual(str(formulas[term_name]['AC12'].value).upper(), 'TERM GRADE')
+                        layout = (
+                            (6, 11, 12, 13, 'WRITTEN / ORAL WORKS (WWs)'),
+                            (14, 17, 18, 19, 'PRODUCT / PERFORMANCE TASKS (PTs)'),
+                            (20, None, 26, 27, 'EXAMINATIONS (EXs)'),
+                        )
+                        for sex, first_row, input_column in (('MALE', 18, 'K'), ('FEMALE', 69, 'N')):
+                            students = sorted((student for student in snapshot['students'] if student['sex'].strip().upper() == sex),
+                                              key=lambda student: (student['full_name'].casefold(), student['lrn'] or student['external_id']))
+                            for index, student in enumerate(students):
+                                row = first_row + index
+                                self.assertEqual(values['INPUT DATA'][f'{input_column}{11 + index}'].value, student['full_name'])
+                                self.assertEqual(sheet[f'AB{row}'].value, student['initial_grade'])
+                                self.assertEqual(sheet[f'AC{row}'].value, student['reported_grade'])
+                                self.assertEqual(formulas[term_name][f'AB{row}'].data_type, 'f')
+                                self.assertEqual(formulas[term_name][f'AC{row}'].data_type, 'f')
+                                for component, (first, total, percent, weighted, template_label) in zip(
+                                        snapshot['components'], layout):
+                                    self.assertEqual(formulas[term_name].cell(12, first).value, template_label)
+                                    self.assertEqual(sheet.cell(15, weighted).value, component['weight'] / 100)
+                                    for offset, item in enumerate(item for item in component['items'] if item['active']):
+                                        self.assertEqual(sheet.cell(15, first + offset).value, item['max_score'])
+                                        self.assertEqual(sheet.cell(row, first + offset).value, student['scores'][str(item['id'])])
+                                    for formula_column in (total, percent, weighted):
+                                        if formula_column is not None:
+                                            self.assertEqual(formulas[term_name].cell(row, formula_column).data_type, 'f')
                 finally:
                     formulas.close()
                     values.close()
@@ -552,8 +584,9 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(admin_view.json()['students'], data['students'])
         self.assertEqual(admin_view.json()['statistics'], data['statistics'])
         self.assertEqual(data['gradebook']['teacher_name'], self.teacher['full_name'])
-        components = [{**component, 'items': component['items'] if component['component_type'] == 'Term Examinations' else component['items'][:1]}
-                      for component in data['components']]
+        components = [{**component, 'weight': weight,
+                       'items': component['items'] if component['component_type'] == 'Term Examinations' else component['items'][:1]}
+                      for component, weight in zip(data['components'], (25, 45, 30))]
         scores = {str(student['person_id']): [{'assessment_item_id': activity['id'], 'score': activity['max_score'], 'status': 'Scored'}
                   for component in components for activity in component['items']] for student in data['students']}
         for path, payload in [('components', {'components': components, 'change_reason': 'Unauthorized admin assessment setup'}),
@@ -638,7 +671,7 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(final['students'][0]['scores'][str(item['id'])], item['max_score'] - 2)
         score_before_criteria = final['students'][0]['scores'][str(item['id'])]
         criteria = [{'component_id': component['id'], 'weight': weight}
-                    for component, weight in zip(final['components'], (25, 45, 30))]
+                    for component, weight in zip(final['components'], (20, 50, 30))]
         criteria_request = self.client.post(f'/api/gradebooks/{book_id}/criteria-adjustments', headers=self.teacher_headers,
                                             json={'components': criteria, 'reason': 'Teacher requests revised assessment criteria'})
         self.assertEqual(criteria_request.status_code, 200, criteria_request.text)
@@ -651,7 +684,7 @@ class GradingApiTest(unittest.TestCase):
                                             json={'status': 'Approved', 'note': 'Approved revised assessment criteria'})
         self.assertEqual(approved_criteria.status_code, 200, approved_criteria.text)
         after_criteria = self.client.get(f'/api/gradebooks/{book_id}', headers=self.teacher_headers).json()
-        self.assertEqual([component['weight'] for component in after_criteria['components']], [25, 45, 30])
+        self.assertEqual([component['weight'] for component in after_criteria['components']], [20, 50, 30])
         self.assertEqual(after_criteria['students'][0]['scores'][str(item['id'])], score_before_criteria)
         self.assert_exports_match_gradebook(book_id)
         self.assertIn(criteria_id, {row['id'] for row in self.client.get('/api/teacher/grade-adjustment-notifications', headers=self.teacher_headers).json()})
