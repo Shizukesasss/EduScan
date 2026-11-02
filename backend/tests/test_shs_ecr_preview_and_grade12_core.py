@@ -72,6 +72,7 @@ class ShsEcrPreviewAndGrade12CoreTests(unittest.TestCase):
             "weights": {"ww": 20.0, "pt": 50.0, "exam": 30.0},
             "exam_split": {"ST1": 30.0, "ST2": 30.0, "TE": 40.0},
             "term_counts": {11: 3, 12: 0},
+            "units_per_term": {11: 2, 12: None},
             "helper_row": 8,
             "grade11_helper": {"N": "11 ", "P": 3, "Q": 2, "R": 6},
         }
@@ -84,6 +85,7 @@ class ShsEcrPreviewAndGrade12CoreTests(unittest.TestCase):
         self.assertEqual(selection[2], "General Mathematics")
         self.assertEqual(selection[5], 3)
         self.assertEqual(selection[7], {"N8": "11 12", "S8": 12, "T8": 3, "U8": 2, "V8": 6})
+        self.assertEqual(selection[8], 2)
 
     def test_grade12_elective_does_not_inherit_grade11_core_entry(self) -> None:
         subject = SimpleNamespace(

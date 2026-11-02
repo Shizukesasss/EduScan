@@ -187,6 +187,9 @@ def _ecr_reference_data(template: Path) -> tuple[dict[tuple[str, str, str], list
                 "grade11_helper": {
                     column: values.get(column) for column in ("N", "P", "Q", "R")
                 },
+                "units_per_term": {
+                    11: values.get("Q"), 12: values.get("U"),
+                },
             })
     if not catalog or len(table) != 41:
         raise HTTPException(409, "The SHS ECR helper catalog or grading table is incomplete.")
@@ -253,7 +256,7 @@ def _grade12_core_helper_changes(match: dict) -> dict[str, object]:
     }
 
 
-def _course_selection(subject: Subject, grade_name: str, catalog: dict) -> tuple[str, str, str, dict[str, float], dict[str, float], int, str, dict[str, object]]:
+def _course_selection(subject: Subject, grade_name: str, catalog: dict) -> tuple[str, str, str, dict[str, float], dict[str, float], int, str, dict[str, object], float]:
     code = (subject.code or "").strip().upper()
     if not code:
         raise HTTPException(409, "This SHS subject has no stable code, so it cannot be mapped to the official ECR.")
@@ -309,8 +312,11 @@ def _course_selection(subject: Subject, grade_name: str, catalog: dict) -> tuple
     term_count = match["term_counts"][11] if grade12_core_reuse else match["term_counts"][grade]
     if term_count not in (1, 2, 3):
         raise HTTPException(409, f"The official ECR has no term schedule for '{subject.name}' in Grade {grade}.")
+    units_per_term = match["units_per_term"][11 if grade12_core_reuse else grade]
+    if not isinstance(units_per_term, (int, float)) or units_per_term <= 0:
+        raise HTTPException(409, f"The official ECR has no units per term for '{subject.name}' in Grade {grade}.")
     helper_changes = _grade12_core_helper_changes(match) if grade12_core_reuse else {}
-    return match["track"], match["cluster"], match["course"], match["weights"], match["exam_split"], term_count, code, helper_changes
+    return match["track"], match["cluster"], match["course"], match["weights"], match["exam_split"], term_count, code, helper_changes, float(units_per_term)
 
 
 def _normalize_policy_table(rows: list[dict] | None) -> list[tuple[float, float, int]]:
@@ -683,7 +689,7 @@ def validate_shs_ecr_export(
     template = TEMPLATES_DIR / "SUBJECT CLASS RECORDS" / "ECR_3Term - SSHS - SY2026-2027.xlsx"
     try:
         catalog, ecr_table = _ecr_reference_data(template)
-        category, cluster, course, ecr_weights, ecr_exam_split, course_terms, _, _ = _course_selection(
+        category, cluster, course, ecr_weights, ecr_exam_split, course_terms, _, _, _ = _course_selection(
             book.subject, gradebook["grade_name"], catalog,
         )
         if course_terms == 1 and (all_terms or through_term == 2):
@@ -879,7 +885,7 @@ def export_shs_ecr(
 
     template = TEMPLATES_DIR / "SUBJECT CLASS RECORDS" / "ECR_3Term - SSHS - SY2026-2027.xlsx"
     catalog, ecr_table = _ecr_reference_data(template)
-    category, cluster, course, ecr_weights, ecr_exam_split, course_terms, _, helper_changes = _course_selection(
+    category, cluster, course, ecr_weights, ecr_exam_split, course_terms, _, helper_changes, units_per_term = _course_selection(
         book.subject, full["gradebook"]["grade_name"], catalog,
     )
     if course_terms == 1 and (all_terms or through_term == 2):
@@ -969,6 +975,30 @@ def export_shs_ecr(
         "P6": f"DIVISION: {division.strip().upper()}",
         "AA6": f"SCHOOL ID: {school_id.strip()}",
     }
+    school_year_display = full["gradebook"]["school_year_name"].replace("-", " - ")
+    term_display_values = {
+        "H7": "SAN JOSE NATIONAL HIGH SCHOOL",
+        "AA7": school_year_display,
+        "H9": grade,
+        "N9": full["gradebook"]["section_name"].upper(),
+        "U9": course.upper(),
+        "H10": full["gradebook"]["teacher_name"].upper(),
+        "U10": f"{_section_track_for_export(full).upper()} / {cluster.upper()}",
+        "AJ10": units_per_term,
+        "AL10": units_per_term * course_terms,
+        "D12": weights["ww"] / 100,
+        "Q12": weights["pt"] / 100,
+        "AD12": weights["exam"] / 100,
+        "P14": weights["ww"] / 100,
+        "AC14": weights["pt"] / 100,
+        "AK14": weights["exam"] / 100,
+    }
+    if weights["exam"]:
+        term_display_values.update({
+            "AG14": ecr_exam_split["ST1"],
+            "AH14": ecr_exam_split["ST2"],
+            "AI14": ecr_exam_split["TE"],
+        })
     for term_order in (1, 2, 3):
         changes.setdefault(f"Term {term_order}", {}).update(term_metadata)
 
@@ -1010,6 +1040,7 @@ def export_shs_ecr(
         for roster, first_row in ((current_males, 17), (current_females, 68)):
             for offset, student in enumerate(roster):
                 term_formula_values[f"C{first_row + offset}"] = student["full_name"]
+        term_formula_values.update(term_display_values)
         changes[sheet_name].update(term_changes)
         formulas[sheet_name] = term_formula_values
 

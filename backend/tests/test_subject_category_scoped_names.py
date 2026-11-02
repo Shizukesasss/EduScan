@@ -90,12 +90,30 @@ class SubjectCategoryScopedNamesTests(unittest.TestCase):
                 self.assertEqual(workbook["INPUT DATA"]["S11"].value, "Second Student")
                 self.assertEqual(workbook["Term 1"]["C17"].value, "First Student")
                 self.assertEqual(workbook["Term 1"]["C68"].value, "Second Student")
+                term = workbook["Term 1"]
+                self.assertEqual(term["H7"].value, "SAN JOSE NATIONAL HIGH SCHOOL")
+                self.assertIn("2026", str(term["AA7"].value))
+                self.assertIn("2027", str(term["AA7"].value))
+                self.assertEqual(term["H9"].value, 12)
+                self.assertEqual(term["N9"].value, "BERLIN")
+                self.assertEqual(term["U9"].value, name.upper())
+                self.assertEqual(term["H10"].value, "CLASS ADVISER")
+                expected_cluster = "FIELD EXPERIENCE" if track == "Academic Track" else "WORK IMMERSION"
+                self.assertEqual(term["U10"].value, f"{track.upper()} / {expected_cluster}")
+                self.assertEqual(term["AJ10"].value, 12)
+                self.assertEqual(term["AL10"].value, 12)
+                for cell, expected in (("D12", 0.2), ("Q12", 0.8), ("AD12", 0),
+                                       ("P14", 0.2), ("AC14", 0.8), ("AK14", 0)):
+                    self.assertEqual(term[cell].value, expected, cell)
             finally:
                 workbook.close()
             formulas = load_workbook(path, read_only=True, data_only=False)
             try:
                 self.assertIn("'INPUT DATA'!O11", formulas["Term 1"]["C17"].value)
                 self.assertIn("'INPUT DATA'!S11", formulas["Term 1"]["C68"].value)
+                for cell in ("H7", "AA7", "H9", "N9", "U9", "H10", "U10", "AJ10", "AL10",
+                             "D12", "Q12", "AD12", "P14", "AC14", "AK14"):
+                    self.assertEqual(formulas["Term 1"][cell].data_type, "f", cell)
             finally:
                 formulas.close()
 

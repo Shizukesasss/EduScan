@@ -368,6 +368,31 @@ class ClassRecordRegressionTest(unittest.TestCase):
             self.assertEqual(incomplete.exception.status_code, 409)
             self.assertIn('SCORE_MISSING', {issue['code'] for issue in incomplete.exception.detail['issues']})
 
+    def test_shs_core_export_displays_header_weights_and_exam_split(self):
+        self.subject.code, self.subject.name = 'SHS-CORE-GM', 'GENERAL MATHEMATICS'
+        self.section.track = 'Academic Track'
+        self.section.track_cluster = 'Business and Entrepreneurship'
+        self.db.commit()
+        book = self.create()
+        self.score_student(book, 80)
+        self.score_second_student(book, 80)
+        book.status = 'Finalized'
+        self.db.commit()
+        import openpyxl
+        from app.services import reports
+        with patch.object(reports, 'EXPORT_DIR', Path(TEST_DIR.name)):
+            path = reports.generate_gradebook_report_xlsx(self.db, book.id, 'V', 'Test Division', '123456')
+        values = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            term = values['Term 1']
+            self.assertEqual(term['H9'].value, 11)
+            self.assertEqual(term['U9'].value, 'GENERAL MATHEMATICS')
+            self.assertEqual((term['AJ10'].value, term['AL10'].value), (2, 6))
+            self.assertEqual((term['D12'].value, term['Q12'].value, term['AD12'].value), (0.2, 0.5, 0.3))
+            self.assertEqual((term['AG14'].value, term['AH14'].value, term['AI14'].value), (30, 30, 40))
+        finally:
+            values.close()
+
     def test_registered_report_keeps_download_name_with_short_storage_path(self):
         from app.services import reports
         source = Path(TEST_DIR.name) / ('ClassRecord-2026-2027-AllTerms-Grade7-Berlin-Core-Subject.xlsx')
