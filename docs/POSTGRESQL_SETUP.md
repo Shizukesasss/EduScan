@@ -123,14 +123,16 @@ EDUSCAN_ENCRYPTION_KEY=your-fernet-key-here
    & "backend\.venv\Scripts\python.exe" -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
    ```
 
-4. Add the server IP to `ALLOWED_ORIGINS` so browser clients on the LAN work:
+4. Set `ALLOWED_ORIGINS` to the origin used by the browser. The local launcher uses:
 
 ```ini
-ALLOWED_ORIGINS=http://127.0.0.1:5173,http://127.0.0.1:5174,http://192.168.1.10:5174
+ALLOWED_ORIGINS=http://127.0.0.1:5175,http://localhost:5175
 ```
 
 5. Run `scripts\start.ps1`. EduScan will automatically create all tables in
    PostgreSQL on the first start (schema migrations run at startup).
+
+The supplied launcher binds the website and API to `127.0.0.1`. The origin list above is for a local browser; adding a LAN origin alone does not expose the servers on the network. Deploy a shared site and API over HTTPS with an appropriate network and camera-permission configuration if other devices must access them. A shared PostgreSQL database contains enrollment metadata, but the encrypted face samples, trained model, and matching key also need an authorized encrypted backup/restore or new consent-based enrollment. Never place the connection string or biometric artifacts in Git.
 
 ---
 

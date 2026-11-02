@@ -15,15 +15,26 @@ if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) {
 if (-not (Test-Path -LiteralPath $venvPython)) {
   $pythonCommand = Get-Command py -ErrorAction SilentlyContinue
   if ($pythonCommand) {
+    & $pythonCommand.Source -3.12 --version > $null 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Python 3.12 is required. Install it, reopen PowerShell, and rerun setup." }
     & $pythonCommand.Source -3.12 -m venv (Join-Path $backendRoot ".venv")
   } else {
     $pythonCommand = Get-Command python -ErrorAction Stop
+    & $pythonCommand.Source -c "import sys; sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)"
+    if ($LASTEXITCODE -ne 0) { throw "Python 3.12 is required. Install it, reopen PowerShell, and rerun setup." }
     & $pythonCommand.Source -m venv (Join-Path $backendRoot ".venv")
+  }
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $venvPython)) {
+    throw "Python virtual environment creation failed."
   }
 }
 
+& $venvPython -c "import sys; sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)"
+if ($LASTEXITCODE -ne 0) { throw "backend\.venv must use Python 3.12. Remove that environment and rerun setup." }
 & $venvPython -m pip install --upgrade pip --quiet
+if ($LASTEXITCODE -ne 0) { throw "Updating pip failed. Check the network connection and rerun setup." }
 & $venvPython -m pip install -r (Join-Path $backendRoot "requirements.txt") --quiet
+if ($LASTEXITCODE -ne 0) { throw "Installing backend requirements failed. Check the pip error above and rerun setup." }
 
 # ── Environment file ──────────────────────────────────────────────────────────
 $environmentFile = Join-Path $backendRoot ".env"
@@ -61,6 +72,7 @@ if (-not $usePostgres -and -not (Test-Path -LiteralPath $dbPath)) {
   Push-Location $backendRoot
   try {
     & $venvPython seed_demo.py
+    if ($LASTEXITCODE -ne 0) { throw "Creating the local demo database failed. Check the error above and rerun setup." }
   } finally {
     Pop-Location
   }
@@ -73,7 +85,10 @@ if (-not $usePostgres -and -not (Test-Path -LiteralPath $dbPath)) {
 
 # ── npm dependencies ──────────────────────────────────────────────────────────
 Push-Location $projectRoot
-try { & npm.cmd ci --silent } finally { Pop-Location }
+try {
+  & npm.cmd ci --silent
+  if ($LASTEXITCODE -ne 0) { throw "Installing frontend dependencies failed. Check the npm error above and rerun setup." }
+} finally { Pop-Location }
 
 Write-Host ""
 Write-Host "Setup complete. Run:  .\scripts\start.ps1"

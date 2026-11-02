@@ -1,6 +1,6 @@
 # Local camera models
 
-`face_detection_yunet_2023mar.onnx` is the OpenCV Zoo YuNet face detector. EduScan's OpenCV 4.12 runtime uses this version to check human facial landmarks locally before enrollment. LBPH remains the identity recognizer.
+`face_detection_yunet_2023mar.onnx` is the OpenCV Zoo YuNet face detector. EduScan's OpenCV 4.12 runtime uses this version to check human facial landmarks locally before enrollment. SFace comparisons decide gate identity; LBPH is retained for model readiness and diagnostic scores.
 
 - Source: https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
 - Model download: https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
@@ -9,6 +9,8 @@
 - License: MIT; original attribution and terms are in `YUNET-LICENSE.txt`.
 
 Keep this bundled file with the application. Human-face verification fails closed if it is missing or fails its integrity check. No camera frames are sent to OpenCV or another online service. The detector and geometric landmark checks reduce animal/object false positives; they are not a perfect species classifier. Validate with representative authorized human captures and animal/object negatives before deployment.
+
+`face_recognition_sface_2021dec.onnx` is the bundled local SFace feature model used for enrollment comparisons and gate identity checks. It is 38,696,353 bytes (SHA-256 `0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79`). Its bundled license is `SFACE-LICENSE.txt`. This public model file is distinct from EduScan's private trained LBPH model and encrypted enrollment samples, which must not be committed to Git.
 
 ## Photo/video presentation check
 

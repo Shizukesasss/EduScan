@@ -62,6 +62,9 @@ backend/test_formula.xlsx
 # ─── Agent scratch directory ──────────────────────────────────────────────────
 scratch/
 work/
+demo-reports/
+.agents/
+skills-lock.json
 
 # Local test databases, generated reports, and encryption keys
 backend/data/eduscan.db-*

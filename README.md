@@ -1,6 +1,24 @@
 # EduScan
 
-EduScan is the working local-first attendance, SMS, grading, and SF2 reporting system for San Jose National High School. It uses a browser camera and an OpenCV LBPH model on the school server; biometric frames are not sent to a cloud recognition provider.
+EduScan is the local-first attendance, SMS, grading, and SF2 reporting system for San Jose National High School. The browser captures camera frames; the local EduScan API compares faces with SFace references, maintains an LBPH model for diagnostics, and checks liveness. Camera frames are not sent to a cloud recognition provider.
+
+## Clone and run on another Windows computer
+
+Install Git, **Python 3.12**, and **Node.js 22.12+** (or 20.19+), then run these commands in PowerShell:
+
+```powershell
+git clone https://github.com/Shizukesasss/EduScan.git
+Set-Location .\EduScan
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+.\scripts\setup.ps1
+.\scripts\start.ps1
+```
+
+Open `http://127.0.0.1:5175`; the API health endpoint is `http://127.0.0.1:8000/api/health`. To start or restart from Command Prompt, run `scripts\eduscan.cmd start` or `scripts\eduscan.cmd restart`. The CMD launcher asks before applying migrations and seed data to a configured remote database.
+
+`setup.ps1` creates a Python virtual environment, installs pinned packages from `backend/requirements.txt`, runs `npm ci` from `package-lock.json`, creates `backend/.env` from the example, and seeds a local SQLite demo database when appropriate. It now stops if a dependency installation or local seed fails. The repository includes the official class-record workbooks, an SF2 template, and the public YuNet, SFace, and anti-spoof ONNX files. Node packages and Python wheels are installed during setup rather than committed to Git. PostgreSQL/MySQL servers, a webcam, and an Android SMS gateway are external services or devices; configure them as needed. See [the full installation guide](docs/INSTALLATION.md).
+
+**A clone contains code and bundled public resources, not the current school's private data.** `backend/.env`, the database password, biometric samples, the trained LBPH model, the Fernet encryption key, the application secret, and generated reports are excluded. A new local setup starts with its own database and must enroll authorized people to train its model. To preserve an existing school's enrollment and attendance, an authorized administrator must restore a matching encrypted EduScan backup containing the database, face files, model, and keys through [backup and recovery](docs/DISASTER_RECOVERY.md). Pointing another installation at the same Supabase database alone does not transfer its local biometric files or key. Keep those artifacts in approved private storage, never Git.
 
 ## Documentation
 
@@ -54,7 +72,7 @@ EduScan is the working local-first attendance, SMS, grading, and SF2 reporting s
 
 ## Install
 
-Requirements: Windows, Python 3.12, Node.js/npm, a webcam, and optionally MySQL plus a dedicated Android phone for SMS.
+Requirements: Windows, Python 3.12, Node.js 22.12+ or 20.19+ with npm, a webcam, and optionally PostgreSQL/MySQL plus a dedicated Android phone for SMS.
 
 From PowerShell in the project directory:
 
@@ -80,7 +98,7 @@ Create the MySQL database and restricted application account first. After comple
 .\scripts\start.ps1
 ```
 
-- Web application: `http://127.0.0.1:5174`
+- Web application: `http://127.0.0.1:5175`
 - API health: `http://127.0.0.1:8000/api/health`
 - API documentation: `http://127.0.0.1:8000/docs`
 - Logs: `logs/`
@@ -113,6 +131,8 @@ EduScan trains a local LBPH model after enrollment, but gate identity is decided
 npm run verify
 .\backend\.venv\Scripts\python.exe -m compileall -q backend\app
 ```
+
+For the automated suites, install the optional test runner (`.\backend\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt`), then run `node --test` and `.\backend\.venv\Scripts\python.exe -m pytest backend\tests`. The backend tests use isolated test databases; physical camera recognition, SMS delivery, and backup restoration still require a controlled device and recovery drill.
 
 Formal acceptance, device-volume, spoof-resistance, security, recovery-drill, and end-user evaluation phases are intentionally scheduled later. Camera hardware and actual Android SMS delivery require their real devices; a successful Local Server test message confirms the configured route but does not replace delivery monitoring.
 
