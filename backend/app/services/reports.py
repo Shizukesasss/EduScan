@@ -350,8 +350,14 @@ def _write_class_record_workbook(template: Path, target: Path, changes: dict[str
                         raise ValueError(f'Expected calculation formula in {sheet_name}!{coordinate}')
                     cell = re.sub(rb'<v\b[^>]*(?:/>|>.*?</v>)', b'', match.group(), flags=re.DOTALL)
                     opening_end = cell.find(b'>') + 1
-                    cell = re.sub(rb'\s+t="[^"]*"', b'', cell[:opening_end]) + cell[opening_end:]
-                    cell = cell.replace(b'</c>', b'<v>' + format(float(value), '.15g').encode('ascii') + b'</v></c>')
+                    opening = re.sub(rb'\s+t="[^"]*"', b'', cell[:opening_end])
+                    if isinstance(value, str):
+                        opening = opening[:-1] + b' t="str">'
+                        cached_value = html.escape(value, quote=False).encode('utf-8')
+                    else:
+                        cached_value = format(float(value), '.15g').encode('ascii')
+                    cell = opening + cell[opening_end:]
+                    cell = cell.replace(b'</c>', b'<v>' + cached_value + b'</v></c>')
                     content = content[:match.start()] + cell + content[match.end():]
                 updated_sheets[paths[sheet_name]] = content
             # Include unused term sheets in combined templates; 100.00 needs more space.

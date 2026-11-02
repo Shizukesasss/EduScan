@@ -1007,6 +1007,9 @@ def export_shs_ecr(
         term_changes, term_formula_values = _term_changes(
             term_full, sibling_items, grade_cache, current_males, current_females,
         )
+        for roster, first_row in ((current_males, 17), (current_females, 68)):
+            for offset, student in enumerate(roster):
+                term_formula_values[f"C{first_row + offset}"] = student["full_name"]
         changes[sheet_name].update(term_changes)
         formulas[sheet_name] = term_formula_values
 

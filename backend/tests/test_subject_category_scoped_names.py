@@ -82,12 +82,22 @@ class SubjectCategoryScopedNamesTests(unittest.TestCase):
             path = reports.generate_gradebook_report_xlsx(
                 fixture.db, book.id, "V", "Test Division", "123456",
             )
-            workbook = load_workbook(path, read_only=True)
+            workbook = load_workbook(path, read_only=True, data_only=True)
             try:
                 self.assertIn("Term 1", workbook.sheetnames)
                 self.assertIn("HELPER", workbook.sheetnames)
+                self.assertEqual(workbook["INPUT DATA"]["O11"].value, "First Student")
+                self.assertEqual(workbook["INPUT DATA"]["S11"].value, "Second Student")
+                self.assertEqual(workbook["Term 1"]["C17"].value, "First Student")
+                self.assertEqual(workbook["Term 1"]["C68"].value, "Second Student")
             finally:
                 workbook.close()
+            formulas = load_workbook(path, read_only=True, data_only=False)
+            try:
+                self.assertIn("'INPUT DATA'!O11", formulas["Term 1"]["C17"].value)
+                self.assertIn("'INPUT DATA'!S11", formulas["Term 1"]["C68"].value)
+            finally:
+                formulas.close()
 
     def test_grade12_academic_work_immersion_exports_official_ecr(self) -> None:
         self._assert_grade12_work_immersion_export(
