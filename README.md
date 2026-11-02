@@ -18,6 +18,16 @@ Open `http://127.0.0.1:5175`; the API health endpoint is `http://127.0.0.1:8000/
 
 `setup.ps1` creates a Python virtual environment, installs pinned packages from `backend/requirements.txt`, runs `npm ci` from `package-lock.json`, creates `backend/.env` from the example, and seeds a local SQLite demo database when appropriate. It now stops if a dependency installation or local seed fails. The repository includes the official class-record workbooks, an SF2 template, and the public YuNet, SFace, and anti-spoof ONNX files. Node packages and Python wheels are installed during setup rather than committed to Git. PostgreSQL/MySQL servers, a webcam, and an Android SMS gateway are external services or devices; configure them as needed. See [the full installation guide](docs/INSTALLATION.md).
 
+Dependencies installed or supplied outside Git:
+
+| Part | Requirement | Where to find exact versions or setup |
+| --- | --- | --- |
+| Web app | React, React DOM, React Router, Lucide; Vite, React plugin, Oxlint for building | `package.json` and locked `package-lock.json`; installed by `npm ci` |
+| API | FastAPI, Uvicorn, SQLAlchemy, PyMySQL, psycopg2, python-multipart, OpenCV, NumPy, Cryptography, HTTPX, openpyxl, Pillow | Pinned `backend/requirements.txt`; installed by `setup.ps1` |
+| Tests | pytest | Optional `backend/requirements-dev.txt` |
+| Devices and services | Webcam; SQLite locally or a configured PostgreSQL/MySQL server; optional Android SMS Gateway phone | `backend/.env.example` and the installation guides |
+| Database recovery | PostgreSQL client/server tools or MySQL client tools, matching the configured database | [Recovery guide](docs/POSTGRES_RECOVERY.md) and [disaster recovery guide](docs/DISASTER_RECOVERY.md) |
+
 **A clone contains code and bundled public resources, not the current school's private data.** `backend/.env`, the database password, biometric samples, the trained LBPH model, the Fernet encryption key, the application secret, and generated reports are excluded. A new local setup starts with its own database and must enroll authorized people to train its model. To preserve an existing school's enrollment and attendance, an authorized administrator must restore a matching encrypted EduScan backup containing the database, face files, model, and keys through [backup and recovery](docs/DISASTER_RECOVERY.md). Pointing another installation at the same Supabase database alone does not transfer its local biometric files or key. Keep those artifacts in approved private storage, never Git.
 
 ## Documentation

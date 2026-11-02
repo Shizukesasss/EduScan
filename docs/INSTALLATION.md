@@ -32,6 +32,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
 The setup script creates `backend\.venv`, installs pinned Python requirements, installs the locked npm dependency tree, creates `backend\.env` from the safe example when missing, and preserves existing configuration/data on later runs. If Python, pip, npm, or database seeding fails, setup stops with an error; fix that error before starting EduScan.
 
+The separate `backend\seed_demo.py` command **replaces** the local SQLite demo database. Use it only for a disposable local demonstration, never to update an installation containing school records. Normal setup runs it only when no local database exists.
+
 To supply another official SF2 workbook during setup:
 
 ```powershell

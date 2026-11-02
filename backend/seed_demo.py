@@ -8,7 +8,7 @@ Run from the backend/ directory:
 This wipes the existing SQLite database and re-creates it with:
   - 5 default user accounts (admin / teacher / teacher2 / records / scanner)
   - 2 school years (2026-2027 active, 2027-2028 inactive)
-  - 4 grading periods per school year (Q1-Q4)
+  - 4 grading periods per school year (Term 1-4)
   - 6 grade levels (Grade 7-12)
   - 7 demo sections across grade levels
   - 22 subjects (JHS and SHS)
@@ -17,7 +17,7 @@ This wipes the existing SQLite database and re-creates it with:
   - 15 demo students with fictional LRNs
   - 2 teacher persons
   - 2 DepEd grading policies (JHS and SHS)
-"""
+r"""
 from __future__ import annotations
 
 import json
@@ -74,7 +74,7 @@ def seed(db) -> None:
     print("[seed] Created school years")
 
     # ── Grading Periods ─────────────────────────────────────────────────────
-    quarter_dates = [
+    term_dates = [
         (1, date(2026, 8,  1),  date(2026, 10, 15)),
         (2, date(2026, 10, 16), date(2026, 12, 20)),
         (3, date(2027, 1,  5),  date(2027, 3,  15)),
@@ -82,10 +82,13 @@ def seed(db) -> None:
     ]
     periods = []
     for sy in [sy1, sy2]:
-        for q, s, e in quarter_dates:
+        year_offset = sy.starts_on.year - sy1.starts_on.year
+        for term_order, starts_on, ends_on in term_dates:
             periods.append(m.GradingPeriod(
-                school_year_id=sy.id, name=f"Q{q}", quarter=q,
-                starts_on=s, ends_on=e, active=(sy.id == sy1.id),
+                school_year_id=sy.id, name=f"Term {term_order}", term_order=term_order,
+                starts_on=starts_on.replace(year=starts_on.year + year_offset),
+                ends_on=ends_on.replace(year=ends_on.year + year_offset),
+                active=(sy.id == sy1.id),
             ))
     db.add_all(periods)
     db.flush()
@@ -94,7 +97,7 @@ def seed(db) -> None:
     # ── Grade Levels ─────────────────────────────────────────────────────────
     grade_levels = []
     for g in range(7, 13):
-        grade_levels.append(m.GradeLevel(name=f"Grade {g}", active=True))
+        grade_levels.append(m.GradeLevel(name=str(g), active=True))
     db.add_all(grade_levels)
     db.flush()
     gl_by_name = {gl.name: gl.id for gl in grade_levels}
@@ -103,13 +106,13 @@ def seed(db) -> None:
     # ── Sections ─────────────────────────────────────────────────────────────
     adviser = users[1]
     sections_data = [
-        ("Grade 7",  "Jose",       adviser.id,  adviser.full_name),
-        ("Grade 7",  "Rizal",      None,        None),
-        ("Grade 8",  "Mabini",     None,        None),
-        ("Grade 9",  "Luna",       None,        None),
-        ("Grade 10", "Bonifacio",  None,        None),
-        ("Grade 11", "Berlin",     users[2].id, users[2].full_name),
-        ("Grade 12", "Martin",     None,        None),
+        ("7",  "Jose",       adviser.id,  adviser.full_name),
+        ("7",  "Rizal",      None,        None),
+        ("8",  "Mabini",     None,        None),
+        ("9",  "Luna",       None,        None),
+        ("10", "Bonifacio",  None,        None),
+        ("11", "Berlin",     users[2].id, users[2].full_name),
+        ("12", "Martin",     None,        None),
     ]
     sections = []
     for gl_name, sec_name, adv_id, adv_name in sections_data:
