@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Camera, CheckCircle2, Clock3, KeyRound, LayoutDashboard, LogOut, Maximize2, Minimize2, RefreshCw, ScanFace, UserPlus } from 'lucide-react';
 import { api, auth, captureVideoFrame, localDate, enrollmentCapture } from '../../api/client';
 import StudentRegistrationModal from '../../components/Scanner/StudentRegistrationModal';
 import { cameraTestMatchMessage, cameraIdentityScore } from '../../services/enrollmentFeedback';
@@ -261,78 +260,780 @@ export default function Scanner() {
 
   const logout = () => { auth.clear(); window.location.href = '/login'; };
 
+  const stopCamera = () => {
+    pauseRecognition();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setCameraOn(false);
+    setFeedback({ ok: true, message: 'Gate camera turned off.' });
+  };
+
+  const handleCameraStatusToggle = () => {
+    if (cameraOn) stopCamera();
+    else void startCamera();
+  };
+
+  const [clockNow, setClockNow] = useState(() => new Date());
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [confirmingSignOut, setConfirmingSignOut] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  const accountMenuRef = useRef(null);
+  const accountTriggerRef = useRef(null);
+  const accountItemsRef = useRef([]);
+  const mobileMenuRef = useRef(null);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(new Date()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const onPointerDown = (event) => {
+      if (accountMenuRef.current && !accountMenuRef.current.contains(event.target)) {
+        setAccountMenuOpen(false);
+        setConfirmingSignOut(false);
+      }
+      if (mobileMenuRef.current && !mobileMenuRef.current.contains(event.target)) {
+        setMobileMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        if (accountMenuOpen) {
+          setAccountMenuOpen(false);
+          setConfirmingSignOut(false);
+          accountTriggerRef.current?.focus();
+        }
+        if (mobileMenuOpen) {
+          setMobileMenuOpen(false);
+        }
+      }
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [accountMenuOpen, mobileMenuOpen]);
+
+  const focusAccountItem = (index) => {
+    const items = accountItemsRef.current.filter(Boolean);
+    if (!items.length) return;
+    const target = items[(index + items.length) % items.length];
+    target?.focus();
+  };
+
+  const handleAccountTriggerKeyDown = (event) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      setAccountMenuOpen(true);
+      const targetIndex = event.key === 'ArrowUp' ? 1 : 0;
+      window.requestAnimationFrame(() => focusAccountItem(targetIndex));
+    }
+  };
+
+  const handleAccountMenuKeyDown = (event) => {
+    const items = accountItemsRef.current.filter(Boolean);
+    const currentIndex = items.indexOf(document.activeElement);
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      focusAccountItem(currentIndex + 1);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      focusAccountItem(currentIndex - 1);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      focusAccountItem(0);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      focusAccountItem(items.length - 1);
+    }
+  };
+
+  const operatorName = auth.name() || 'Gate Operator';
+  const operatorInitials = operatorName
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || '')
+    .join('') || 'G';
+  const operatorRoleLabel = auth.role() === 'admin' ? 'Administrator' : 'Gate Station';
+
+  const today = localDate();
+  const formattedStationDate = new Date(`${today}T12:00:00`).toLocaleDateString('en-PH', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+  const formattedStationTime = clockNow.toLocaleTimeString('en-PH', {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+
+  const scannerStatusTone = scanning
+    ? 'is-active'
+    : cameraOn
+      ? 'is-ready'
+      : 'is-standby';
+
+  const timeInCount = events.filter((e) => e.direction === 'Time In').length;
+  const timeOutCount = events.filter((e) => e.direction === 'Time Out').length;
+
   return (
     <div className="scanner-shell">
       <header className="scanner-header">
-        <div className="brand-lockup"><img src="/logo.png" alt="San Jose National High School logo" /><div><h2>EduScan Gate Station</h2><span>{previewOnly ? 'Preview only · nothing is saved' : 'San Jose National High School · local biometric station'}</span></div></div>
-        <div className="action-row">
-          {auth.role() === 'admin' && (
-            <>
-              <button className="btn-secondary" onClick={() => window.location.href = '/dashboard'}><LayoutDashboard size={16} /> Dashboard</button>
-              <button className="btn-secondary" disabled={previewOnly} title={previewOnly ? 'Open the normal scanner to enroll a person' : undefined} onClick={openEnrollment}><UserPlus size={16} /> Enroll person</button>
-            </>
-          )}
-          <button className="icon-btn" title="Account security" aria-label="Account security" onClick={() => { window.location.href = '/account/security'; }}><KeyRound size={18} /><span className="control-label">Account security</span></button>
-          {previewOnly && <a className="btn-secondary" href="/scanner">Open normal scanner</a>}
-          <div className="scanner-state"><span className={`status-dot ${scanning ? '' : 'warning-dot'}`} /> {scanning ? previewOnly ? 'PREVIEW ACTIVE' : 'RECOGNITION ACTIVE' : cameraOn ? 'CAMERA READY' : 'CAMERA OFF'}</div>
-          <button className="icon-btn" onClick={logout} title="Sign out"><LogOut size={18} /><span className="control-label">Sign out</span></button>
+        <div className="scanner-header__inner">
+          {/* Zone 1: Brand (Left) */}
+          <div className="scanner-header__brand">
+            <img
+              src="/logo.png"
+              width="40"
+              height="40"
+              alt="San Jose National High School logo"
+              className="scanner-header__logo"
+            />
+            <div className="scanner-header__brand-text">
+              <h2 className="scanner-header__title">
+                <span className="scanner-header__title-full">EduScan Gate Station</span>
+                <span className="scanner-header__title-short">EduScan Gate</span>
+              </h2>
+              <span
+                className="scanner-header__subtitle"
+                title={
+                  previewOnly
+                    ? 'Preview only · nothing is saved'
+                    : 'San Jose National High School · Local biometric station'
+                }
+              >
+                {previewOnly
+                  ? 'Preview only · nothing is saved'
+                  : 'San Jose National High School · Local biometric station'}
+              </span>
+            </div>
+          </div>
+
+          {/* Zone 2: Live Status & Clock (Center) */}
+          <div className="scanner-header__center">
+            <div className="scanner-clock" aria-label="Station live clock and date">
+              <time className="scanner-clock__time">{formattedStationTime}</time>
+              <span className="scanner-clock__date">{formattedStationDate}</span>
+            </div>
+
+            <span className="scanner-header__divider" aria-hidden="true" />
+
+            <div className="scanner-status-group" role="status" aria-live="polite">
+              <button
+                type="button"
+                className={`scanner-status-chip ${cameraOn ? 'is-online' : 'is-offline'}`}
+                onClick={handleCameraStatusToggle}
+                title={cameraOn ? 'Click to turn off gate camera' : 'Click to enable gate camera'}
+                aria-label={
+                  cameraOn
+                    ? scanning
+                      ? 'Camera on and scanning — click to turn off camera'
+                      : 'Camera on — click to turn off camera'
+                    : 'Camera off — click to enable camera'
+                }
+              >
+                <span className="scanner-status-chip__dot" aria-hidden="true" />
+                <span className="scanner-status-chip__label">
+                  {cameraOn ? (scanning ? 'Camera scanning' : 'Camera on') : 'Camera off'}
+                </span>
+              </button>
+
+              <span
+                className={`scanner-status-chip is-readonly ${backendReachable ? 'is-online' : 'is-warning'}`}
+                title={
+                  backendReachable
+                    ? 'Connected to local EduScan server'
+                    : 'Backend unreachable — scans paused until connection is restored'
+                }
+              >
+                <span className="scanner-status-chip__dot" aria-hidden="true" />
+                <span className="scanner-status-chip__label">
+                  {backendReachable ? 'Online' : 'Offline — queued'}
+                </span>
+              </span>
+            </div>
+          </div>
+
+          {/* Zone 3: Actions (Right) */}
+          <div className="scanner-header__actions">
+            {auth.role() === 'admin' && (
+              <>
+                <button
+                  type="button"
+                  className="btn-secondary scanner-action-btn scanner-action-btn--secondary"
+                  title="Return to Administrator Dashboard"
+                  aria-label="Dashboard"
+                  onClick={() => {
+                    window.location.href = '/dashboard';
+                  }}
+                >
+                  <span className="scanner-action-btn__label">Dashboard</span>
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary scanner-action-btn scanner-action-btn--primary"
+                  disabled={previewOnly}
+                  title={previewOnly ? 'Open the normal scanner to enroll a person' : 'Enroll a student or staff member'}
+                  onClick={openEnrollment}
+                >
+                  <span className="scanner-action-btn__label">Enroll person</span>
+                </button>
+              </>
+            )}
+
+            {previewOnly && (
+              <a
+                className="btn-secondary scanner-action-btn scanner-action-btn--secondary"
+                href="/scanner"
+                title="Switch to normal attendance scanner"
+              >
+                <span className="scanner-action-btn__label">Normal scanner</span>
+              </a>
+            )}
+
+            {/* User / Account Dropdown */}
+            <div className="scanner-user-menu" ref={accountMenuRef}>
+              <button
+                ref={accountTriggerRef}
+                type="button"
+                className={`scanner-user-trigger${accountMenuOpen ? ' is-open' : ''}`}
+                aria-haspopup="menu"
+                aria-expanded={accountMenuOpen}
+                aria-label={`Account menu for ${operatorName}`}
+                title={`${operatorName} (${operatorRoleLabel})`}
+                onClick={() => {
+                  setAccountMenuOpen((prev) => {
+                    const next = !prev;
+                    if (!next) setConfirmingSignOut(false);
+                    return next;
+                  });
+                }}
+                onKeyDown={handleAccountTriggerKeyDown}
+              >
+                <span className="scanner-user-trigger__avatar" aria-hidden="true">
+                  {operatorInitials}
+                </span>
+                <span className="scanner-user-trigger__name">{operatorName}</span>
+              </button>
+
+              {accountMenuOpen && (
+                <div
+                  className="scanner-user-dropdown"
+                  role="menu"
+                  aria-label="Station account actions"
+                  onKeyDown={handleAccountMenuKeyDown}
+                >
+                  <div className="scanner-user-dropdown__header">
+                    <strong>{operatorName}</strong>
+                    <span>{operatorRoleLabel}</span>
+                  </div>
+                  <div className="scanner-user-dropdown__divider" role="separator" />
+                  <button
+                    ref={(el) => {
+                      accountItemsRef.current[0] = el;
+                    }}
+                    type="button"
+                    role="menuitem"
+                    className="scanner-user-dropdown__item"
+                    onClick={() => {
+                      setAccountMenuOpen(false);
+                      window.location.href = '/account/security';
+                    }}
+                  >
+                    <span>Account security</span>
+                  </button>
+                  <div className="scanner-user-dropdown__divider" role="separator" />
+                  {!confirmingSignOut ? (
+                    <button
+                      ref={(el) => {
+                        accountItemsRef.current[1] = el;
+                      }}
+                      type="button"
+                      role="menuitem"
+                      className="scanner-user-dropdown__item is-danger"
+                      onClick={() => setConfirmingSignOut(true)}
+                    >
+                      <span>Sign out</span>
+                    </button>
+                  ) : (
+                    <div className="scanner-signout-confirm" role="group" aria-label="Confirm sign out">
+                      <p className="scanner-signout-confirm__prompt">Sign out of this gate station?</p>
+                      <div className="scanner-signout-confirm__actions">
+                        <button
+                          type="button"
+                          className="btn-secondary scanner-signout-confirm__btn"
+                          onClick={() => setConfirmingSignOut(false)}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          ref={(el) => {
+                            accountItemsRef.current[1] = el;
+                          }}
+                          type="button"
+                          className="btn-danger scanner-signout-confirm__btn is-confirm"
+                          onClick={logout}
+                        >
+                          Sign out
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Mobile Menu Toggle (< 640px) */}
+            <div className="scanner-mobile-menu" ref={mobileMenuRef}>
+              <button
+                type="button"
+                className="scanner-mobile-toggle"
+                aria-label={mobileMenuOpen ? 'Close station menu' : 'Open station menu'}
+                aria-expanded={mobileMenuOpen}
+                title={mobileMenuOpen ? 'Close menu' : 'Station menu'}
+                onClick={() => {
+                  setMobileMenuOpen((prev) => !prev);
+                  setConfirmingSignOut(false);
+                }}
+              >
+                {mobileMenuOpen ? 'Close menu' : 'Menu'}
+              </button>
+
+              {mobileMenuOpen && (
+                <div className="scanner-mobile-sheet" role="dialog" aria-label="Gate station menu">
+                  <div className="scanner-mobile-sheet__status">
+                    <button
+                      type="button"
+                      className={`scanner-status-chip ${cameraOn ? 'is-online' : 'is-offline'}`}
+                      onClick={handleCameraStatusToggle}
+                    >
+                      <span className="scanner-status-chip__dot" aria-hidden="true" />
+                      <span>{cameraOn ? 'Camera on' : 'Camera off'}</span>
+                    </button>
+                    <span className={`scanner-status-chip is-readonly ${backendReachable ? 'is-online' : 'is-warning'}`}>
+                      <span className="scanner-status-chip__dot" aria-hidden="true" />
+                      <span>{backendReachable ? 'Online' : 'Offline — queued'}</span>
+                    </span>
+                  </div>
+
+                  <div className="scanner-user-dropdown__divider" role="separator" />
+
+                  <div className="scanner-mobile-sheet__actions">
+                    {auth.role() === 'admin' && (
+                      <>
+                        <button
+                          type="button"
+                          className="btn-primary scanner-action-btn scanner-action-btn--primary"
+                          disabled={previewOnly}
+                          onClick={() => {
+                            setMobileMenuOpen(false);
+                            openEnrollment();
+                          }}
+                        >
+                          <span>Enroll person</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary scanner-action-btn scanner-action-btn--secondary"
+                          onClick={() => {
+                            window.location.href = '/dashboard';
+                          }}
+                        >
+                          <span>Dashboard</span>
+                        </button>
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      className="scanner-user-dropdown__item"
+                      onClick={() => {
+                        window.location.href = '/account/security';
+                      }}
+                    >
+                      <span>Account security</span>
+                    </button>
+                    {!confirmingSignOut ? (
+                      <button
+                        type="button"
+                        className="scanner-user-dropdown__item is-danger"
+                        onClick={() => setConfirmingSignOut(true)}
+                      >
+                        <span>Sign out</span>
+                      </button>
+                    ) : (
+                      <div className="scanner-signout-confirm">
+                        <p className="scanner-signout-confirm__prompt">Sign out of this gate station?</p>
+                        <div className="scanner-signout-confirm__actions">
+                          <button
+                            type="button"
+                            className="btn-secondary scanner-signout-confirm__btn"
+                            onClick={() => setConfirmingSignOut(false)}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-danger scanner-signout-confirm__btn is-confirm"
+                            onClick={logout}
+                          >
+                            Sign out
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       </header>
 
       <main className="scanner-main">
-        <section className="scanner-stage">
-          {previewOnly && <div className="notice notice-blue" role="status"><div><strong>Preview only</strong><p>This uses the main scanner's identity and configured blink checks. Keep both people visible and blink naturally. No attendance, SMS, review changes, enrollment, or camera frames are saved. Photo/video protection remains disabled in the restored flow.</p></div></div>}
-          {scanning && !backendReachable && <div className="notice notice-danger scanner-backend-warning"><AlertTriangle size={22} /><div><strong>Attendance backend unavailable.</strong> Recognition is paused from recording attendance or SMS notices. Keep people at the gate and use the documented manual attendance fallback until the API is restored.</div></div>}
-          <div className="station-health-strip"><span className={`tag ${backendReachable && stationHealth.database ? 'tag-success' : 'tag-danger'}`}>API / database: {backendReachable && stationHealth.database ? 'ready' : 'unavailable'}</span><span className={`tag ${cameraOn ? 'tag-success' : 'tag-gray'}`}>Camera: {cameraOn ? 'ready' : 'off'}</span><span className={`tag ${stationHealth.gateway_enabled && stationHealth.gateway_reachable ? 'tag-success' : 'tag-warning'}`}>SMS: {previewOnly ? 'disabled in preview' : stationHealth.gateway_enabled ? stationHealth.gateway_reachable ? 'reachable' : 'unreachable' : 'disabled'}</span><span className={`tag ${stationHealth.recognition_model ? 'tag-success' : 'tag-warning'}`}>LBPH: {stationHealth.recognition_model ? 'ready' : 'model missing'}</span></div>
-          {!previewOnly && backendReachable && stationHealth.api && stationHealth.attendance_auto_visit_ready !== true && <div className="notice notice-warning" role="alert"><div><strong>Updated API required for attendance.</strong><p>Restart EduScan to enable automatic Time In and Time Out.</p></div></div>}
-          <div className="camera-placeholder live-camera" ref={cameraFrameRef}>
-            <video ref={videoRef} playsInline muted aria-label="Gate camera preview" />
-            {!cameraOn && <div className="camera-frame"><Camera size={78} /><h1>Gate camera</h1><p>Camera frames are processed by the local LBPH server and are not uploaded to a cloud service.</p></div>}
-            {scanning && <div className="multi-face-guide"><span>Multi-face scan area · up to five people facing the camera</span></div>}
-            <button className="camera-fullscreen-toggle" onClick={toggleCameraFullscreen} title={cameraFullscreen ? 'Exit full-screen camera' : 'Open full-screen camera'}>
-              {cameraFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
-              <span>{cameraFullscreen ? 'Exit full screen' : 'Full-screen camera'}</span>
-            </button>
-          </div>
-
-          <div className="scanner-control-panel">
-            <div><p className="eyebrow">{previewOnly ? 'Preview only' : 'Automatic attendance'}</p><h2>{cameraOn ? 'Multi-face recognition station' : 'Start the secured gate camera'}</h2><p>{previewOnly ? 'Recognition repeats in four-second captures using the main scanner flow. Each person must pass identity and configured blink checks. Nothing is saved. Pause recognition when finished.' : 'Up to five people can face the camera together. Each verified person is timed in on the first visit and timed out on the next visit after leaving the camera view. Brief missed detections keep the same visit open. Face the camera long enough to complete recognition and the configured blink check. Photo/video protection is disabled; use a live face directly.'}</p></div>
-            <div className="scanner-control-actions">
-              {!cameraOn ? <button className="btn-primary" onClick={startCamera}><Camera size={18} /> Enable camera</button>
-                : <button className={scanning ? 'btn-secondary' : 'btn-primary'} disabled={!scanning && (!backendReachable || (!previewOnly && stationHealth.attendance_auto_visit_ready !== true) || stationHealth?.recognition_model === false)} onClick={toggleScanning}><ScanFace size={18} /> {scanning ? 'Pause recognition' : 'Start recognition'}</button>}
-              {cameraOn && <button className="btn-secondary" disabled={!backendReachable || stationHealth?.recognition_model === false || (!previewOnly && stationHealth.attendance_auto_visit_ready !== true)} onClick={restartRecognition}><RefreshCw size={18} /> Restart recognition</button>}
-            </div>
-          </div>
-
-          <div className="notice notice-blue"><div><strong>Need staff help with registration?</strong><p>An administrator can create or update the school record in People &amp; records, including when camera enrollment cannot be completed. After verifying the person's identity, staff can record an assisted visit in Attendance.</p>{auth.role() === 'admin' && <button className="btn-secondary" disabled={previewOnly} onClick={async () => {
-            pauseRecognition();
-            streamRef.current?.getTracks().forEach((track) => track.stop());
-            setCameraOn(false);
-            try { await pendingScanRef.current; } catch { /* Scan errors are shown by the scanner. */ }
-            window.location.href = '/dashboard/administration?tab=people';
-          }}>Open People &amp; records</button>}</div></div>
-
-          {stationHealth?.recognition_model === false && <div className="notice notice-warning" role="alert"><div><strong>Face model unavailable on this computer.</strong><p>{stationHealth.recognition_message || 'Restore the encrypted model and matching key, or enroll authorized people and train a model here.'}</p></div></div>}
-
-          {feedback && (
-            <div className={`scan-feedback ${feedback.ok ? 'scan-success' : 'scan-warning'}`}>
-              {feedback.ok ? <CheckCircle2 size={24} /> : <AlertTriangle size={24} />}
-              <div><strong>{previewOnly ? 'Preview result - nothing saved' : feedback.batch ? 'Multi-face scan result' : feedback.ok ? 'Camera ready' : 'Attention'}</strong>
-                <p>{feedback.message}</p>{feedback.reasons?.length > 0 && <details><summary>Capture details</summary><ul>{feedback.reasons.slice(0, 3).map(reason => <li key={reason}>{reason}</li>)}</ul></details>}{feedback.batch?.map((item, index) => <span className="muted-small" key={`${item.person?.id || index}-${item.distance}`}>{item.person?.full_name || `Unknown person ${index + 1}`}: {item.attendance_event?.recorded ? attendanceLabel(item.attendance_event) : item.message} · {item.liveness_verified ? 'liveness verified' : 'liveness pending'} · {cameraIdentityScore(item)}</span>)}</div>
+        <section className="scanner-stage" aria-label="Gate camera and recognition controls">
+          {previewOnly && (
+            <div className="notice notice-blue" role="status">
+              <div>
+                <strong>Preview only</strong>
+                <p>
+                  This uses the main scanner&apos;s identity and configured blink checks. Keep both people visible and blink naturally. No attendance, SMS, review changes, enrollment, or camera frames are saved. Photo/video protection remains disabled in the restored flow.
+                </p>
+              </div>
             </div>
           )}
+
+          {scanning && !backendReachable && (
+            <div className="notice notice-danger scanner-backend-warning">
+              <div>
+                <strong>Attendance backend unavailable.</strong> Recognition is paused from recording attendance or SMS notices. Keep people at the gate and use the documented manual attendance fallback until the API is restored.
+              </div>
+            </div>
+          )}
+
+          {!previewOnly && backendReachable && stationHealth.api && stationHealth.attendance_auto_visit_ready !== true && (
+            <div className="notice notice-warning" role="alert">
+              <div>
+                <strong>Updated API required for attendance.</strong>
+                <p>Restart EduScan to enable automatic Time In and Time Out.</p>
+              </div>
+            </div>
+          )}
+
+          {stationHealth?.recognition_model === true && stationHealth.recognition_code === 'ready_with_missing_enrollments' && (
+            <div className="notice notice-warning" role="status">
+              <div>
+                <strong>Some face enrollments unavailable.</strong>
+                <p>{stationHealth.recognition_message}</p>
+              </div>
+            </div>
+          )}
+
+          {stationHealth?.recognition_model === false && (
+            <div className="notice notice-warning" role="alert">
+              <div>
+                <strong>Face model unavailable on this computer.</strong>
+                <p>
+                  {stationHealth.recognition_message ||
+                    'Restore the encrypted model and matching key, or enroll authorized people and train a model here.'}
+                </p>
+              </div>
+            </div>
+          )}
+
+          <div
+            className={`camera-placeholder live-camera${scanning ? ' is-scanning' : ''}${cameraOn ? ' is-camera-on' : ''}`}
+            ref={cameraFrameRef}
+          >
+            <video ref={videoRef} playsInline muted aria-label="Gate camera preview" />
+
+            <div className="camera-hud-top">
+              <span className={`camera-hud-badge ${scannerStatusTone}`}>
+                <span className="camera-hud-badge__dot" aria-hidden="true" />
+                {scanning
+                  ? previewOnly
+                    ? 'Live preview scan'
+                    : 'Live gate recognition'
+                  : cameraOn
+                    ? 'Camera feed active · recognition paused'
+                    : 'Camera standby'}
+              </span>
+
+              <button
+                type="button"
+                className="camera-fullscreen-toggle"
+                onClick={toggleCameraFullscreen}
+                title={cameraFullscreen ? 'Exit full-screen camera' : 'Open full-screen camera'}
+              >
+                <span>{cameraFullscreen ? 'Exit full screen' : 'Full-screen camera'}</span>
+              </button>
+            </div>
+
+            {!cameraOn && (
+              <div className="camera-frame">
+                <div className="camera-standby-card">
+                  <h1>Gate camera is on standby</h1>
+                  <p>
+                    Camera frames are processed locally by the on-premise LBPH recognition server and are never uploaded to an external cloud service.
+                  </p>
+                  <div className="camera-standby-pills" aria-hidden="true">
+                    <span>Local LBPH processing</span>
+                    <span>Up to 5 faces</span>
+                    <span>Blink liveness check</span>
+                  </div>
+                  <button type="button" className="btn-primary camera-frame__cta" onClick={startCamera}>
+                    <span>Enable gate camera</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {scanning && (
+              <div className="multi-face-guide">
+                <span>Multi-face scan area · up to five people facing the camera</span>
+              </div>
+            )}
+          </div>
+
+          {feedback && (
+            <div className={`scan-feedback ${feedback.ok ? 'scan-success' : 'scan-warning'}`} role="status">
+              <div className="scan-feedback__body">
+                <strong>
+                  {previewOnly
+                    ? 'Preview result — nothing saved'
+                    : feedback.batch
+                      ? 'Multi-face scan result'
+                      : feedback.ok
+                        ? 'Camera ready'
+                        : 'Attention'}
+                </strong>
+                <p>{feedback.message}</p>
+                {feedback.reasons?.length > 0 && (
+                  <details className="scan-feedback__details">
+                    <summary>Capture details</summary>
+                    <ul>
+                      {feedback.reasons.slice(0, 3).map((reason) => (
+                        <li key={reason}>{reason}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+                {feedback.batch?.length > 0 && (
+                  <div className="scan-feedback__batch">
+                    {feedback.batch.map((item, index) => (
+                      <span
+                        className="scan-feedback__person-chip muted-small"
+                        key={`${item.person?.id || index}-${item.distance}`}
+                      >
+                        <strong>{item.person?.full_name || `Unknown person ${index + 1}`}</strong>:{' '}
+                        {item.attendance_event?.recorded ? attendanceLabel(item.attendance_event) : item.message} ·{' '}
+                        {item.liveness_verified ? 'liveness verified' : 'liveness pending'} ·{' '}
+                        {cameraIdentityScore(item)}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="scanner-control-panel">
+            <div className="scanner-control-panel__copy">
+              <p className="eyebrow">{previewOnly ? 'Preview only' : 'Automatic attendance'}</p>
+              <h2>{cameraOn ? 'Multi-face recognition station' : 'Start the secured gate camera'}</h2>
+              <p>
+                {previewOnly
+                  ? 'Recognition repeats in four-second captures using the main scanner flow. Each person must pass identity and configured blink checks. Nothing is saved. Pause recognition when finished.'
+                  : 'Up to five people can face the camera together. Each verified person is timed in on the first visit and timed out on the next visit after leaving the camera view. Face the camera long enough to complete recognition and the configured blink check.'}
+              </p>
+            </div>
+            <div className="scanner-control-actions">
+              {!cameraOn ? (
+                <button type="button" className="btn-primary scanner-control-btn" onClick={startCamera}>
+                  <span>Enable camera</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className={`${scanning ? 'btn-secondary' : 'btn-primary'} scanner-control-btn`}
+                  disabled={
+                    !scanning &&
+                    (!backendReachable ||
+                      (!previewOnly && stationHealth.attendance_auto_visit_ready !== true) ||
+                      stationHealth?.recognition_model === false)
+                  }
+                  onClick={toggleScanning}
+                >
+                  <span>{scanning ? 'Pause recognition' : 'Start recognition'}</span>
+                </button>
+              )}
+              {cameraOn && (
+                <button
+                  type="button"
+                  className="btn-secondary scanner-control-btn"
+                  disabled={
+                    !backendReachable ||
+                    stationHealth?.recognition_model === false ||
+                    (!previewOnly && stationHealth.attendance_auto_visit_ready !== true)
+                  }
+                  onClick={restartRecognition}
+                >
+                  <span>Restart recognition</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="notice notice-blue scanner-assist-banner">
+            <div className="scanner-assist-banner__copy">
+              <strong>Need staff help with registration?</strong>
+              <p>
+                An administrator can create or update the school record in People &amp; records, including when camera enrollment cannot be completed. After verifying the person&apos;s identity, staff can record an assisted visit in Attendance.
+              </p>
+            </div>
+            {auth.role() === 'admin' && (
+              <button
+                type="button"
+                className="btn-secondary scanner-assist-banner__btn"
+                disabled={previewOnly}
+                onClick={async () => {
+                  pauseRecognition();
+                  streamRef.current?.getTracks().forEach((track) => track.stop());
+                  setCameraOn(false);
+                  try {
+                    await pendingScanRef.current;
+                  } catch {
+                    /* Scan errors are shown by the scanner. */
+                  }
+                  window.location.href = '/dashboard/administration?tab=people';
+                }}
+              >
+                Open People &amp; records
+              </button>
+            )}
+          </div>
         </section>
 
-        {previewOnly ? <aside className="scanner-log"><div className="scanner-log-header"><h2>Session previews</h2></div><div className="scanner-log-list">{testRuns.length === 0 && <div className="empty-state"><p>No previews yet. Enable camera and start recognition.</p></div>}{testRuns.map(run => <div className="scan-log-item" key={run.id}><strong>{run.name}</strong><p>{run.message}</p>{run.details?.length > 0 && <details open><summary>Capture details</summary><ul>{run.details.map(detail => <li key={detail}>{detail}</li>)}</ul></details>}</div>)}</div><div className="scanner-log-footer">No results or camera frames are saved to the database.</div></aside> : <aside className="scanner-log">
-          <div className="scanner-log-header"><div><p className="eyebrow">Today · {localDate()}</p><h2>Recent gate events</h2></div><Clock3 size={20} /></div>
-          <div className="scanner-log-list">
-            {events.length === 0 && <div className="empty-state"><Camera size={32} /><p>No gate events recorded today.</p></div>}
-            {events.map((event) => <div className="scan-log-item" key={event.id}><div className="scan-log-top"><strong>{event.name}</strong><span>{gateEventTime(event.time)}</span></div><div className="scan-log-meta"><span className="tag tag-gray">{event.role}</span><span className={`tag ${event.status === 'Late' ? 'tag-warning' : 'tag-success'}`}>{attendanceLabel(event)}</span></div></div>)}
-          </div>
-          <div className="scanner-log-footer">{auth.role() === 'admin' ? <a href="/dashboard/setup#sms-delivery">Review SMS delivery in System Setup</a> : 'SMS delivery is recorded by the server'}</div>
-        </aside>}
+        {previewOnly ? (
+          <aside className="scanner-log" aria-label="Session previews">
+            <div className="scanner-log-header">
+              <div>
+                <p className="eyebrow">Diagnostic mode</p>
+                <h2>Session previews</h2>
+              </div>
+              <span className="scanner-log-count">{testRuns.length}</span>
+            </div>
+            <div className="scanner-log-list">
+              {testRuns.length === 0 && (
+                <div className="empty-state">
+                  <strong>No previews yet</strong>
+                  <p>Enable the gate camera and start recognition to test matching.</p>
+                </div>
+              )}
+              {testRuns.map((run) => (
+                <div className="scan-log-item" key={run.id}>
+                  <strong>{run.name}</strong>
+                  <p>{run.message}</p>
+                  {run.details?.length > 0 && (
+                    <details open>
+                      <summary>Capture details</summary>
+                      <ul>
+                        {run.details.map((detail) => (
+                          <li key={detail}>{detail}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="scanner-log-footer">No results or camera frames are saved to the database.</div>
+          </aside>
+        ) : (
+          <aside className="scanner-log" aria-label="Recent gate events">
+            <div className="scanner-log-header">
+              <div>
+                <p className="eyebrow">Today · {today}</p>
+                <h2>Recent gate events</h2>
+              </div>
+              <div className="scanner-log-header__badge" title="Total gate events shown">
+                <span>{events.length}</span>
+              </div>
+            </div>
+
+            {events.length > 0 && (
+              <div className="scanner-log-summary" aria-label="Gate event breakdown">
+                <div className="scanner-log-summary__item">
+                  <span>Time In</span>
+                  <strong>{timeInCount}</strong>
+                </div>
+                <div className="scanner-log-summary__item">
+                  <span>Time Out</span>
+                  <strong>{timeOutCount}</strong>
+                </div>
+              </div>
+            )}
+
+            <div className="scanner-log-list">
+              {events.length === 0 && (
+                <div className="empty-state">
+                  <strong>No gate events recorded today</strong>
+                  <p>Verified arrivals and departures will appear here in real time.</p>
+                </div>
+              )}
+              {events.map((event) => {
+                const isLate = event.status === 'Late';
+                const isTimeOut = event.direction === 'Time Out';
+                const initial = String(event.name || 'P').trim().charAt(0).toUpperCase();
+                return (
+                  <div
+                    className={`scan-log-item ${isLate ? 'is-late' : isTimeOut ? 'is-timeout' : 'is-present'}`}
+                    key={event.id}
+                  >
+                    <div className="scan-log-top">
+                      <div className="scan-log-person">
+                        <span className="scan-log-avatar" aria-hidden="true">{initial}</span>
+                        <strong>{event.name}</strong>
+                      </div>
+                      <time className="scan-log-time">{gateEventTime(event.time)}</time>
+                    </div>
+                    <div className="scan-log-meta">
+                      <span className="tag tag-gray">{event.role}</span>
+                      <span className={`tag ${isLate ? 'tag-warning' : 'tag-success'}`}>
+                        {attendanceLabel(event)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="scanner-log-footer">
+              {auth.role() === 'admin' ? (
+                <a href="/dashboard/setup#sms-delivery">Review SMS delivery in System Setup</a>
+              ) : (
+                'SMS delivery is recorded by the server'
+              )}
+            </div>
+          </aside>
+        )}
       </main>
-      {registrationOpen && <StudentRegistrationModal onClose={() => setRegistrationOpen(false)} onSaved={() => { setRegistrationOpen(false); refreshLog(); }} />}
+      {registrationOpen && (
+        <StudentRegistrationModal
+          onClose={() => setRegistrationOpen(false)}
+          onSaved={() => {
+            setRegistrationOpen(false);
+            refreshLog();
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import PageHeading from '../../components/Common/PageHeading';
 import { MAPEH_AREAS, formatMapehFinalizeIssue, mapehAreaContext, sameMapehContext } from '../../services/mapehLearningAreas';
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { api, auth } from '../../api/client';
@@ -17,7 +18,7 @@ import AuditHistory from '../../components/Grading/AuditHistory';
 import AdjustmentRequestsModal from '../../components/Grading/AdjustmentRequestsModal';
 import ValidationChecklist from '../../components/Grading/ValidationChecklist';
 import GlobalAdjustmentsTab from '../../components/Grading/GlobalAdjustmentsTab';
-import { Loader2, Search } from 'lucide-react';
+import './Grading.css';
 import { useToast } from '../../contexts/useToast';
 
 export default function Grading() {
@@ -46,6 +47,9 @@ export default function Grading() {
   const [includeHistoricalGradebooks, setIncludeHistoricalGradebooks] = useState(false);
   const [adminGradebookId, setAdminGradebookId] = useState('');
   const [adminGradebookSearch, setAdminGradebookSearch] = useState('');
+  const [recordOpen, setRecordOpen] = useState(false);
+  const recordHeadingRef = useRef(null);
+  const [openRequest, setOpenRequest] = useState(0);
 
   // Active Gradebook data from API
   const [gradebookId, setGradebookId] = useState(null);
@@ -53,6 +57,16 @@ export default function Grading() {
   const [loading, setLoading] = useState(false);
   const [structureLoading, setStructureLoading] = useState(!isReviewer);
   const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!isReviewer || !openRequest) return undefined;
+    const frame = requestAnimationFrame(() => {
+      const target = recordHeadingRef.current;
+      target?.focus({ preventScroll: true });
+      target?.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [isReviewer, openRequest, loading]);
+
   const loadRequestRef = useRef(0);
   const { showSuccess, showError } = useToast();
 
@@ -727,6 +741,7 @@ export default function Grading() {
   };
 
   const gb = fullGradebook?.gradebook;
+  const selectedRecord = existingGradebooks.find((book) => String(book.id) === adminGradebookId) || gb;
   const exportSubject = gb ? {
     category: gb.subject_category,
     is_elective: gb.subject_is_elective,
@@ -749,6 +764,7 @@ export default function Grading() {
 
   return (
     <div className="page-stack">
+    <PageHeading title="Grading" description="Select a class record to enter scores, review validation, and prepare official reports." />
 
 
       {/* Tab Navigation */}
@@ -779,7 +795,7 @@ export default function Grading() {
         No subject is assigned to your account for this school year. Ask an administrator to assign your subject in Administration → Subject Teaching Assignments.
       </div>}
 
-      {(isReviewer ? gb?.subject_name?.trim().toUpperCase()==='MAPEH' : Boolean(learningArea)) && <section className="card-static mapeh-area-selector" aria-labelledby="mapeh-area-heading">
+      {(isReviewer ? recordOpen && gb?.subject_name?.trim().toUpperCase()==='MAPEH' : Boolean(learningArea)) && <section className="card-static mapeh-area-selector" aria-labelledby="mapeh-area-heading">
         <div className="mapeh-area-selector__header">
           <div>
             <h3 id="mapeh-area-heading">MAPEH learning areas</h3>
@@ -807,20 +823,20 @@ export default function Grading() {
 
       {(activeTab === 'gradebook' || activeTab === 'metrics') && (
         <>
-          {isReviewer && <section className="card-static admin-gradebook-picker mb-4" aria-labelledby="admin-gradebook-picker-title">
+          {isReviewer && <section className="card-static admin-gradebook-picker class-record-browser" aria-labelledby="admin-gradebook-picker-title">
             <div className="admin-gradebook-picker__header">
               <div>
                 <h2 id="admin-gradebook-picker-title">Class records</h2>
-                <p>Choose a record to review its grades. Each subject and term has its own record.</p>
+                <p>Browse by school year and term, then open a class record to review its grades.</p>
               </div>
               {!existingGradebooksLoading && !existingGradebooksError && <span className="admin-gradebook-picker__count" aria-live="polite">
                 {filteredGradebookCount} {includeHistoricalGradebooks ? 'saved' : 'current'} {filteredGradebookCount === 1 ? 'record' : 'records'}
               </span>}
             </div>
+            <div className="class-record-browser__tools">
             <label className="admin-gradebook-picker__search">
               <span className="field-label">Search class records</span>
               <span className="admin-gradebook-picker__search-control">
-                <Search size={18} aria-hidden="true" />
                 <input className="input-field" type="search" value={adminGradebookSearch}
                   aria-label="Search class records"
                   placeholder="Teacher, subject, grade, section, term, or school year"
@@ -833,54 +849,6 @@ export default function Grading() {
                   }} />
               </span>
             </label>
-            {existingGradebooksLoading && <p className="admin-gradebook-picker__message" role="status">Loading class records…</p>}
-            {!existingGradebooksLoading && !existingGradebooksError && filteredGradebookCount > 0 && <div className="admin-gradebook-picker__list" aria-label="Available class records">
-              {groupedAdminGradebooks.map((group) => <section className="admin-gradebook-picker__group" key={group.label} aria-label={group.label}>
-                <div className="admin-gradebook-picker__group-heading">
-                  <h3>{group.label}</h3>
-                  <span>{group.books.length} {group.books.length === 1 ? 'record' : 'records'}</span>
-                </div>
-                <div className="admin-gradebook-picker__records">
-                  {group.books.map((book) => {
-                    const selected = String(book.id) === adminGradebookId;
-                    const status = String(book.status || 'Status unavailable');
-                    const statusClass = status.toLowerCase() === 'finalized' ? 'is-finalized' : status.toLowerCase() === 'draft' ? 'is-draft' : 'is-unknown';
-                    const area = book.learning_area === 'music_arts' ? 'Music and Arts'
-                      : book.learning_area === 'pe_health' ? 'PE and Health'
-                        : book.is_legacy_readonly ? 'Legacy record' : '';
-                    const sectionTrack = ['Academic Track', 'Technical Professional (TechPro) Track'].includes(book.section_track)
-                      && ['11', '12'].includes(String(normalizeGradeName(book.grade_name) || '').trim())
-                      ? book.section_track : '';
-                    return <button type="button" key={book.id}
-                      className={`admin-gradebook-record${selected ? ' is-selected' : ''}`}
-                      aria-pressed={selected}
-                      onClick={() => {
-                        setAdminGradebookId(String(book.id));
-                        setFullGradebook(null);
-                        setGradebookId(null);
-                        setLoading(true);
-                      }}>
-                      <span className="admin-gradebook-record__topline">
-                        <strong>{book.subject_name || 'Subject unavailable'}</strong>
-                        <span className={`admin-gradebook-record__status ${statusClass}`}>{status}</span>
-                      </span>
-                      <span className="admin-gradebook-record__details">
-                        <span>Grade {normalizeGradeName(book.grade_name) || '—'} · Section {book.section_name || 'Unassigned'}{sectionTrack ? ` · ${sectionTrack}` : ''}</span>
-                        <span>Teacher: {book.teacher_name || 'Unassigned'}</span>
-                      </span>
-                      {(area || selected) && <span className="admin-gradebook-record__footer">
-                        {area && <span className="admin-gradebook-record__area">{area}</span>}
-                        {selected && <span className="admin-gradebook-record__viewing">Viewing</span>}
-                      </span>}
-                    </button>;
-                  })}
-                </div>
-              </section>)}
-            </div>}
-            {!existingGradebooksLoading && !existingGradebooksError && existingGradebooks.length === 0 && <p className="admin-gradebook-picker__message">
-              {includeHistoricalGradebooks ? 'No saved class records are available.' : 'No current class records are available. Include older records to browse saved history.'}
-            </p>}
-            {!existingGradebooksLoading && !existingGradebooksError && existingGradebooks.length > 0 && filteredGradebookCount === 0 && <p className="admin-gradebook-picker__message">No records match that search. Try a teacher, subject, section, or term.</p>}
             <label className="checkbox-field admin-gradebook-picker__history">
               <input type="checkbox" checked={includeHistoricalGradebooks}
                 onChange={(event) => {
@@ -894,13 +862,75 @@ export default function Grading() {
                 }} />
               <span>Include older or inactive records</span>
             </label>
+            </div>
+            {existingGradebooksLoading && <p className="admin-gradebook-picker__message" role="status">Loading class records…</p>}
+            {!existingGradebooksLoading && !existingGradebooksError && filteredGradebookCount > 0 && <div className="admin-gradebook-picker__list" aria-label="Available class records">
+              {groupedAdminGradebooks.map((group) => <section className="admin-gradebook-picker__group" key={group.label} aria-label={group.label}>
+                <div className="admin-gradebook-picker__group-heading">
+                  <h3>{group.label}</h3>
+                  <span>{group.books.length} {group.books.length === 1 ? 'record' : 'records'}</span>
+                </div>
+                <div className="class-record-browser__columns" aria-hidden="true"><span>Subject</span><span>Class / section</span><span>Teacher</span><span>Status</span><span /></div>
+                <div className="admin-gradebook-picker__records">
+                  {group.books.map((book) => {
+                    const selected = String(book.id) === adminGradebookId;
+                    const status = String(book.status || 'Status unavailable');
+                    const statusClass = status.toLowerCase() === 'finalized' ? 'is-finalized' : status.toLowerCase() === 'draft' ? 'is-draft' : 'is-unknown';
+                    const area = book.learning_area === 'music_arts' ? 'Music and Arts'
+                      : book.learning_area === 'pe_health' ? 'PE and Health'
+                        : book.is_legacy_readonly ? 'Legacy record' : '';
+                    const sectionTrack = ['Academic Track', 'Technical Professional (TechPro) Track'].includes(book.section_track)
+                      && ['11', '12'].includes(String(normalizeGradeName(book.grade_name) || '').trim())
+                      ? book.section_track : '';
+                    return <button type="button" key={book.id} id={`class-record-${book.id}`}
+                      className={`admin-gradebook-record${selected ? ' is-selected' : ''}`}
+                      aria-pressed={selected}
+                      onClick={() => {
+                        setActiveTab('gradebook');
+                        setRecordOpen(true);
+                        setOpenRequest((request) => request + 1);
+                        if (selected && fullGradebook) return;
+                        setFullGradebook(null);
+                        setGradebookId(null);
+                        setLoading(true);
+                        if (selected) loadGradebook();
+                        else setAdminGradebookId(String(book.id));
+                      }}>
+                      <span className="class-record-browser__subject">
+                        <strong>{book.subject_name || 'Subject unavailable'}</strong>
+                        {area && <span className="class-record-browser__secondary">{area}</span>}
+                      </span>
+                      <span className="class-record-browser__class">
+                        <span>Grade {normalizeGradeName(book.grade_name) || '—'} · {book.section_name || 'Unassigned'}</span>
+                        {sectionTrack && <span className="class-record-browser__secondary">{sectionTrack}</span>}
+                      </span>
+                      <span className="class-record-browser__teacher"><span className="class-record-browser__mobile-label">Teacher: </span>{book.teacher_name || 'Unassigned'}</span>
+                      <span className={`admin-gradebook-record__status ${statusClass}`}>{status}</span>
+                      <span className="class-record-browser__open">{selected ? <><span>Viewing</span></> : <><span>Open</span></>}</span>
+                    </button>;
+                  })}
+                </div>
+              </section>)}
+            </div>}
+            {!existingGradebooksLoading && !existingGradebooksError && existingGradebooks.length === 0 && <p className="admin-gradebook-picker__message">
+              {includeHistoricalGradebooks ? 'No saved class records are available.' : 'No current class records are available. Include older records to browse saved history.'}
+            </p>}
+            {!existingGradebooksLoading && !existingGradebooksError && existingGradebooks.length > 0 && filteredGradebookCount === 0 && <p className="admin-gradebook-picker__message">No records match that search. Try a teacher, subject, section, or term.</p>}
             {existingGradebooksError && <p className="notice notice-danger mt-2" role="alert">Could not load class records: {existingGradebooksError}</p>}
           </section>}
+
+      {isReviewer && recordOpen && activeTab === 'gradebook' && <header className="class-record-workspace">
+        <div>
+          <h2 ref={recordHeadingRef} tabIndex={-1}>{selectedRecord?.subject_name || 'Class record'}</h2>
+          <p>{selectedRecord ? `Grade ${normalizeGradeName(selectedRecord.grade_name)} · ${selectedRecord.section_name || 'Unassigned section'} · ${selectedRecord.school_year_name || ''} · ${selectedRecord.grading_period_name || `Term ${selectedRecord.term_order}`}` : 'Loading the selected record…'}</p>
+          {selectedRecord?.teacher_name && <p>Teacher: {selectedRecord.teacher_name}</p>}
+        </div>
+      </header>}
+
 
           {/* Loading indicator */}
           {activeTab === 'metrics' && sheetLoading && (
             <div className="loading-state-card card-static text-center py-8">
-              <Loader2 size={32} className="spin text-primary mx-auto mb-2" />
               <p className="text-muted">Loading gradebook and assessment records...</p>
             </div>
           )}
@@ -918,7 +948,7 @@ export default function Grading() {
                 />
               )}
 
-              {activeTab === 'gradebook' && (
+              {activeTab === 'gradebook' && (!isReviewer || recordOpen) && (
                 <>
                   {/* Validation Checklist Panel (when toggled) */}
                   {showValidation && sheetData && (
@@ -950,7 +980,7 @@ export default function Grading() {
                     roundingMethod={sheetData?.policy?.rounding_method ?? 'half_up'}
                     reportingMethod={sheetData?.policy?.reporting_method ?? 'legacy'}
                     disabled={sheetLoading || saving || !isEditable}
-                    emptyMessage={isReviewer ? 'Select an existing class record above to view its grades.' : undefined}
+                    emptyMessage={isReviewer ? 'This class record is unavailable. Try opening it again from the list above.' : undefined}
                     loading={sheetLoading}
                     onScoreChange={handleScoreChange}
                     onStatusChange={handleStatusChange}

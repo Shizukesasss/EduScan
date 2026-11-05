@@ -313,6 +313,23 @@ class AttendanceSyncTest(unittest.TestCase):
         self.assertEqual(small[0], large[0])
         self.assertLessEqual(large[0], 151)
 
+    def test_sf2_pending_month_uses_batched_queries(self):
+        from app.services.sf2 import sf2_pending_attendance
+        self.student.enrollment_start_date = date(2026, 10, 1)
+        self.db.commit()
+        statements = []
+        def count(_conn, _cursor, statement, *_args):
+            statements.append(statement)
+        event.listen(self.engine, "before_cursor_execute", count)
+        try:
+            with patch('app.services.sf2.local_now', return_value=datetime(2026, 11, 1, tzinfo=MANILA)):
+                result = sf2_pending_attendance(self.db, [self.student], 2026, 10)
+        finally:
+            event.remove(self.engine, "before_cursor_execute", count)
+        self.assertEqual(result['unresolved_count'], 22)
+        self.assertEqual(len(result['unresolved_examples']), 5)
+        self.assertLessEqual(len(statements), 6, f'Monthly preview executed {len(statements)} queries')
+
     def test_range_rows_match_individual_rules_across_dates(self):
         starts, ends = self.day - timedelta(days=1), self.day + timedelta(days=5)
         self.student.enrollment_start_date = self.day
@@ -343,12 +360,41 @@ class AttendanceSyncTest(unittest.TestCase):
             current += timedelta(days=1)
         rows = reports.attendance_range_rows(self.db, starts, ends)
         self.assertEqual(rows, expected)
+        from app.services.attendance import rows_for_people_on_days
+        days = [starts + timedelta(days=index) for index in range((ends - starts).days + 1)]
+        batched = rows_for_people_on_days(self.db, active_people(self.db), days)
+        self.assertEqual([{**row, 'attendance_date': day} for day, day_rows in batched.items()
+                          for row in day_rows], expected)
         student_rows = {row["attendance_date"]: row for row in rows if row["person_id"] == self.student.id}
         self.assertEqual(student_rows[starts]["status"], "Not Enrolled")
         self.assertEqual(student_rows[self.day]["status"], "Late")
         self.assertEqual(student_rows[reset_date]["source"], "New gate")
         self.assertEqual(student_rows[self.day + timedelta(days=2)]["status"], "Present")
         self.assertEqual(student_rows[ends]["status"], "Enrollment Ended")
+
+    def test_sf2_pending_preserves_calendar_and_registration_rules(self):
+        from app.services.sf2 import sf2_pending_attendance, _school_days
+        from app.services.attendance import is_instructional_day
+        self.student.created_at = datetime(2026, 10, 5, 18)  # October 6 in Manila.
+        self.student.enrollment_start_date = None
+        self.db.add_all([
+            CalendarException(id='sf2-holiday', event_date=date(2026, 10, 7), event_type='Holiday',
+                              reason='Holiday', actor_user_id=self.admin.id, actor_name=self.admin.full_name),
+            CalendarException(id='sf2-special', event_date=date(2026, 10, 8), event_type='Special Schedule',
+                              reason='Special day', actor_user_id=self.admin.id, actor_name=self.admin.full_name),
+            CalendarException(id='sf2-weekend', event_date=date(2026, 10, 10), event_type='Special Schedule',
+                              reason='Weekend', actor_user_id=self.admin.id, actor_name=self.admin.full_name),
+        ])
+        self.db.commit()
+        days = [date(2026, 10, day) for day in range(1, 32)]
+        self.assertEqual(_school_days(self.db, 2026, 10),
+                         [day for day in days if is_instructional_day(self.db, day)])
+        with patch('app.services.sf2.local_now', return_value=datetime(2026, 10, 9, tzinfo=MANILA)):
+            result = sf2_pending_attendance(self.db, [self.student], 2026, 10)
+        self.assertEqual(result, {'unresolved_count': 2, 'unresolved_examples': [
+            {'date': '2026-10-06', 'name': self.student.full_name},
+            {'date': '2026-10-08', 'name': self.student.full_name},
+        ]})
 
     def test_range_filters_and_identity_deduplication_are_preserved(self):
         duplicate = Person(external_id="student", full_name="ZZ Duplicate identity", role="Student", sex="Male", grade="10", section="Rizal")

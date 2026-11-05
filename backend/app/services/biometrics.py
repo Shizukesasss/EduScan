@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
@@ -196,6 +197,12 @@ class BiometricService:
                 face.human_verified = True
                 if with_identity:
                     face.identity_feature = feature_from_detection(image, detection)
+                    # Keep the original color-frame identity template with the
+                    # LBPH crop inside the same encrypted, integrity-checked file.
+                    # Re-embedding the equalized grayscale crop changes SFace's input.
+                    payload = io.BytesIO()
+                    np.savez_compressed(payload, image=face.image, identity_feature=face.identity_feature)
+                    face.encoded = payload.getvalue()
                 processed.append(face)
             except HTTPException as exc:
                 if exc.status_code >= 500:
@@ -288,7 +295,8 @@ class BiometricService:
     def _identity_feature(self, image):
         return embedding(image, self)
 
-    def _identity_gallery(self, db, include_inactive=False, exclude_person_id=None):
+    def _identity_gallery(self, db, include_inactive=False, exclude_person_id=None,
+                          missing_person_ids: set[int] | None = None):
         query = select(BiometricSample).join(Person).where(Person.biometric_consent.is_(True))
         if not include_inactive:
             query = query.where(Person.active.is_(True))
@@ -300,9 +308,11 @@ class BiometricService:
             for sample in samples:
                 key = (sample.id, sample.person_id, sample.sha256)
                 try:
+                    if missing_person_ids is not None and not self._sample_path(sample).is_file():
+                        raise FileNotFoundError('Enrollment sample is missing')
                     feature = self._identity_cache.get(key)
                     if feature is None:
-                        feature = self._identity_feature(self._load_sample_image(sample))
+                        feature = self._load_sample_identity_feature(sample)
                 except HTTPException as error:
                     # LBPH samples are tight face crops. Some valid crops cannot be
                     # re-detected by YuNet after reload, even though they were
@@ -314,6 +324,17 @@ class BiometricService:
                     raise HTTPException(503, detail={
                         'code': 'identity_verifier_unavailable',
                         'message': 'An existing face enrollment cannot be verified. No identity was accepted; use staff assistance.',
+                    }) from error
+                except FileNotFoundError as error:
+                    if missing_person_ids is not None:
+                        missing_person_ids.add(sample.person_id)
+                        continue
+                    owner = db.get(Person, sample.person_id)
+                    raise HTTPException(503, detail={
+                        'code': 'identity_verifier_unavailable',
+                        'message': f'The saved face files for {owner.full_name} are missing on this computer. Their face enrollment needs recovery before gate recognition can resume.',
+                        'recovery_person_id': owner.id,
+                        'recovery_person_name': owner.full_name,
                     }) from error
                 except (OSError, RuntimeError, ValueError, InvalidToken, cv2.error) as error:
                     raise HTTPException(503, detail={
@@ -327,7 +348,7 @@ class BiometricService:
         for person_id, _feature in gallery:
             reference_counts[person_id] = reference_counts.get(person_id, 0) + 1
         people_without_references = {sample.person_id for sample in samples if reference_counts.get(sample.person_id, 0) < 3}
-        if people_without_references:
+        if people_without_references - (missing_person_ids or set()):
             raise HTTPException(503, detail={
                 'code': 'identity_verifier_unavailable',
                 'message': 'At least one enrolled person has fewer than three usable SFace references. Ask an administrator to re-enroll that person before recognition.',
@@ -342,6 +363,20 @@ class BiometricService:
                 'message': 'An existing face enrollment contains inconsistent identity references. Ask an administrator to re-enroll that person before recognition.',
             })
         return samples, gallery
+
+    def _recognition_gallery(self, db: Session) -> tuple[list, set[int]]:
+        missing_person_ids: set[int] = set()
+        _samples, gallery = self._identity_gallery(db, missing_person_ids=missing_person_ids)
+        # Exclude the entire affected identity, including cached/readable
+        # references. A partial enrollment must never identify that person.
+        gallery = [(person_id, feature) for person_id, feature in gallery
+                   if person_id not in missing_person_ids]
+        if not gallery:
+            raise HTTPException(409, detail={
+                'code': 'no_local_identity_references',
+                'message': 'No complete local face enrollments are available. Enroll a person on this computer or restore their samples; use assisted attendance in the meantime.',
+            })
+        return gallery, missing_person_ids
 
     def _identity_scores(self, image, gallery, feature=None):
         feature = self._identity_feature(image) if feature is None else feature
@@ -361,8 +396,10 @@ class BiometricService:
         return sorted(zip(unique_ids.tolist(), corroborated.tolist()), key=lambda item: item[1], reverse=True)
 
     def _check_duplicate_enrollment(self, db: Session, person: Person,
-                                    accepted: list[ProcessedFace]) -> None:
-        samples, gallery = self._identity_gallery(db, include_inactive=True, exclude_person_id=person.id)
+                                    accepted: list[ProcessedFace]) -> dict:
+        missing_person_ids: set[int] = set()
+        samples, gallery = self._identity_gallery(db, include_inactive=True, exclude_person_id=person.id,
+                                                 missing_person_ids=missing_person_ids)
         exact_hashes = {sample.sha256: sample.person_id for sample in samples}
         votes = {}
         for processed in accepted:
@@ -381,6 +418,8 @@ class BiometricService:
                     'message': f"This face matches the existing enrollment for {owner.full_name} ({owner.external_id}). Use that person's existing enrollment or capture the correct person's face.",
                     'existing_person_id': duplicate_id,
                 })
+        return {'status': 'incomplete' if missing_person_ids else 'complete',
+                'missing_person_ids': sorted(missing_person_ids)}
 
     def validate_enrollment_frames(self, frames: list[bytes], diagnostics: dict | None = None) -> tuple[list[ProcessedFace], list[str]]:
         if not settings.biometric_enabled:
@@ -395,7 +434,7 @@ class BiometricService:
                 processed = self.process_frame(frame, strict=True, with_identity=True)
                 if not processed.human_verified:
                     raise HTTPException(status_code=422, detail="A verified human face is required for every enrollment frame")
-                digest = hashlib.sha256(processed.encoded).hexdigest()
+                digest = hashlib.sha256(processed.image.tobytes()).hexdigest()
                 if digest in hashes:
                     rejected.append(f"Frame {index + 1}: duplicate crop")
                     continue
@@ -421,12 +460,14 @@ class BiometricService:
                 'message': 'The enrollment frames do not consistently show one person. Clear the camera area and capture this person again.',
             })
 
-        # Gate matching reloads the saved crops. Check that this same path can
+        # Gate matching reloads the saved templates. Check that this same path can
         # recover enough references before writing samples or a trained model.
         usable_references = []
         for face in accepted:
             try:
-                stored_feature = self._identity_feature(face.image)
+                stored_image, stored_feature = self._decode_sample(face.encoded)
+                if stored_feature is None:
+                    stored_feature = self._identity_feature(stored_image)
             except HTTPException as error:
                 if error.status_code == 422:
                     continue
@@ -466,7 +507,7 @@ class BiometricService:
         if require_existing is False and existing:
             raise HTTPException(status_code=409, detail="This person is already enrolled; use re-enrollment to replace the face samples")
         accepted, rejected = self.validate_enrollment_frames(frames)
-        self._check_duplicate_enrollment(db, person, accepted)
+        duplicate_check = self._check_duplicate_enrollment(db, person, accepted)
         before = self.enrollment_snapshot(db, person)
         action = "updated" if existing else "created"
         person_dir = BIOMETRIC_DIR / f"person_{person.id}"
@@ -493,8 +534,10 @@ class BiometricService:
                     quality_score=processed.quality,
                 ))
             db.flush()
-            model = self.train(db, commit=False)
+            model = self.train(db, commit=False, missing_person_ids=set(duplicate_check['missing_person_ids']))
             after = self.enrollment_snapshot(db, person)
+            if duplicate_check['status'] == 'incomplete':
+                after['duplicate_check'] = duplicate_check
             self._audit(db, person, actor, action, reason, before, after, model["version"])
             obsolete_model_paths = self._stage_inactive_model_purge(db)
             db.commit()
@@ -509,7 +552,11 @@ class BiometricService:
                 self._model_path = None
             raise
         self._unlink_files(old_paths + obsolete_model_paths)
-        return {"action": action, "accepted": len(accepted), "rejected": rejected, "enrollment": after, "model": model}
+        warnings = []
+        if duplicate_check['status'] == 'incomplete':
+            warnings.append('Enrollment saved for this person. Some older face files are missing, so duplicate checks against those records are incomplete. Affected older enrollments are unavailable for gate matching until recovered; complete local enrollments remain usable.')
+        return {"action": action, "accepted": len(accepted), "rejected": rejected, "enrollment": after,
+                "model": model, "duplicate_check": duplicate_check, "warnings": warnings}
 
     def delete_enrollment(self, db: Session, person: Person, actor: User, reason: str) -> dict:
         with self.deleting_enrollment(db, person, actor, reason) as result:
@@ -577,18 +624,42 @@ class BiometricService:
             path = BIOMETRIC_DIR / f"person_{sample.person_id}" / PureWindowsPath(sample.encrypted_path).name
         return path
 
-    def _load_sample_image(self, sample: BiometricSample) -> np.ndarray:
+    def _load_sample_data(self, sample: BiometricSample) -> bytes:
         path = self._sample_path(sample)
         encrypted = path.read_bytes()
         raw = self.fernet.decrypt(encrypted)
         if hashlib.sha256(raw).hexdigest() != sample.sha256:
             raise RuntimeError(f"Stored sample {sample.id} failed its integrity check")
+        return raw
+
+    @staticmethod
+    def _decode_sample(raw: bytes) -> tuple[np.ndarray, np.ndarray | None]:
+        if raw.startswith(b'PK'):
+            with np.load(io.BytesIO(raw), allow_pickle=False) as payload:
+                image = payload['image'].copy()
+                feature = payload['identity_feature'].copy()
+            if image.shape != FACE_SIZE or image.dtype != np.uint8:
+                raise ValueError('Invalid stored face crop')
+            if (feature.shape != (128,) or not np.isfinite(feature).all()
+                    or not np.isclose(np.linalg.norm(feature), 1.0, atol=1e-5)):
+                raise ValueError('Invalid stored identity feature')
+            return image, feature
+        # Existing PNG enrollments remain readable without a data migration.
         image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
         if image is None:
-            raise RuntimeError(f"Stored sample {sample.id} cannot be decoded")
-        return image
+            raise RuntimeError('Stored face sample cannot be decoded')
+        return image, None
 
-    def train(self, db: Session, commit: bool = True) -> dict:
+    def _load_sample_image(self, sample: BiometricSample) -> np.ndarray:
+        return self._decode_sample(self._load_sample_data(sample))[0]
+
+    def _load_sample_identity_feature(self, sample: BiometricSample, legacy_embedding=None) -> np.ndarray:
+        image, feature = self._decode_sample(self._load_sample_data(sample))
+        if feature is not None:
+            return feature
+        return self._identity_feature(image) if legacy_embedding is None else legacy_embedding(image, self)
+
+    def train(self, db: Session, commit: bool = True, missing_person_ids: set[int] | None = None) -> dict:
         samples = db.scalars(
             select(BiometricSample)
             .join(Person)
@@ -597,7 +668,21 @@ class BiometricService:
         ).all()
         if not samples:
             raise HTTPException(status_code=422, detail="No authorized biometric samples are available for training")
-        images = [self._load_sample_image(sample) for sample in samples]
+        images, usable_samples = [], []
+        for sample in samples:
+            try:
+                image = self._load_sample_image(sample)
+            except FileNotFoundError:
+                # Enrollment may proceed independently of known missing older
+                # records. Never discard their metadata or ignore corrupt files.
+                if sample.person_id in (missing_person_ids or set()):
+                    continue
+                raise
+            images.append(image)
+            usable_samples.append(sample)
+        if not usable_samples:
+            raise HTTPException(422, detail='No readable authorized biometric samples are available for training')
+        samples = usable_samples
         labels = np.array([sample.person_id for sample in samples], dtype=np.int32)
         recognizer = cv2.face.LBPHFaceRecognizer_create(1, 8, 8, 8, settings.lbph_threshold)
         recognizer.train(images, labels)
@@ -666,7 +751,10 @@ class BiometricService:
     def model_readiness(self, db: Session) -> dict:
         try:
             self._active_recognizer(db)
-            self._identity_gallery(db)
+            _gallery, missing_person_ids = self._recognition_gallery(db)
+            if missing_person_ids:
+                return {'available': True, 'code': 'ready_with_missing_enrollments',
+                        'message': f'Recognition is ready for complete local enrollments. {len(missing_person_ids)} older enrollment(s) have missing files and cannot be matched. Use assisted attendance for those people until their samples are restored.'}
             return {"available": True, "code": "ready", "message": "Trained face model is ready on this computer."}
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, dict) else {"code": "model_unavailable", "message": str(exc.detail)}
@@ -803,9 +891,9 @@ class BiometricService:
             if recognizer is None:
                 recognizer, _model = self._active_recognizer(db)
                 config = self.runtime_config(db)
-                _, gallery = self._identity_gallery(db)
-                if not gallery:
-                    raise HTTPException(409, detail={'code': 'identity_verifier_unavailable', 'message': 'No authorized identity references are available. Use staff assistance.'})
+                gallery, missing_person_ids = self._recognition_gallery(db)
+                if diagnostics is not None:
+                    diagnostics['unavailable_person_ids'] = sorted(missing_person_ids)
             current_matches = {}
             unknown = []
             predictions = []

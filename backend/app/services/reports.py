@@ -47,22 +47,35 @@ def _safe_name(value: object) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", str(value)).strip("-._") or "report"
 
 
-def register_report(db: Session, source: Path, report_type: str, parameters: dict, actor: User) -> GeneratedReport:
+def register_report(db: Session, source: Path, report_type: str, parameters: dict, actor: User,
+                    *, commit: bool = True) -> GeneratedReport:
     if not source.exists():
         raise HTTPException(status_code=500, detail="Generated report file was not found")
     report_id = str(uuid.uuid4())
     target = REPORT_DIR / f"{report_id}{source.suffix}"
-    shutil.copy2(source, target)
-    digest = hashlib.sha256(target.read_bytes()).hexdigest()
-    record = GeneratedReport(
-        id=report_id, report_type=report_type, filename=source.name, file_path=str(target), file_sha256=digest,
-        parameters_json=json.dumps(parameters, default=str, sort_keys=True), status="Generated",
-        generated_by=actor.id, generated_by_name=actor.full_name, generated_by_role=actor.role,
-    )
-    db.add(record)
-    db.commit()
-    db.refresh(record)
-    return record
+    committed = False
+    try:
+        shutil.copy2(source, target)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        record = GeneratedReport(
+            id=report_id, report_type=report_type, filename=source.name, file_path=str(target), file_sha256=digest,
+            parameters_json=json.dumps(parameters, default=str, sort_keys=True), status="Generated",
+            generated_by=actor.id, generated_by_name=actor.full_name, generated_by_role=actor.role,
+        )
+        db.add(record)
+        if commit:
+            db.commit()
+            committed = True
+            db.refresh(record)
+        else:
+            db.flush()
+        return record
+    except Exception:
+        if not committed:
+            if commit:
+                db.rollback()
+            target.unlink(missing_ok=True)
+        raise
 
 
 def official_sf2_preview(path: Path) -> dict:

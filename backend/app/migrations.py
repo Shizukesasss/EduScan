@@ -42,6 +42,7 @@ MIGRATIONS = (
     ("0029_rename_shs_maritime_cluster", "Rename the SHS Maritime Transport cluster to Maritime"),
     ("0030_subject_names_unique_by_category", "Scope subject-name uniqueness to category while retaining globally unique codes"),
     ("0031_subject_names_group_shs_categories", "Treat legacy SHS category labels as one level for subject-name uniqueness"),
+    ("0032_google_identity", "Link verified DepEd Google subjects and reserve school-approved account emails"),
 )
 
 
@@ -82,7 +83,13 @@ def run_migrations(engine: Engine) -> list[str]:
         for version, description in MIGRATIONS:
             if version in applied:
                 continue
-            if version == "0025_person_date_of_birth":
+            if version == "0032_google_identity":
+                if inspect(connection).has_table("users"):
+                    _add_column_if_missing(connection, "users", "google_sub", "VARCHAR(255) NULL")
+                    _add_column_if_missing(connection, "users", "google_email", "VARCHAR(254) NULL")
+                    _create_index_if_missing(connection, "users", "ix_users_google_sub", "google_sub", unique=True)
+                    _create_index_if_missing(connection, "users", "ix_users_google_email", "google_email", unique=True)
+            elif version == "0025_person_date_of_birth":
                 _add_column_if_missing(connection, "persons", "date_of_birth", "DATE NULL")
             elif version == "0026_annex_g_enrollment_and_comments":
                 Base.metadata.create_all(bind=connection)

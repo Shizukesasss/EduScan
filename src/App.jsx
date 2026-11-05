@@ -36,6 +36,11 @@ function WorkspaceHome() {
   return <Dashboard />;
 }
 
+function WorkspaceAttendance() {
+  // Resolve the role when this route renders, after login has saved the session.
+  return auth.role() === 'admin' ? <Attendance /> : <OperationalControls view="reviews" />;
+}
+
 function App() {
   return (
     <ToastProvider>
@@ -53,7 +58,7 @@ function App() {
           {/* Protected Routes (Authentication required in a real app) */}
           <Route path="/dashboard" element={<RoleGuard roles={['admin', 'records_officer', 'privacy_officer', 'ict', 'school_head']}><AdminLayout /></RoleGuard>}>
             <Route index element={<WorkspaceHome />} />
-            <Route path="attendance" element={<RoleGuard roles={['admin', 'records_officer', 'privacy_officer']}>{auth.role() === 'admin' ? <Attendance /> : <OperationalControls view="reviews" />}</RoleGuard>} />
+            <Route path="attendance" element={<RoleGuard roles={['admin', 'records_officer', 'privacy_officer']}><WorkspaceAttendance /></RoleGuard>} />
             <Route path="grading" element={<RoleGuard roles={['admin', 'records_officer', 'school_head']}><Grading /></RoleGuard>} />
             <Route path="reports" element={<RoleGuard roles={['admin', 'records_officer', 'school_head']}><Reports /></RoleGuard>} />
             <Route path="setup" element={<RoleGuard roles={['admin', 'records_officer']}><SystemSetup /></RoleGuard>} />

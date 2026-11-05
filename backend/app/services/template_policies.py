@@ -37,6 +37,7 @@ def ensure_template_policies(db, school_year, actor):
         ('Languages/AP/EsP', 'core', 'ENGLISH - Grade 7-10 Class Record.xlsx'),
         ('Math/Science', 'core', 'MATHEMATICS - Grade 7-10 Class Record.xlsx'),
         ('MAPEH/TLE', 'performance', 'SPA - Grade 7-10 Class Record.xlsx'),
+        ('TLE', 'tle', 'TLE - Grade 7-10 Class Record.xlsx'),
         ('GMRC/Values', 'gmrc', 'GMRC - Grade 7-10 Class Record.xlsx'),
     ):
         policy = db.scalar(select(GradingPolicy).where(

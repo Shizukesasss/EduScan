@@ -1,18 +1,21 @@
-import React, { useState, useCallback } from 'react';
-import { CheckCircle2, AlertTriangle, X } from 'lucide-react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { ToastContext } from './useToast';
 
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
+  const timers = useRef(new Map());
+  useEffect(() => () => { timers.current.forEach(clearTimeout); timers.current.clear(); }, []);
 
   const showToast = useCallback((message, type = 'success') => {
     const id = Date.now().toString() + Math.random().toString();
-    setToasts((prev) => [...prev, { id, message, type }]);
+    setToasts((prev) => prev.some(toast => toast.type === type && toast.message === message)
+      ? prev : [...prev, { id, message, type }]);
 
-    // Auto dismiss after 3 seconds
-    setTimeout(() => {
+    // Errors stay available until dismissed; success messages allow time to read.
+    if (type === 'success') timers.current.set(id, setTimeout(() => {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
-    }, 3000);
+      timers.current.delete(id);
+    }, 6000));
   }, []);
 
   const showSuccess = useCallback((message) => {
@@ -24,6 +27,8 @@ export function ToastProvider({ children }) {
   }, [showToast]);
 
   const dismissToast = useCallback((id) => {
+    clearTimeout(timers.current.get(id));
+    timers.current.delete(id);
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
   }, []);
 
@@ -32,13 +37,10 @@ export function ToastProvider({ children }) {
       {children}
       <div className="toast-container">
         {toasts.map((toast) => (
-          <div key={toast.id} className={`toast toast-${toast.type} animate-slide-in`}>
-            <div className="toast-icon">
-              {toast.type === 'success' ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
-            </div>
-            <div className="toast-message">{toast.message}</div>
-            <button className="toast-close" onClick={() => dismissToast(toast.id)}>
-              <X size={16} /><span className="control-label">Dismiss</span>
+          <div key={toast.id} className={`toast toast-${toast.type} animate-slide-in`} role={toast.type === 'danger' ? 'alert' : 'status'} aria-atomic="true" onFocus={() => { clearTimeout(timers.current.get(toast.id)); timers.current.delete(toast.id); }} onMouseEnter={() => { clearTimeout(timers.current.get(toast.id)); timers.current.delete(toast.id); }}>
+            <div className="toast-message"><strong>{toast.type === 'success' ? 'Success' : toast.type === 'danger' ? 'Error' : toast.type === 'warning' ? 'Attention' : 'Notice'}</strong><div>{toast.message}</div></div>
+            <button type="button" className="toast-close" aria-label="Dismiss notification" onClick={() => dismissToast(toast.id)}>
+              <span className="control-label">Dismiss</span>
             </button>
           </div>
         ))}

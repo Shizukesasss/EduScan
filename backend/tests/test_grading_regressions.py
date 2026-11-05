@@ -1054,7 +1054,11 @@ class ClassRecordRegressionTest(unittest.TestCase):
                 self.db.commit()
                 section, teacher, learners = ((self.section, self.teacher, (self.first, self.second)) if index % 2 == 0
                                                else (other_section, other_teacher, (other_student,)))
-                book = self.create(self.general, subject_id=subject.id, section_id=section.id)
+                policy = self.general
+                if name == 'TLE':
+                    from app.services.template_policies import ensure_template_policies
+                    policy = ensure_template_policies(self.db, self.year.name, self.admin)['TLE']
+                book = self.create(policy, subject_id=subject.id, section_id=section.id)
                 book.teacher_user_id, book.teacher_name = teacher.id, teacher.full_name
                 self.label_export_exams(book)
                 entries = [{'assessment_item_id': item.id, 'score': item.max_score * 0.8, 'status': 'Scored'}

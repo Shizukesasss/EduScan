@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import copy
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -160,6 +161,51 @@ class DuplicateEnrollmentTest(unittest.TestCase):
                 self.service.validate_enrollment_frames([b'frame'] * len(faces))
         self.assertEqual(failure.exception.detail['code'], 'insufficient_identity_references')
 
+    def test_color_identity_survives_enrollment_storage_and_gallery_reload(self):
+        # The original color feature and the equalized LBPH crop can disagree.
+        # Enrollment must retain the verified original feature across restarts.
+        original = np.eye(128, dtype=np.float32)[1]
+        _, frame = cv2.imencode('.png', np.zeros((300, 300, 3), dtype=np.uint8))
+        with patch.object(self.service, '_human_detections', return_value=self.human_detection()[None, :]), \
+             patch.object(self.service, '_processed_face', side_effect=face_set()), \
+             patch.object(biometrics, 'feature_from_detection', return_value=original):
+            faces = [self.service.process_frame(frame.tobytes(), with_identity=True) for _ in range(15)]
+        result = self.enroll(self.first, faces)
+        self.assertEqual(result['accepted'], 15)
+        self.service._identity_cache.clear()
+        with patch.object(self.service, '_identity_feature', side_effect=AssertionError('Lossy crop re-embedded')):
+            samples, gallery = self.service._identity_gallery(self.db)
+        self.assertEqual(len(gallery), 15)
+        for person_id, feature in gallery:
+            self.assertEqual(person_id, self.first.id)
+            np.testing.assert_array_equal(feature, original)
+        # LBPH still receives exactly the original grayscale training crop.
+        by_hash = {hashlib.sha256(face.encoded).hexdigest(): face.image for face in faces}
+        for sample in samples:
+            np.testing.assert_array_equal(self.service._load_sample_image(sample), by_hash[sample.sha256])
+
+    def test_persisted_color_identity_still_blocks_duplicate_enrollment(self):
+        original = np.eye(128, dtype=np.float32)[1]
+        _, frame = cv2.imencode('.png', np.zeros((300, 300, 3), dtype=np.uint8))
+        with patch.object(self.service, '_human_detections', return_value=self.human_detection()[None, :]), \
+             patch.object(self.service, '_processed_face', side_effect=face_set() + face_set(offset=1)), \
+             patch.object(biometrics, 'feature_from_detection', return_value=original):
+            faces = [self.service.process_frame(frame.tobytes(), with_identity=True) for _ in range(30)]
+        self.enroll(self.first, faces[:15])
+        self.service._identity_cache.clear()
+        with self.assertRaises(HTTPException) as failure:
+            self.enroll(self.second, faces[15:])
+        self.assertEqual(failure.exception.detail['code'], 'duplicate_face')
+        self.assertEqual(self.samples(self.second), [])
+
+    def test_invalid_persisted_identity_templates_are_rejected(self):
+        for feature in (np.zeros(128), np.full(128, np.nan), np.ones(127)):
+            with self.subTest(feature_shape=feature.shape, finite=np.isfinite(feature).all()):
+                payload = io.BytesIO()
+                np.savez_compressed(payload, image=face_set()[0].image, identity_feature=feature)
+                with self.assertRaises(ValueError):
+                    self.service._decode_sample(payload.getvalue())
+
     def test_saved_references_must_agree_with_each_other(self):
         full = np.zeros(128, dtype=np.float32)
         full[0] = 1
@@ -193,6 +239,71 @@ class DuplicateEnrollmentTest(unittest.TestCase):
         before = {table.name: self.db.execute(select(table)).all() for table in Base.metadata.sorted_tables}
         self.service._check_duplicate_enrollment(self.db, self.second, face_set(horizontal=True))
         self.assertEqual({table.name: self.db.execute(select(table)).all() for table in Base.metadata.sorted_tables}, before)
+
+    def test_new_student_enrolls_when_another_students_files_are_missing(self):
+        self.enroll(self.first, face_set())
+        original_sample_ids = {sample.id for sample in self.samples(self.first)}
+        for sample in self.samples(self.first):
+            Path(sample.encrypted_path).unlink()
+        self.service._identity_cache.clear()
+        result = self.enroll(self.second, face_set(horizontal=True))
+        self.assertEqual(result['accepted'], 15)
+        self.assertEqual(result['model']['person_count'], 1)
+        self.assertEqual(result['model']['sample_count'], 15)
+        self.assertEqual(result['duplicate_check']['status'], 'incomplete')
+        self.assertEqual(result['duplicate_check']['missing_person_ids'], [self.first.id])
+        self.assertTrue(result['warnings'])
+        audit = self.db.scalars(select(BiometricAuditEvent).where(BiometricAuditEvent.person_id == self.second.id)).one()
+        self.assertIn('"status":"incomplete"', audit.after_json)
+        self.assertEqual({sample.id for sample in self.samples(self.first)}, original_sample_ids)
+        self.assertEqual(len(self.samples(self.second)), 15)
+        self.assertEqual(self.db.scalars(select(AttendanceEvent)).all(), [])
+        readiness = self.service.model_readiness(self.db)
+        self.assertTrue(readiness['available'])
+        self.assertEqual(readiness['code'], 'ready_with_missing_enrollments')
+        self.enroll(self.first, face_set(offset=1), replacement=True)
+        self.assertTrue(self.service.model_readiness(self.db)['available'])
+
+    def test_corrupt_older_samples_still_block_new_enrollment(self):
+        self.enroll(self.first, face_set())
+        Path(self.samples(self.first)[0].encrypted_path).write_bytes(b'corrupt encrypted sample')
+        self.service._identity_cache.clear()
+        with self.assertRaises(HTTPException) as failure:
+            self.enroll(self.second, face_set(horizontal=True))
+        self.assertEqual(failure.exception.detail['code'], 'identity_verifier_unavailable')
+        self.assertEqual(self.samples(self.second), [])
+
+    def test_recognition_uses_complete_local_enrollments_and_excludes_missing_people(self):
+        old_faces, local_faces = face_set(), face_set(horizontal=True)
+        self.enroll(self.first, old_faces)
+        self.enroll(self.second, local_faces)
+        # A warm identity cache must not hide deleted sample files.
+        self.service._identity_gallery(self.db)
+        Path(self.samples(self.first)[0].encrypted_path).unlink()
+        with patch.object(self.service, 'process_faces', side_effect=[[local_faces[0]], [old_faces[0]]]), \
+             patch.object(self.service, 'verify_liveness', return_value=(True, 'Verified')):
+            known = self.service.recognize_frames(self.db, [b'local'], diagnostics={})
+            unavailable = self.service.recognize_frames(self.db, [b'missing'], diagnostics={})
+        self.assertEqual(known[0]['person'].id, self.second.id)
+        self.assertTrue(all(match['person'] is None for match in unavailable))
+        readiness = self.service.model_readiness(self.db)
+        self.assertTrue(readiness['available'])
+        self.assertEqual(readiness['code'], 'ready_with_missing_enrollments')
+        self.assertEqual(self.db.scalars(select(AttendanceEvent)).all(), [])
+
+    def test_recognition_is_unavailable_when_every_enrollment_is_missing(self):
+        self.enroll(self.first, face_set())
+        for sample in self.samples(self.first):
+            Path(sample.encrypted_path).unlink()
+        readiness = self.service.model_readiness(self.db)
+        self.assertFalse(readiness['available'])
+        self.assertEqual(readiness['code'], 'no_local_identity_references')
+
+    def test_manual_training_still_reports_missing_samples(self):
+        self.enroll(self.first, face_set())
+        Path(self.samples(self.first)[0].encrypted_path).unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.service.train(self.db)
 
     def test_shared_identity_matcher_catches_duplicates_without_lbph_agreement(self):
         self.enroll(self.first, face_set())
@@ -811,14 +922,17 @@ class DuplicateEnrollmentTest(unittest.TestCase):
             self.enroll(self.second, face_set())
         self.assertEqual(failure.exception.detail["code"], "duplicate_face")
 
-    def test_missing_samples_do_not_silently_skip_duplicate_check(self):
+    def test_missing_samples_are_reported_without_skipping_readable_duplicates(self):
         self.enroll(self.first, face_set())
         self.samples(self.first)[0].encrypted_path = str(Path(self.directory.name) / "unavailable.enc")
         self.db.commit()
         with self.assertRaises(HTTPException) as failure:
-            self.enroll(self.second, face_set(horizontal=True))
-        self.assertEqual(failure.exception.detail["code"], "identity_verifier_unavailable")
+            self.enroll(self.second, face_set(offset=1))
+        self.assertEqual(failure.exception.detail["code"], "duplicate_face")
         self.assertEqual(self.samples(self.second), [])
+        result = self.enroll(self.second, face_set(horizontal=True))
+        self.assertEqual(result['duplicate_check']['status'], 'incomplete')
+        self.assertEqual(result['model']['sample_count'], 29)
 
     def test_postgresql_busy_enrollment_does_not_run_check_or_write(self):
         busy_db = MagicMock()

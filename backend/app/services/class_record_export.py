@@ -15,12 +15,15 @@ from .grading import get_gradebook_full
 from .grading_engine import apply_transmutation, round_value
 from .gradebook_validation import collect_common_export_issues, create_validation_issue, export_rule_issue
 from .settings_store import get_json
+from .tle_subjects import tle_specialization
 
 
 def subject_template(subject, is_elective=False):
+    name = re.sub(r'\s+', ' ', subject.strip().upper())
+    if tle_specialization(name) is not None:
+        return 'tle', 'TLE - Grade 7-10 Class Record.xlsx'
     if is_elective:
         return 'core', 'ENGLISH - Grade 7-10 Class Record.xlsx'
-    name = re.sub(r'\s+', ' ', subject.strip().upper())
     aliases = {'MATH': 'MATHEMATICS', 'AP': 'ARALING PANLIPUNAN',
                'TECHNOLOGY AND LIVELIHOOD EDUCATION': 'TLE', 'ESP': 'VALUES EDUCATION',
                'EDUKASYON SA PAGPAPAKATAO': 'VALUES EDUCATION',
@@ -174,7 +177,7 @@ def fill_saved_core(full, sheet_name, changes, cached, males, females, formulas)
 
 
 def fill_term(full, kind, sheet_name, changes, cached, males, females, table, formulas=None):
-    if kind in {'core', 'mapeh'} and not any(c.get('component_type') == 'Term Examinations' for c in full['components']):
+    if kind in {'core', 'mapeh', 'tle'} and not any(c.get('component_type') == 'Term Examinations' for c in full['components']):
         return fill_saved_core(full, sheet_name, changes, cached, males, females, formulas)
     groups = assessment_groups(full, kind)
     if full['policy']['rounding_method'] != 'half_up' or full['policy']['rounding_decimal_places'] != 2:
@@ -202,6 +205,8 @@ def fill_term(full, kind, sheet_name, changes, cached, males, females, table, fo
     sheet = changes.setdefault(sheet_name, {})
     cache = cached.setdefault(sheet_name, {})
     formula_overrides = (formulas if formulas is not None else {}).setdefault(sheet_name, {})
+    if kind == 'tle':
+        sheet.update({'M15': 0.2, 'S15': 0.6, 'AA15': 0.2})
     hps, male_start, female_start, initial_col, grade_col = (16, 19, 70, 'AV', 'AW') if kind == 'gmrc' else (15, 18, 69, 'AB', 'AC')
     from .reports import _column_name
     items_by_group = {}

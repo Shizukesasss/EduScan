@@ -99,8 +99,8 @@
 }
 
 .deped-status-draft    { background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; }
-.deped-status-submitted{ background: #eff6ff; color: #1d4ed8; border: 1px solid #93c5fd; }
-.deped-status-finalized{ background: #ecfdf5; color: #047857; border: 1px solid #6ee7b7; }
+.deped-status-submitted { background: #eff6ff; color: #1d4ed8; border: 1px solid #93c5fd; }
+.deped-status-finalized { background: #ecfdf5; color: #047857; border: 1px solid #6ee7b7; }
 .deped-status-locked   { background: #faf5ff; color: #7e22ce; border: 1px solid #d8b4fe; }
 
 /* Info Table (Region / School Name rows) */
@@ -252,8 +252,6 @@
   padding: 3px 8px;
 }
 
-.deped-search-icon { color: #7a90b0; flex-shrink: 0; }
-
 .deped-search-input {
   border: none;
   outline: none;
@@ -274,7 +272,7 @@
   cursor: pointer;
   font-weight: 600;
   color: #444;
-  transition: all 0.13s;
+  transition: background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
 }
 
 .deped-filter-pill:hover { background: #dce8f5; border-color: #1a3a6c; color: #1a3a6c; }
@@ -294,7 +292,7 @@
   color: #444;
   margin-left: 4px;
   font-weight: 600;
-  transition: all 0.13s;
+  transition: background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
 }
 
 .deped-sort-btn:hover { background: #dce8f5; }
@@ -394,14 +392,14 @@
 
 .deped-th-computed-label {
   background: #3a6bc4;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   min-width: 44px;
 }
 
 .deped-th-ws-label {
   background: #2a5498;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
   min-width: 44px;
 }
@@ -476,7 +474,7 @@ td.deped-cell-no    { position: sticky; left: 0; z-index: 3; }
 .deped-hps-label {
   text-align: left !important;
   font-style: italic;
-  font-size: 11px;
+  font-size: 12px;
   position: sticky !important;
   left: 38px;
   z-index: 6 !important;
@@ -602,7 +600,7 @@ td.deped-cell-no    { position: sticky; left: 0; z-index: 3; }
 .deped-input-error { background: #fee2e2 !important; color: #dc2626 !important; }
 
 .deped-excused-tag {
-  font-size: 10px;
+  font-size: 12px;
   color: #7c3aed;
   text-align: center;
   font-weight: 800;
@@ -643,7 +641,7 @@ td.deped-cell-no    { position: sticky; left: 0; z-index: 3; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.13s;
+  transition: background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
 }
 
 .deped-calc-btn:hover { background: #1a3a6c; color: #fff; border-color: #1a3a6c; }

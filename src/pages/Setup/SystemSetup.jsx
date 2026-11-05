@@ -1,6 +1,7 @@
+import RequestFeedback from '../../components/Common/RequestFeedback';
+import PageHeading from '../../components/Common/PageHeading';
 import PaginatedBody from '../../components/Common/PaginatedBody';
 import { useCallback, useEffect, useState } from 'react';
-import { CalendarDays, Clock3, MessageSquareText, Network, Plus, Save, ShieldCheck, Smartphone, Trash2, UserCheck } from 'lucide-react';
 import { api, auth } from '../../api/client';
 import OperationalControls from '../Operations/OperationalControls';
 import BiometricEnrollmentManager from '../../components/Setup/BiometricEnrollmentManager';
@@ -40,7 +41,9 @@ function AdminSystemSetup() {
   const [calendarForm, setCalendarForm] = useState(() => ({ event_date: new Date().toISOString().slice(0, 10), event_type: 'Holiday', reason: '', start_time: '', end_time: '', absence_cutoff: '' }));
   const [excusedForm, setExcusedForm] = useState(() => ({ person_id: '', event_date: new Date().toISOString().slice(0, 10), reason: '' }));
 
+  const [request, setRequest] = useState({ loading: true, error: '' });
   const load = useCallback(() => {
+    setRequest({ loading: true, error: '' });
     const paths = active === 'operations' ? ['/settings', '/calendar/exceptions', '/attendance/excused', '/persons']
       : active === 'sms' ? ['/settings'] : active === 'biometrics' ? ['/biometrics/status'] : [];
     return Promise.all(paths.map((path) => api.get(path))).then((rows) => {
@@ -49,8 +52,9 @@ function AdminSystemSetup() {
         setSettings({ ...config, sms: { ...defaultSms, ...config.sms, templates: { ...defaultSms.templates, ...(config.sms?.templates || {}) } } });
         if (active === 'operations') { setCalendarRows(rows[1]); setExcusedRows(rows[2]); setPeople(rows[3]); }
       } else if (active === 'biometrics') setBiometric(rows[0]);
-    }).catch((err) => showError(err.message));
-  }, [active, showError]);
+      setRequest({ loading: false, error: '' });
+    }).catch((err) => setRequest({ loading: false, error: err.message }));
+  }, [active]);
   useEffect(() => { load(); }, [load]);
   const success = (message) => { showSuccess(message); };
   const patchArea = (area, field, value) => setSettings((current) => ({ ...current, [area]: { ...current[area], [field]: value } }));
@@ -65,14 +69,124 @@ function AdminSystemSetup() {
   const removeExcused = async (id) => { try { await api.delete(`/attendance/excused/${id}`); await load(); } catch (err) { showError(err.message); } };
 
   return <div className="page-stack">
-    <div className="setup-tabs">{tabs.map(([id, label]) => <button key={id} className={active === id ? 'active' : ''} onClick={() => setActive(id)}>{label}</button>)}</div>
-    {active === 'biometrics' && biometric && <div className="notice notice-blue"><ShieldCheck size={19} /><div><strong>LBPH runtime: {biometric.enabled ? 'enabled' : 'server-disabled'}.</strong> {biometric.model ? `Active model ${biometric.model.version}: ${biometric.model.person_count} enrolled person(s), ${biometric.model.sample_count} samples.` : 'No trained model yet. Enroll an authorized person from the gate station.'} {biometric.model_readiness?.available === false && <span> {biometric.model_readiness.message} </span>}</div></div>}
+    <PageHeading title="System setup" description="Manage attendance rules, schedules, facial enrollment, and SMS delivery." />
+    <nav className="setup-tabs" aria-label="Workspace sections">{tabs.map(([id, label]) => <button key={id} aria-pressed={active === id} className={active === id ? 'active' : ''} onClick={() => setActive(id)}>{label}</button>)}</nav>
+    <RequestFeedback {...request} label="system settings" onRetry={load} />
+    {!request.loading && !request.error && <>
+    {active === 'biometrics' && biometric && <div className="notice notice-blue"><div><strong>LBPH runtime: {biometric.enabled ? 'enabled' : 'server-disabled'}.</strong> {biometric.model ? `Active model ${biometric.model.version}: ${biometric.model.person_count} enrolled person(s), ${biometric.model.sample_count} samples.` : 'No trained model yet. Enroll an authorized person from the gate station.'} {biometric.model_readiness?.available === false && <span> {biometric.model_readiness.message} </span>}</div></div>}
 
-    {active === 'operations' && <div className="page-stack">
-      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Automated classification defaults</p><h2>Attendance rules</h2></div><Clock3 size={24} /></div><p className="section-copy">Accepted matches alternate automatically between time-in and time-out, supporting multiple exits and re-entries. The duplicate-scan cooldown reduces accidental repeated records while a person remains in front of the camera, and schedule-specific grace periods determine the first arrival’s tardiness.</p><div className="form-grid two-columns"><label><span className="field-label">Authorized absence cutoff</span><input title="Choose a time using the time picker" className="input-field" type="time" value={settings.attendance.absence_cutoff} onChange={(e) => patchArea('attendance', 'absence_cutoff', e.target.value)} /></label><label><span className="field-label">Duplicate scan cooldown (seconds)</span><input placeholder="Enter duplicate scan cooldown (seconds)" className="input-field" type="number" min="5" value={settings.attendance.duplicate_cooldown_seconds} onChange={(e) => patchArea('attendance', 'duplicate_cooldown_seconds', Number(e.target.value))} /></label><label className="checkbox-field"><input type="checkbox" checked={settings.attendance.auto_close_enabled} onChange={(e) => patchArea('attendance', 'auto_close_enabled', e.target.checked)} /><span>Automatically close attendance and queue absence notices at the cutoff</span></label></div><div className="modal-actions"><button className="btn-primary" onClick={saveAttendance}><Save size={16} /> Save rules</button></div></section>
+    {active === 'operations' && <div className="page-stack setup-operations">
+      <section className="card-static setup-card">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Automated classification defaults</p>
+            <h2>Attendance rules</h2>
+            <p className="section-copy">Accepted matches alternate automatically between time-in and time-out, supporting multiple exits and re-entries. The duplicate-scan cooldown reduces accidental repeated records while a person remains in front of the camera, and schedule-specific grace periods determine the first arrival’s tardiness.</p>
+          </div>
+        </div>
+        <div className="setup-form-panel">
+          <div className="form-grid two-columns">
+            <label>
+              <span className="field-label">Authorized absence cutoff</span>
+              <input title="Choose a time using the time picker" className="input-field" type="time" value={settings.attendance.absence_cutoff} onChange={(e) => patchArea('attendance', 'absence_cutoff', e.target.value)} />
+            </label>
+            <label>
+              <span className="field-label">Duplicate scan cooldown (seconds)</span>
+              <input placeholder="Enter duplicate scan cooldown (seconds)" className="input-field" type="number" min="5" value={settings.attendance.duplicate_cooldown_seconds} onChange={(e) => patchArea('attendance', 'duplicate_cooldown_seconds', Number(e.target.value))} />
+            </label>
+          </div>
+          <div className="setup-form-footer">
+            <label className="checkbox-field setup-check">
+              <input type="checkbox" checked={settings.attendance.auto_close_enabled} onChange={(e) => patchArea('attendance', 'auto_close_enabled', e.target.checked)} />
+              <span>Automatically close attendance and queue absence notices at the cutoff</span>
+            </label>
+            <button className="btn-primary" onClick={saveAttendance}>Save rules</button>
+          </div>
+        </div>
+      </section>
+
       <ClassScheduleManager />
-      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Non-instructional and adjusted days</p><h2>School calendar exceptions</h2></div><CalendarDays size={24} /></div><div className="form-grid three-columns"><label><span className="field-label">Date</span><input title="Choose a calendar date" className="input-field" type="date" value={calendarForm.event_date} onChange={(e) => setCalendarForm((current) => ({ ...current, event_date: e.target.value }))} /></label><label><span className="field-label">Type</span><select className="input-field" value={calendarForm.event_type} onChange={(e) => setCalendarForm((current) => ({ ...current, event_type: e.target.value }))}><option>Holiday</option><option>Suspended</option><option>Special Schedule</option></select></label><label><span className="field-label">Reason / authority</span><input placeholder="Explain the reason for this action" className="input-field" value={calendarForm.reason} onChange={(e) => setCalendarForm((current) => ({ ...current, reason: e.target.value }))} /></label>{calendarForm.event_type === 'Special Schedule' && <><label><span className="field-label">Start</span><input title="Choose a time using the time picker" className="input-field" type="time" value={calendarForm.start_time} onChange={(e) => setCalendarForm((current) => ({ ...current, start_time: e.target.value }))} /></label><label><span className="field-label">End</span><input title="Choose a time using the time picker" className="input-field" type="time" value={calendarForm.end_time} onChange={(e) => setCalendarForm((current) => ({ ...current, end_time: e.target.value }))} /></label><label><span className="field-label">Absence cutoff</span><input title="Choose a time using the time picker" className="input-field" type="time" value={calendarForm.absence_cutoff} onChange={(e) => setCalendarForm((current) => ({ ...current, absence_cutoff: e.target.value }))} /></label></>}</div><div className="modal-actions"><button className="btn-primary" onClick={saveCalendar}><Plus size={16} /> Save calendar day</button></div><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Date</th><th>Type</th><th>Reason</th><th>Special times</th><th /></tr></thead><PaginatedBody>{calendarRows.map((item) => <tr key={item.id}><td>{item.event_date}</td><td>{item.event_type}</td><td>{item.reason}</td><td>{item.start_time ? `${item.start_time}–${item.end_time || '—'} · cutoff ${item.absence_cutoff || 'default'}` : '—'}</td><td><button className="btn-link danger-link" onClick={() => removeCalendar(item.id)}><Trash2 size={14} /> Remove</button></td></tr>)}</PaginatedBody></table></div></section>
-      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Authorized learner exception</p><h2>Excused absences</h2></div><UserCheck size={24} /></div><div className="form-grid three-columns"><label><span className="field-label">Person</span><select className="input-field" value={excusedForm.person_id} onChange={(e) => setExcusedForm((current) => ({ ...current, person_id: e.target.value }))}><option value="">Select</option>{people.map((item) => <option key={item.id} value={item.id}>{item.full_name} · {item.external_id}</option>)}</select></label><label><span className="field-label">Date</span><input title="Choose a calendar date" className="input-field" type="date" value={excusedForm.event_date} onChange={(e) => setExcusedForm((current) => ({ ...current, event_date: e.target.value }))} /></label><label><span className="field-label">Reason / supporting reference</span><input placeholder="Explain the reason for this action" className="input-field" value={excusedForm.reason} onChange={(e) => setExcusedForm((current) => ({ ...current, reason: e.target.value }))} /></label></div><div className="modal-actions"><button className="btn-primary" onClick={saveExcused}><Plus size={16} /> Record excuse</button></div><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Date</th><th>Person</th><th>Reason</th><th>Actor</th><th /></tr></thead><PaginatedBody>{excusedRows.map((item) => <tr key={item.id}><td>{item.event_date}</td><td>{item.person_name}</td><td>{item.reason}</td><td>{item.actor_name}</td><td><button className="btn-link danger-link" onClick={() => removeExcused(item.id)}><Trash2 size={14} /> Remove</button></td></tr>)}</PaginatedBody></table></div></section>
+
+      <section className="card-static setup-card">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Non-instructional and adjusted days</p>
+            <h2>School calendar exceptions</h2>
+            <p className="section-copy">Configure holidays, class suspensions, and special schedules so automated daily close and tardiness rules adjust accordingly.</p>
+          </div>
+          <span className="setup-count-badge">{calendarRows.length} recorded</span>
+        </div>
+        <div className="setup-form-panel">
+          <div className="form-grid three-columns">
+            <label><span className="field-label">Date</span><input title="Choose a calendar date" className="input-field" type="date" value={calendarForm.event_date} onChange={(e) => setCalendarForm((current) => ({ ...current, event_date: e.target.value }))} /></label>
+            <label><span className="field-label">Type</span><select className="input-field" value={calendarForm.event_type} onChange={(e) => setCalendarForm((current) => ({ ...current, event_type: e.target.value }))}><option>Holiday</option><option>Suspended</option><option>Special Schedule</option></select></label>
+            <label><span className="field-label">Reason / authority</span><input placeholder="Explain the reason for this action" className="input-field" value={calendarForm.reason} onChange={(e) => setCalendarForm((current) => ({ ...current, reason: e.target.value }))} /></label>
+            {calendarForm.event_type === 'Special Schedule' && <>
+              <label><span className="field-label">Start</span><input title="Choose a time using the time picker" className="input-field" type="time" value={calendarForm.start_time} onChange={(e) => setCalendarForm((current) => ({ ...current, start_time: e.target.value }))} /></label>
+              <label><span className="field-label">End</span><input title="Choose a time using the time picker" className="input-field" type="time" value={calendarForm.end_time} onChange={(e) => setCalendarForm((current) => ({ ...current, end_time: e.target.value }))} /></label>
+              <label><span className="field-label">Absence cutoff</span><input title="Choose a time using the time picker" className="input-field" type="time" value={calendarForm.absence_cutoff} onChange={(e) => setCalendarForm((current) => ({ ...current, absence_cutoff: e.target.value }))} /></label>
+            </>}
+          </div>
+          <div className="setup-form-footer setup-form-footer--end">
+            <button className="btn-primary" onClick={saveCalendar}>Save calendar day</button>
+          </div>
+        </div>
+        <div className="table-scroll">
+          <table className="interactive-table setup-table">
+            <thead>
+              <tr><th>Date</th><th>Type</th><th>Reason / authority</th><th>Special times</th><th className="action-col">Action</th></tr>
+            </thead>
+            <PaginatedBody>
+              {calendarRows.length === 0 && <tr><td colSpan="5" className="empty-cell">No school calendar exceptions recorded.</td></tr>}
+              {calendarRows.map((item) => <tr key={item.id}>
+                <td>{item.event_date}</td>
+                <td><span className={`tag ${item.event_type === 'Special Schedule' ? 'tag-blue' : 'tag-warning'}`}>{item.event_type}</span></td>
+                <td>{item.reason}</td>
+                <td>{item.start_time ? `${item.start_time}–${item.end_time || '—'} · cutoff ${item.absence_cutoff || 'default'}` : '—'}</td>
+                <td className="action-col"><button className="btn-link danger-link" onClick={() => removeCalendar(item.id)}>Remove</button></td>
+              </tr>)}
+            </PaginatedBody>
+          </table>
+        </div>
+      </section>
+
+      <section className="card-static setup-card">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Authorized learner exception</p>
+            <h2>Excused absences</h2>
+            <p className="section-copy">Record documented learner excuses so daily attendance and SF2 reports reflect authorized absences without altering gate logs.</p>
+          </div>
+          <span className="setup-count-badge">{excusedRows.length} recorded</span>
+        </div>
+        <div className="setup-form-panel">
+          <div className="form-grid three-columns">
+            <label><span className="field-label">Person</span><select className="input-field" value={excusedForm.person_id} onChange={(e) => setExcusedForm((current) => ({ ...current, person_id: e.target.value }))}><option value="">Select learner or personnel</option>{people.map((item) => <option key={item.id} value={item.id}>{item.full_name} · {item.external_id}</option>)}</select></label>
+            <label><span className="field-label">Date</span><input title="Choose a calendar date" className="input-field" type="date" value={excusedForm.event_date} onChange={(e) => setExcusedForm((current) => ({ ...current, event_date: e.target.value }))} /></label>
+            <label><span className="field-label">Reason / supporting reference</span><input placeholder="Explain the reason for this action" className="input-field" value={excusedForm.reason} onChange={(e) => setExcusedForm((current) => ({ ...current, reason: e.target.value }))} /></label>
+          </div>
+          <div className="setup-form-footer setup-form-footer--end">
+            <button className="btn-primary" onClick={saveExcused}>Record excuse</button>
+          </div>
+        </div>
+        <div className="table-scroll">
+          <table className="interactive-table setup-table">
+            <thead>
+              <tr><th>Date</th><th>Person</th><th>Reason / reference</th><th>Recorded by</th><th className="action-col">Action</th></tr>
+            </thead>
+            <PaginatedBody>
+              {excusedRows.length === 0 && <tr><td colSpan="5" className="empty-cell">No excused absences recorded.</td></tr>}
+              {excusedRows.map((item) => <tr key={item.id}>
+                <td>{item.event_date}</td>
+                <td><strong>{item.person_name}</strong></td>
+                <td>{item.reason}</td>
+                <td>{item.actor_name}</td>
+                <td className="action-col"><button className="btn-link danger-link" onClick={() => removeExcused(item.id)}>Remove</button></td>
+              </tr>)}
+            </PaginatedBody>
+          </table>
+        </div>
+      </section>
     </div>}
 
     {active === 'personnel' && <PersonnelScheduleManager />}
@@ -87,11 +201,11 @@ function AdminSystemSetup() {
         <p className="section-copy">Use the Local Server URL and API credentials displayed by the SMS Gateway app on your phone. These are separate from your EduScan login. Save the settings before checking the connection or sending a test.</p>
         {!settings.sms.enabled && <div className="notice notice-warning">SMS dispatch is currently off. Enrollment and attendance can still be saved, but notices will not be sent.</div>}
       </section>
-      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Real local relay</p><h2>Android SMS Gateway</h2></div><Smartphone size={26} /></div><ol className="numbered-list"><li>Install SMS Gateway for Android on a dedicated phone with a school-controlled SIM.</li><li>Place the phone and EduScan server on the same secured Wi-Fi; reserve the phone’s IP address.</li><li>In the app, enable Local Server mode and create a strong username/password.</li><li>Enter the local URL and credentials below. The backend posts to /message with HTTP Basic authentication.</li><li>Keep the phone charged, exempt the app from battery optimization, restrict the endpoint to the school LAN, and monitor failed messages.</li></ol><div className="form-grid two-columns"><label className="checkbox-field"><input type="checkbox" checked={settings.sms.enabled} onChange={(e) => patchArea('sms', 'enabled', e.target.checked)} /><span>Enable real Android gateway dispatch</span></label><label><span className="field-label">Gateway URL</span><input placeholder="e.g. http://192.168.1.100:8080" className="input-field" value={settings.sms.gateway_url} onChange={(e) => patchArea('sms', 'gateway_url', e.target.value)} /></label><label><span className="field-label">API username</span><input placeholder="Enter your username" className="input-field" value={settings.sms.username} onChange={(e) => patchArea('sms', 'username', e.target.value)} /></label><label><span className="field-label">API password {settings.sms.password_configured && '(leave blank to keep current)'}</span><input placeholder="Enter your password" className="input-field" type="password" value={settings.sms.password} onChange={(e) => patchArea('sms', 'password', e.target.value)} /></label><label><span className="field-label">School contact shown in SMS</span><input placeholder="e.g. school office contact number" className="input-field" value={settings.sms.school_contact} onChange={(e) => patchArea('sms', 'school_contact', e.target.value)} /></label><label><span className="field-label">Local rate limit (messages per 30 minutes)</span><input placeholder="Enter local rate limit (messages per 30 minutes)" className="input-field" type="number" min="1" max="500" value={settings.sms.max_messages_per_30_minutes} onChange={(e) => patchArea('sms', 'max_messages_per_30_minutes', Number(e.target.value))} /></label></div></section>
-      <section className="card-static"><h2>Approved message templates</h2><div className="template-grid">{Object.entries(settings.sms.templates).map(([key, value]) => <label key={key}><span className="field-label">{key.replace('_', ' ')}</span><textarea placeholder={`Enter the ${key.replaceAll("_", " ")} message; use the tokens shown below`} className="text-area" value={value} onChange={(e) => setSettings((current) => ({ ...current, sms: { ...current.sms, templates: { ...current.sms.templates, [key]: e.target.value } } }))} /><span className="token-help">Use: {key === 'enrollment' ? '{name} {time} {date} {enrollment_action} {school_contact}' : '{name} {time} {date} {class_name} {class_start} {absence_cutoff} {school_contact}'}</span></label>)}</div><div className="modal-actions"><button className="btn-primary" onClick={saveSms}><Save size={16} /> Save gateway & templates</button></div></section>
-      <section className="card-static"><h2>Connection test</h2><p className="section-copy">First check local reachability without sending. Then send one real SMS to verify the saved credentials, SIM, signal, and Android permissions. Attendance notices use a unique event key, so retrying a failed delivery does not create a second outbox message.</p><div className="action-row"><button className="btn-secondary" onClick={checkGateway}><Network size={16} /> Check local connection</button><input className="input-field" placeholder="+639XXXXXXXXX" value={testPhone} onChange={(e) => setTestPhone(e.target.value)} /><button className="btn-secondary" onClick={sendTest}><MessageSquareText size={16} /> Send real test SMS</button></div>{gatewayCheck && <div className={`notice ${gatewayCheck.reachable ? 'notice-success' : 'notice-danger'}`}><Network size={17} /><div><strong>{gatewayCheck.reachable ? 'Phone reachable' : 'Phone unreachable'}.</strong> {gatewayCheck.message} Credentials configured: {gatewayCheck.username_configured && gatewayCheck.password_configured ? 'yes' : 'no'}.</div></div>}</section>
+      <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Real local relay</p><h2>Android SMS Gateway</h2></div></div><ol className="numbered-list"><li>Install SMS Gateway for Android on a dedicated phone with a school-controlled SIM.</li><li>Place the phone and EduScan server on the same secured Wi-Fi; reserve the phone’s IP address.</li><li>In the app, enable Local Server mode and create a strong username/password.</li><li>Enter the local URL and credentials below. The backend posts to /message with HTTP Basic authentication.</li><li>Keep the phone charged, exempt the app from battery optimization, restrict the endpoint to the school LAN, and monitor failed messages.</li></ol><div className="form-grid two-columns"><label className="checkbox-field"><input type="checkbox" checked={settings.sms.enabled} onChange={(e) => patchArea('sms', 'enabled', e.target.checked)} /><span>Enable real Android gateway dispatch</span></label><label><span className="field-label">Gateway URL</span><input placeholder="e.g. http://192.168.1.100:8080" className="input-field" value={settings.sms.gateway_url} onChange={(e) => patchArea('sms', 'gateway_url', e.target.value)} /></label><label><span className="field-label">API username</span><input placeholder="Enter your username" className="input-field" value={settings.sms.username} onChange={(e) => patchArea('sms', 'username', e.target.value)} /></label><label><span className="field-label">API password {settings.sms.password_configured && '(leave blank to keep current)'}</span><input placeholder="Enter your password" className="input-field" type="password" value={settings.sms.password} onChange={(e) => patchArea('sms', 'password', e.target.value)} /></label><label><span className="field-label">School contact shown in SMS</span><input placeholder="e.g. school office contact number" className="input-field" value={settings.sms.school_contact} onChange={(e) => patchArea('sms', 'school_contact', e.target.value)} /></label><label><span className="field-label">Local rate limit (messages per 30 minutes)</span><input placeholder="Enter local rate limit (messages per 30 minutes)" className="input-field" type="number" min="1" max="500" value={settings.sms.max_messages_per_30_minutes} onChange={(e) => patchArea('sms', 'max_messages_per_30_minutes', Number(e.target.value))} /></label></div></section>
+      <section className="card-static"><h2>Approved message templates</h2><div className="template-grid">{Object.entries(settings.sms.templates).map(([key, value]) => <label key={key}><span className="field-label">{key.replace('_', ' ')}</span><textarea placeholder={`Enter the ${key.replaceAll("_", " ")} message; use the tokens shown below`} className="text-area" value={value} onChange={(e) => setSettings((current) => ({ ...current, sms: { ...current.sms, templates: { ...current.sms.templates, [key]: e.target.value } } }))} /><span className="token-help">Use: {key === 'enrollment' ? '{name} {time} {date} {enrollment_action} {school_contact}' : '{name} {time} {date} {class_name} {class_start} {absence_cutoff} {school_contact}'}</span></label>)}</div><div className="modal-actions"><button className="btn-primary" onClick={saveSms}> Save gateway & templates</button></div></section>
+      <section className="card-static"><h2>Connection test</h2><p className="section-copy">First check local reachability without sending. Then send one real SMS to verify the saved credentials, SIM, signal, and Android permissions. Attendance notices use a unique event key, so retrying a failed delivery does not create a second outbox message.</p><div className="action-row"><button className="btn-secondary" onClick={checkGateway}> Check local connection</button><input className="input-field" placeholder="+639XXXXXXXXX" value={testPhone} onChange={(e) => setTestPhone(e.target.value)} /><button className="btn-secondary" onClick={sendTest}> Send real test SMS</button></div>{gatewayCheck && <div className={`notice ${gatewayCheck.reachable ? 'notice-success' : 'notice-danger'}`}><div><strong>{gatewayCheck.reachable ? 'Phone reachable' : 'Phone unreachable'}.</strong> {gatewayCheck.message} Credentials configured: {gatewayCheck.username_configured && gatewayCheck.password_configured ? 'yes' : 'no'}.</div></div>}</section>
       <OperationalControls view="sms" />
     </div>}
 
-  </div>;
+  </>}</div>;
 }

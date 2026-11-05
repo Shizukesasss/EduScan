@@ -1,5 +1,5 @@
 export default function Pagination({ page, pageCount, total, start, end, setPage, label = 'records' }) {
-  if (total <= 10) return null;
+  if (pageCount <= 1) return null;
   const first = Math.max(1, Math.min(page - 2, pageCount - 4));
   const pages = Array.from({ length: Math.min(5, pageCount) }, (_, i) => first + i);
 

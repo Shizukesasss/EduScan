@@ -1,5 +1,6 @@
 """Shared interpretation of academic labels without changing stored records."""
 import re
+from .tle_subjects import tle_specialization
 
 SHS_TRACK_CLUSTERS = {
     "Academic Track": (
@@ -67,6 +68,8 @@ def subject_policy_category(name: str, category: str = "JHS") -> str:
     if category.upper() != "JHS":
         return category
     name = name.strip().upper()
+    if tle_specialization(name) is not None:
+        return 'TLE'
     if name in {'GMRC', 'VALUES EDUCATION', 'EDUKASYON SA PAGPAPAKATAO', 'ESP'}:
         return 'GMRC/Values'
     if name in {"MATHEMATICS", "MATH", "SCIENCE"}:

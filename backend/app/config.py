@@ -99,6 +99,9 @@ for directory in (DATA_DIR, BIOMETRIC_DIR, MODEL_DIR, TEMPLATE_DIR, EXPORT_DIR):
 
 @dataclass(frozen=True)
 class Settings:
+    google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+    # Enable after explicitly linking existing privileged accounts; see the rollout guide.
+    deped_only: bool = os.getenv("EDUSCAN_DEPED_ONLY", "false").lower() == "true"
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./data/eduscan.db")
     secret_key: str = _application_secret()
     encryption_key: bytes = _encryption_key()

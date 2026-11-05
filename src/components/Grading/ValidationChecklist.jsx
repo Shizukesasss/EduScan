@@ -1,5 +1,4 @@
 import React from 'react';
-import { X } from 'lucide-react';
 import ValidationIssueGroups from './ValidationIssueGroups';
 
 export default function ValidationChecklist({
@@ -28,8 +27,8 @@ export default function ValidationChecklist({
           <p className="eyebrow">Quality & Compliance Guard</p>
           <h3 id="validation-checklist-title">Gradebook validation</h3>
         </div>
-        {onClose && <button type="button" className="btn-icon" onClick={onClose} aria-label="Close checklist">
-          <X size={18} /><span className="control-label">Close</span>
+        {onClose && <button type="button" className="btn-text-control" onClick={onClose} aria-label="Close checklist">
+          <span className="control-label">Close</span>
         </button>}
       </div>
 

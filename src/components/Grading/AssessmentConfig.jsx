@@ -1,5 +1,5 @@
+import Modal from '../Common/Modal';
 import { useState } from 'react';
-import { CheckCircle, ChevronDown, ChevronRight, Plus, Trash2, X } from 'lucide-react';
 import { useToast } from '../../contexts/useToast';
 
 export default function AssessmentConfig({ components, onSave, onClose, disabled = false }) {
@@ -121,7 +121,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
   };
 
   return (
-    <div className="modal-backdrop">
+    <Modal onClose={onClose} label="Assessment components">
       <div className="modal-card modal-lg">
         <div className="modal-header">
           <div>
@@ -130,8 +130,8 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
               Adjust assessment categories, percentage weights, and individual activities.
             </p>
           </div>
-          <button type="button" className="btn-icon" onClick={onClose} aria-label="Close">
-            <X size={20} /><span className="control-label">Close</span>
+          <button type="button" className="btn-text-control" onClick={onClose} aria-label="Close">
+            <span className="control-label">Close</span>
           </button>
         </div>
 
@@ -168,7 +168,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
                     className="comp-accordion-btn"
                     onClick={() => toggleExpand(cIdx)}
                   >
-                    {expanded[cIdx] ? <><ChevronDown size={18} /><span className="disclosure-action">Collapse</span></> : <><ChevronRight size={18} /><span className="disclosure-action">Expand</span></>}
+                    {expanded[cIdx] ? <><span className="disclosure-action">Collapse</span></> : <><span className="disclosure-action">Expand</span></>}
                     <span className="comp-title-badge">{comp.name || 'Untitled Component'}</span>
                     <span className="badge badge-subtle">{comp.weight}%</span>
                     <span className="badge-count">
@@ -182,7 +182,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
                       onClick={() => removeComponent(cIdx)}
                       title="Delete this component"
                     >
-                      <Trash2 size={16} /><span className="control-label">Delete</span>
+                      <span className="control-label">Delete</span>
                     </button>
                   )}
                 </div>
@@ -240,7 +240,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
                             className="btn btn-secondary btn-sm"
                             onClick={() => addItem(cIdx)}
                           >
-                            <Plus size={14} /> Add Activity
+                             Add Activity
                           </button>
                         )}
                       </div>
@@ -291,12 +291,12 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
                                   <td>
                                     <button
                                       type="button"
-                                      className="btn-icon-danger"
+                                      className="btn-text-danger"
                                       disabled={comp.items.length <= 1}
                                       onClick={() => removeItem(cIdx, iIdx)}
                                       title="Remove activity"
                                     >
-                                      <Trash2 size={14} /><span className="control-label">Remove</span>
+                                      <span className="control-label">Remove</span>
                                     </button>
                                   </td>
                                 )}
@@ -314,7 +314,7 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
 
           {!disabled && (
             <button type="button" className="btn btn-secondary add-comp-btn" onClick={addComponent}>
-              <Plus size={16} /> Add Another Component
+               Add Another Component
             </button>
           )}
 
@@ -346,11 +346,11 @@ export default function AssessmentConfig({ components, onSave, onClose, disabled
               disabled={!isWeightValid || !confirmChanges}
               onClick={handleSave}
             >
-              <CheckCircle size={16} /> Save Changes
+               Save Changes
             </button>
           )}
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

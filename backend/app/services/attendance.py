@@ -228,6 +228,45 @@ def rows_for_people(db: Session, people: list[Person], day: date) -> list[dict]:
                             reset, exception, excuses.get(person.id)) for person in people]
 
 
+def rows_for_people_on_days(db: Session, people: list[Person], days: list[date]) -> dict[date, list[dict]]:
+    """Read a reporting period in five queries, preserving the daily attendance rules."""
+    if not people or not days:
+        return {day: [] for day in days}
+    ids = [person.id for person in people]
+    resets = {}
+    for reset in db.scalars(select(AttendanceResetAudit).where(
+            AttendanceResetAudit.attendance_date.in_(days)).order_by(AttendanceResetAudit.created_at.desc())):
+        resets.setdefault(reset.attendance_date, reset)
+
+    def after_reset(item, day):
+        reset = resets.get(day)
+        if not reset:
+            return True
+        def utc(value):
+            return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+        return utc(item.created_at) > utc(reset.created_at)
+
+    events = {}
+    for item in db.scalars(attendance_event_query().where(
+            AttendanceEvent.person_id.in_(ids), AttendanceEvent.event_date.in_(days))
+            .order_by(AttendanceEvent.event_time, AttendanceEvent.created_at)):
+        if after_reset(item, item.event_date):
+            events.setdefault((item.event_date, item.person_id), []).append(item)
+    corrections = {}
+    for item in db.scalars(select(AttendanceCorrection).where(
+            AttendanceCorrection.person_id.in_(ids), AttendanceCorrection.attendance_date.in_(days))
+            .order_by(AttendanceCorrection.created_at.desc())):
+        if after_reset(item, item.attendance_date):
+            corrections.setdefault((item.attendance_date, item.person_id), item)
+    exceptions = {item.event_date: item for item in db.scalars(select(CalendarException).where(
+        CalendarException.event_date.in_(days)))}
+    excuses = {(item.event_date, item.person_id): item for item in db.scalars(select(ExcusedAbsence).where(
+        ExcusedAbsence.person_id.in_(ids), ExcusedAbsence.event_date.in_(days)))}
+    return {day: [_attendance_row(person, day, events.get((day, person.id), []),
+                    corrections.get((day, person.id)), resets.get(day), exceptions.get(day),
+                    excuses.get((day, person.id))) for person in people] for day in days}
+
+
 def record_gate_match(db: Session, person: Person, distance: float, now: datetime | None = None,
                       *, identity_matcher: str = 'LBPH') -> dict:
     now = now or local_now()

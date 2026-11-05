@@ -283,6 +283,107 @@ class AnnexGImportTests(unittest.TestCase):
         self.assertIn("import_mode", {column["name"] for column in inspect(self.engine).get_columns("roster_import_audits")})
         self.assertEqual(run_migrations(self.engine), [])
 
+    def test_pdf_metadata_uses_year_specific_adviser_and_school_profile(self):
+        from app.services.settings_store import set_json
+        enrollment = self.add_enrollment()
+        set_json(self.db, 'annex_g.school', {'name': 'Verified School', 'region': 'V', 'division': 'Albay', 'district': 'District 1', 'municipality': 'Malilipot', 'province': 'Albay'})
+        set_json(self.db, 'school.heads', {str(self.year.id): {'full_name': 'Verified Head'}})
+        self.add_gradebook(self.math, 1, 100)
+        report = build_annex_g_section(self.db, self.year.id, '7', 'Jose', 1)
+        self.assertEqual(report['school']['district'], 'District 1')
+        self.assertEqual(report['adviser_name'], self.teacher.full_name)
+        self.assertEqual(report['school']['school_head'], 'Verified Head')
+        self.assertEqual(report['learners'][0]['lrn'], enrollment.person.lrn)
+
+    def test_annex_g_uses_confirmed_school_details_without_setup(self):
+        self.add_enrollment()
+        self.add_gradebook(self.math, 1, 100)
+        report = build_annex_g_section(self.db, self.year.id, '7', 'Jose', 1)
+        self.assertEqual({key: report['school'][key] for key in ['name','region','division','district','municipality','province','school_id']}, {
+            'name':'San Jose National High School', 'region':'V', 'division':'Albay', 'district':'1st District',
+            'municipality':'Malilipot','province':'Albay','school_id':'301875'})
+        self.assertFalse(any('school profile' in issue for issue in report['blockers']))
+
+    def test_class_record_learners_appear_as_unverified_drafts_without_creating_enrollment(self):
+        self.learner.date_of_birth = date(2012, 6, 5)
+        self.db.commit()
+        self.add_gradebook(self.math, 1, 100)
+        report = build_annex_g_section(self.db, self.year.id, '7', 'Jose', 1, include_unverified=True)
+        row = next(row for row in report['learners'] if row['person_id'] == self.learner.id)
+        self.assertFalse(row['placement_verified'])
+        self.assertEqual(row['enrollment_id'], -self.learner.id)
+        self.assertEqual(row['learning_areas'][0]['term_grades']['1'], 100)
+        self.assertEqual(row['attendance'], [])
+        self.assertTrue(any('enrollment' in issue.lower() for issue in row['blockers']))
+        self.assertEqual(self.db.query(LearnerEnrollment).count(), 0)
+        self.assertFalse(build_annex_g_section(self.db, self.year.id, '7', 'Jose', 1)['learners'])
+
+    def test_draft_roster_does_not_override_verified_placement_or_use_future_term_scores(self):
+        self.add_gradebook(self.math, 2, 100)
+        report = build_annex_g_section(self.db, self.year.id, '7', 'Jose', 1, include_unverified=True)
+        self.assertEqual(report['learners'], [])
+        elsewhere = SchoolSection(grade_level_id=self.grade.id, name='Verified elsewhere')
+        self.db.add(elsewhere); self.db.commit()
+        enrollment = self.add_enrollment()
+        enrollment.section_id = elsewhere.id
+        self.db.commit()
+        report = build_annex_g_section(self.db, self.year.id, '7', 'Jose', 2, include_unverified=True)
+        self.assertEqual(report['learners'], [])
+
+    def test_adding_draft_learners_does_not_change_verified_learner_grades(self):
+        self.add_enrollment()
+        book = self.add_gradebook(self.math,1,100)
+        component = self.db.scalars(select(GradebookComponent).where(GradebookComponent.gradebook_id==book.id)).first()
+        extra = AssessmentItem(component_id=component.id,label='Activity only used by draft learner',max_score=100,sequence=99)
+        self.db.add(extra); self.db.flush()
+        self.db.add(StudentScore(person_id=self.other.id,assessment_item_id=extra.id,score=75,status='Scored',updated_by=self.teacher.id))
+        self.db.commit()
+        self.db.expire_all()
+        official = build_annex_g_section(self.db,self.year.id,'7','Jose',1)
+        workspace = build_annex_g_section(self.db,self.year.id,'7','Jose',1,include_unverified=True)
+        expected = next(row for row in official['learners'] if row['person_id']==self.learner.id)
+        actual = next(row for row in workspace['learners'] if row['person_id']==self.learner.id)
+        self.assertEqual(actual['learning_areas'],expected['learning_areas'])
+        self.assertEqual(actual['blockers'],expected['blockers'])
+        self.assertTrue(any(row['person_id']==self.other.id and not row['placement_verified'] for row in workspace['learners']))
+
+    def test_unfinalized_gradebooks_are_not_calculated_for_annex_g(self):
+        self.add_enrollment()
+        self.add_gradebook(self.math, 1, 100, status='Draft')
+        with patch('app.services.annex_g.get_gradebook_full', side_effect=AssertionError('Unfinalized grades must not be calculated')):
+            report = build_annex_g_section(self.db, self.year.id, '7', 'Jose', 1)
+        learner = report['learners'][0]
+        self.assertTrue(any('gradebook is Draft' in blocker for blocker in learner['blockers']))
+
+    def test_annex_g_loads_finalized_gradebooks_in_batches(self):
+        from sqlalchemy import event
+        self.add_enrollment()
+        for term in (1, 2, 3):
+            self.add_gradebook(self.math, term, 100)
+            self.add_gradebook(self.mapeh, term, 90, learning_area='music_arts')
+            self.add_gradebook(self.mapeh, term, 80, learning_area='pe_health')
+        self.db.expire_all()
+        statements = []
+        def count(_conn, _cursor, statement, *_args):
+            statements.append(statement)
+        event.listen(self.engine, 'before_cursor_execute', count)
+        try:
+            report = build_annex_g_section(self.db, self.year.id, '7', 'Jose', 3)
+        finally:
+            event.remove(self.engine, 'before_cursor_execute', count)
+        self.assertEqual(len(report['learners']), 1)
+        self.assertIsNotNone(report['learners'][0]['general_average'])
+        self.assertLessEqual(len(statements), 28, f'Annex G executed {len(statements)} queries')
+
+    def test_report_options_include_learner_evidence_counts(self):
+        self.add_gradebook(self.math, 1, 100)
+        result = main.annex_g_options(self.db, self.admin)
+        year = next(item for item in result['school_years'] if item['id'] == self.year.id)
+        section = next(item for item in year['sections'] if item['id'] == self.section.id)
+        self.assertEqual(section['learner_count'], 1)
+        self.assertEqual(section['verified_learner_count'], 0)
+        self.assertEqual(section['class_record_learner_count'], 1)
+
     def test_age_uses_first_friday_of_june_reference(self):
         self.assertEqual(first_friday_of_june(self.year), date(2026, 6, 5))
         self.assertEqual(age_on(date(2012, 6, 5), date(2026, 6, 5)), 14)
@@ -379,7 +480,7 @@ class AnnexGImportTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as blocked:
             release_annex_g(enrollment.id, 1, self.db, self.records)
         self.assertEqual(blocked.exception.status_code, 409)
-        self.assertIn("date of birth", blocked.exception.detail["blockers"][0].lower())
+        self.assertTrue(any("date of birth" in issue.lower() for issue in blocked.exception.detail["blockers"]))
         self.assertEqual(self.db.scalar(select(GeneratedReport.id)), None)
 
     def test_records_release_registers_immutable_snapshot_without_changing_scores(self):
@@ -388,6 +489,9 @@ class AnnexGImportTests(unittest.TestCase):
         enrollment = self.add_enrollment()
         for term in (1, 2, 3):
             self.add_gradebook(self.math, term, 100)
+        from app.services.settings_store import set_json
+        set_json(self.db, 'annex_g.school', {'name': 'Verified School', 'region': 'V', 'division': 'Albay', 'district': 'District 1', 'municipality': 'Malilipot', 'province': 'Albay'})
+        set_json(self.db, 'school.heads', {str(self.year.id): {'full_name': 'Verified Head'}})
         before_scores = self.db.query(StudentScore).count()
         before_attendance = self.db.query(AttendanceEvent).count()
         with tempfile.TemporaryDirectory(prefix="annex-g-report-", dir=Path(__file__).parent) as folder, \
@@ -397,8 +501,10 @@ class AnnexGImportTests(unittest.TestCase):
             released = release_annex_g(enrollment.id, 3, self.db, self.records)
             record = self.db.get(GeneratedReport, released["id"])
             self.assertEqual(record.status, "Released")
-            content = Path(record.file_path).read_text(encoding="utf-8")
-            self.assertIn("Final Grade", content)
+            from pypdf import PdfReader
+            content = PdfReader(record.file_path).pages[0].extract_text()
+            self.assertTrue(record.filename.endswith('.pdf'))
+            self.assertRegex(content, r"Final\s+Grade")
             self.assertIn("General Average", content)
             self.assertNotIn("2012-06-05", content)
             response = annex_g_released_file(record.id, self.db, self.records)

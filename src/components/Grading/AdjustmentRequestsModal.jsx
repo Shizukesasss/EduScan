@@ -1,6 +1,6 @@
+import Modal from '../Common/Modal';
 import PaginatedBody from '../Common/PaginatedBody';
 import React, { useState } from 'react';
-import { Plus, X, Trash2 } from 'lucide-react';
 import { api, auth } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 
@@ -176,7 +176,7 @@ export default function AdjustmentRequestsModal({
   };
 
   return (
-    <div className="modal-backdrop">
+    <Modal onClose={onClose} label="Grade adjustment requests">
       <div className="modal-card modal-lg">
         <div className="modal-header border-b border-border pb-4 mb-0">
           <div>
@@ -185,8 +185,8 @@ export default function AdjustmentRequestsModal({
               Formal request and approval workflow for grade corrections on finalized gradebooks.
             </p>
           </div>
-          <button type="button" className="btn-icon" onClick={onClose} aria-label="Close">
-            <X size={20} /><span className="control-label">Close</span>
+          <button type="button" className="btn-text-control" onClick={onClose} aria-label="Close">
+            <span className="control-label">Close</span>
           </button>
         </div>
 
@@ -208,7 +208,7 @@ export default function AdjustmentRequestsModal({
                   className={`status-filter-btn${mode === 'create' ? ' status-filter-active status-filter-audit' : ''}`}
                   onClick={() => setMode('create')}
                 >
-                  <Plus size={13} style={{ display: 'inline', marginRight: '3px' }} /> New Request
+                   New Request
                 </button>
               )}
               {canRequestAdjustments && (
@@ -494,7 +494,7 @@ export default function AdjustmentRequestsModal({
                                 onClick={() => handleDeleteRequest(req.id)}
                                 disabled={loading}
                               >
-                                <Trash2 size={16} /><span className="control-label">Delete</span>
+                                <span className="control-label">Delete</span>
                               </button>
                             )}
                           </td>
@@ -508,6 +508,6 @@ export default function AdjustmentRequestsModal({
           )}
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

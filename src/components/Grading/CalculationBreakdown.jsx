@@ -1,4 +1,4 @@
-import { X } from 'lucide-react';
+import Modal from '../Common/Modal';
 
 export default function CalculationBreakdown({ breakdown, onClose }) {
   if (!breakdown) return null;
@@ -7,15 +7,15 @@ export default function CalculationBreakdown({ breakdown, onClose }) {
   const isComplete = breakdown.complete;
 
   return (
-    <div className="modal-backdrop">
+    <Modal onClose={onClose} label="Grade computation breakdown">
       <div className="modal-card modal-md">
         <div className="modal-header">
           <div>
             <h3>Grade Computation Breakdown</h3>
             <p className="modal-subtitle">{breakdown.student_name}</p>
           </div>
-          <button type="button" className="btn-icon" onClick={onClose} aria-label="Close">
-            <X size={20} /><span className="control-label">Close</span>
+          <button type="button" className="btn-text-control" onClick={onClose} aria-label="Close">
+            <span className="control-label">Close</span>
           </button>
         </div>
 
@@ -115,6 +115,6 @@ export default function CalculationBreakdown({ breakdown, onClose }) {
           </button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

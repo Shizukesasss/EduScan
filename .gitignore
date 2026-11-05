@@ -1,4 +1,4 @@
-﻿# ─── Logs ────────────────────────────────────────────────────────────────────
+# ─── Logs ────────────────────────────────────────────────────────────────────
 logs/
 *.log
 npm-debug.log*
@@ -64,6 +64,24 @@ scratch/
 work/
 demo-reports/
 .agents/
+tmp/
+output/
+eduscan.db
+backend/dummy.jpg
+.agent/
+.claude/
+.codebuddy/
+.codex/
+.continue/
+.cursor/
+.gemini/
+.impeccable/
+.kiro/
+.opencode/
+.qoder/
+.roo/
+.trae/
+.windsurf/
 skills-lock.json
 
 # Local test databases, generated reports, and encryption keys

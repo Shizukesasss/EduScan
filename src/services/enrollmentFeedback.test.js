@@ -22,6 +22,15 @@ test('duplicate warnings preserve the matching identity and existing-enrollment 
   assert.match(feedback.note, /unchanged/);
 });
 
+test('missing enrollment never switches the new student to another identity', () => {
+  const feedback = buildEnrollmentFeedback({ code: 'identity_verifier_unavailable', message: 'Files missing',
+    details: { recovery_person_id: 160, recovery_person_name: 'Existing Person' } });
+  assert.equal(feedback.recoveryPersonId, undefined);
+  assert.equal(feedback.recoveryPersonName, undefined);
+  assert.equal(feedback.message, 'Files missing');
+  assert.equal(buildEnrollmentFeedback({ code: 'identity_verifier_unavailable', message: 'Model unavailable' }).recoveryPersonId, undefined);
+});
+
 test('gate camera tests reuse enrollment replay and blink guidance', () => {
   for (const [match, code] of [
     [{ presentation_verified: false, recognized: true, liveness_verified: true }, 'presentation_check_failed'],

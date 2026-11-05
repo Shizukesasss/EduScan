@@ -1,4 +1,4 @@
-"""Shared local SFace identity features; no image or feature persistence."""
+"""Shared local SFace identity extraction; enrollment manages encrypted templates."""
 import hashlib
 import threading
 from pathlib import Path

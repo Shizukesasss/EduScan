@@ -1,8 +1,8 @@
+import Modal from '../Common/Modal';
 import BiometricConsent from './BiometricConsent';
 import EnrollmentFields from './EnrollmentFields';
 import PhoneNumberField from './PhoneNumberField';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { X, Camera, ScanFace, CheckCircle, Database, AlertTriangle } from 'lucide-react';
 import { api, captureVideoFrame, enrollmentCapture } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 import { normalizeGradeName } from '../../services/academicContext';
@@ -128,7 +128,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
           ? await api.put(`/biometrics/enrollments/${personId}`, multipart)
           : await api.post(`/biometrics/enrollments/${personId}`, multipart);
       }
-      showSuccess(`${result.accepted} quality samples encrypted and saved. LBPH model ${result.model.version} trained for ${result.model.person_count} person(s). ${result.sms?.message || ''}`);
+      showSuccess(`${result.accepted} quality samples encrypted and saved. LBPH model ${result.model.version} trained for ${result.model.person_count} person(s). ${result.sms?.message || ''} ${(result.warnings || []).join(' ')}`);
       window.setTimeout(() => onSaved?.(result), 1800);
     } catch (err) {
       const feedback = buildEnrollmentFeedback(err, isReplacement);
@@ -140,8 +140,8 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
   };
 
   return (
-    <div className="modal-backdrop"><div className="modal-card enrollment-modal">
-      <div className="modal-header"><div><p className="eyebrow">{assistedRegistration ? 'School record' : 'Encrypted local dataset'}</p><h2><ScanFace size={24} /> {assistedRegistration ? 'Register for staff-assisted attendance' : isReplacement ? 'Replace facial enrollment' : isExistingPerson ? 'Enroll face for registered person' : 'Enroll person & train LBPH'}</h2></div><button onClick={onClose} className="icon-btn"><X size={22} /><span className="control-label">Close</span></button></div>
+    <Modal onClose={onClose} label="Facial enrollment" busy={saving || isCapturing}><div className="modal-card enrollment-modal">
+      <div className="modal-header"><div><p className="eyebrow">{assistedRegistration ? 'School record' : 'Encrypted local dataset'}</p><h2> {assistedRegistration ? 'Register for staff-assisted attendance' : isReplacement ? 'Replace facial enrollment' : isExistingPerson ? 'Enroll face for registered person' : 'Enroll person & train LBPH'}</h2></div><button onClick={onClose} className="text-control"><span className="control-label">Close</span></button></div>
       <p className="section-copy">Enrollment saves face samples and trains the model. It does not record Time In or Time Out. Start gate recognition separately to record attendance.</p>
       {!isExistingPerson && <label className="checkbox-field"><input type="checkbox" checked={assistedRegistration} disabled={saving || isCapturing} onChange={(event) => {
         setAssistedRegistration(event.target.checked);
@@ -154,7 +154,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
       <div className="enrollment-content">
         {isExistingPerson ? <div className="enrollment-fields">
           <div className="enrollment-identity"><span>Authorized person</span><strong>{person.full_name}</strong><small>{person.external_id} · {person.role}{person.grade ? ` · Grade ${person.grade} — ${person.section}` : ''}</small></div>
-          <div className="notice notice-warning"><AlertTriangle size={18} /><span>{isReplacement ? 'The current encrypted samples will be securely replaced after the new dataset passes quality checks. The audit history remains.' : 'This face enrollment will use the existing school record. Capture this person’s own face after confirming their documented consent.'}</span></div>
+          <div className="notice notice-warning"><span>{isReplacement ? 'The current encrypted samples will be securely replaced after the new dataset passes quality checks. The audit history remains.' : 'This face enrollment will use the existing school record. Capture this person’s own face after confirming their documented consent.'}</span></div>
           {isReplacement && <label><span className="field-label">Required re-enrollment reason</span><textarea className="text-area" placeholder="Example: Appearance changed and recognition accuracy was verified as poor" value={changeReason} onChange={(event) => setChangeReason(event.target.value)} /></label>}
         </div> : <div className="form-grid two-columns enrollment-fields">
           {form.role === 'Student'
@@ -173,7 +173,7 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
             patch('grade', grade?.name || '');
             patch('section', '');
           }} required><option value="">{academicLoading ? 'Loading grades…' : 'Select a grade'}</option>{sortedGrades.map((grade) => <option key={grade.id} value={grade.id}>Grade {normalizeGradeName(grade.name)}</option>)}</select></label><label><span className="field-label">Section</span><select className="input-field" value={form.section} disabled={!gradeLevelId || academicLoading || Boolean(academicError)} onChange={(e) => patch('section', e.target.value)} required><option value="">Select a section</option>{availableSections.map((section) => <option key={section.id} value={section.name}>{section.name}</option>)}</select></label><PhoneNumberField label="Parent/guardian mobile number" value={form.guardian_phone} onChange={value => patch('guardian_phone', value)} />
-            {academicError && <div className="notice notice-danger full-field" role="alert"><AlertTriangle size={18} /><span>Could not load grade and section records: {academicError}</span></div>}
+            {academicError && <div className="notice notice-danger full-field" role="alert"><span>Could not load grade and section records: {academicError}</span></div>}
             {!academicLoading && !academicError && sortedGrades.length === 0 && <div className="notice notice-warning full-field" role="status">Add an active grade level and section in Administration before enrolling a student.</div>}
           </>
             : <><label className="full-field"><span className="field-label">Office / assignment</span><input placeholder="e.g. Science department (blank for role default)" className="input-field" value={form.assignment} onChange={(e) => patch('assignment', e.target.value)} /></label><PhoneNumberField label="Phone number" value={form.guardian_phone} onChange={value => patch('guardian_phone', value)} /></>}
@@ -182,15 +182,15 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
         </div>}
         <div className="enrollment-camera">
           {assistedRegistration ? <div className="notice notice-blue"><div><strong>Camera-free registration</strong><p>For anyone who cannot complete face capture or blinking, including people with facial differences. Save their school record here, then use Attendance → Assist to verify their school ID or roster and record an attended visit. No face samples, medical details, or attendance are saved by this option.</p></div></div> : <>
-          <div className="enrollment-video"><video ref={videoRef} playsInline muted />{!cameraOn && <><Camera size={48} /><span className="camera-placeholder-label">Camera is off</span></>}{isCapturing && <div className="capture-indicator">CAPTURING</div>}{frames.length === targetFrames && !isCapturing && <><CheckCircle className="capture-complete" size={48} /><span className="capture-complete">Captured</span></>}</div>
+          <div className="enrollment-video"><video ref={videoRef} playsInline muted />{!cameraOn && <><span className="camera-placeholder-label">Camera is off</span></>}{isCapturing && <div className="capture-indicator">CAPTURING</div>}{frames.length === targetFrames && !isCapturing && <><span className="capture-complete">Captured</span></>}</div>
           <div><div className="scan-log-top"><strong>Camera frames</strong><span>{frames.length}/{targetFrames}</span></div><div className="weight-meter weight-valid"><span style={{ width: `${frames.length / targetFrames * 100}%` }} /></div><p className="muted-small">Human faces only. Keep one person in view with both eyes, nose, and mouth visible. Capture this person's own face; each face belongs to one enrolled identity. Face forward and move slowly while frames are captured.</p></div>
-          {enrollmentError && <div className="notice notice-warning" role="alert"><AlertTriangle size={18} /><div><strong>{enrollmentError.title}</strong><p>{enrollmentError.message}</p><p className="muted-small">{enrollmentError.note}</p>{enrollmentError.reasons.length > 0 && <details><summary>Capture details</summary><ul>{enrollmentError.reasons.slice(0, 3).map(reason => <li key={reason}>{reason}</li>)}</ul></details>}</div></div>}
-          {!cameraOn ? <button className="btn-primary" onClick={startCamera}><Camera size={16} /> Enable camera</button> : <button className="btn-secondary" onClick={captureDataset} disabled={isCapturing || saving}>{isCapturing ? 'Capturing real frames…' : 'Capture enrollment frames'}</button>}
+          {enrollmentError && <div className="notice notice-warning" role="alert"><div><strong>{enrollmentError.title}</strong><p>{enrollmentError.message}</p><p className="muted-small">{enrollmentError.note}</p>{enrollmentError.reasons.length > 0 && <details><summary>Capture details</summary><ul>{enrollmentError.reasons.slice(0, 3).map(reason => <li key={reason}>{reason}</li>)}</ul></details>}</div></div>}
+          {!cameraOn ? <button className="btn-primary" onClick={startCamera}> Enable camera</button> : <button className="btn-secondary" onClick={captureDataset} disabled={isCapturing || saving}>{isCapturing ? 'Capturing real frames…' : 'Capture enrollment frames'}</button>}
           <p className="muted-small">Unable to complete camera verification? Authorized staff can use <a href="/dashboard/attendance">Attendance → Assist</a> after checking the person's school ID or official roster. No medical details are needed.</p>
           </>}
         </div>
       </div>
-      <div className="modal-actions"><button className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary" onClick={saveAndTrain} disabled={saving || isCapturing || (!assistedRegistration && frames.length < targetFrames) || missingStudentPlacement || (form.role === 'Student' && (academicLoading || Boolean(academicError)))}><Database size={16} /> {saving ? assistedRegistration ? 'Saving school record…' : 'Checking quality & duplicate faces…' : assistedRegistration ? 'Save school record only' : isReplacement ? 'Replace samples & retrain model' : 'Save encrypted samples & train model'}</button></div>
-    </div></div>
+      <div className="modal-actions"><button className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary" onClick={saveAndTrain} disabled={saving || isCapturing || (!assistedRegistration && frames.length < targetFrames) || missingStudentPlacement || (!isExistingPerson && form.role === 'Student' && (academicLoading || Boolean(academicError)))}> {saving ? assistedRegistration ? 'Saving school record…' : 'Checking quality & duplicate faces…' : assistedRegistration ? 'Save school record only' : isReplacement ? 'Replace samples & retrain model' : 'Save encrypted samples & train model'}</button></div>
+    </div></Modal>
   );
 }

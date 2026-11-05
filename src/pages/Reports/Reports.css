@@ -1,0 +1,83 @@
+/* Reports follow the task sequence; data and actions remain role scoped. */
+.reports-page { gap: 24px; }
+.reports-heading { display: flex; flex-direction: column; gap: 8px; }
+.reports-heading h1 { margin: 0; font-size: 28px; line-height: 1.25; font-weight: 650; letter-spacing: -.025em; }
+.reports-heading p { margin: 0; font-size: 14px; line-height: 1.6; color: var(--text-secondary); max-width: 72ch; }
+.reports-navigation {
+  display: flex;
+  align-self: flex-start;
+  flex-wrap: wrap;
+  max-width: 100%;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: #eef0f4;
+}
+.reports-navigation a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 10px 15px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-decoration: none;
+  transition: color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-base) var(--ease-out);
+}
+.reports-navigation a:hover { background: rgba(255, 255, 255, .55); color: var(--primary-color); }
+.reports-navigation a[aria-current='location'] { background: #fff; color: var(--accent-blue); box-shadow: 0 1px 4px rgba(24, 36, 56, .12); }
+.reports-navigation a:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: -3px; }
+.reports-workspace { min-width: 0; scroll-margin-top: 160px; }
+.reports-page .card-static { border-radius: 14px; box-shadow: none; padding: 24px; }
+.reports-page .section-heading { align-items: flex-start; gap: 16px; margin-bottom: 20px; }
+.reports-page h2 { font-size: 20px; margin-bottom: 6px; }
+.reports-page h3 { font-size: 16px; }
+.reports-page .section-copy, .reports-section-description { margin: 8px 0 20px; color: var(--text-secondary); font-size: 13px; line-height: 1.7; max-width: 95ch; }
+.reports-page .section-heading .section-copy { margin-bottom: 0; }
+.reports-page .eyebrow { font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px; }
+.reports-page .form-grid { gap: 16px 20px; }
+.reports-page .form-grid.three-columns { grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }
+.reports-page .form-grid label { min-width: 0; }
+.reports-page .field-label { font-size: 13px; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.reports-page .input-field { width: 100%; min-width: 0; font-size: 13px; min-height: 44px; }
+.reports-preview-heading { padding-top: 20px; margin-top: 20px; border-top: 1px solid var(--border-color); }
+.reports-preview-heading h3 { margin: 0 0 8px; }
+.reports-preview-heading .muted-small { margin: 0 0 16px; font-size: 13px; }
+.reports-page .table-scroll { min-width: 0; max-width: 100%; overflow-x: auto; border-radius: 10px; }
+.reports-page .reports-preview-table, .reports-page .reports-history-table, .reports-sf2 .interactive-table, .reports-page .teacher-released-reports > .table-scroll > table { width: 100%; table-layout: fixed; }
+.reports-page .reports-history-table { min-width: 720px; }
+.reports-page .interactive-table th { font-size: 12px; text-transform: none; letter-spacing: 0; padding: 12px; white-space: normal; overflow-wrap: anywhere; }
+.reports-page .interactive-table td { padding: 14px 12px; vertical-align: top; line-height: 1.6; font-size: 13px; white-space: normal; overflow-wrap: anywhere; }
+.reports-page .interactive-table .table-subline { margin-top: 4px; font-size: 12px; line-height: 1.6; }
+.reports-page .reports-history-table td:nth-child(2) .btn-link { display: inline-flex; gap: 6px; align-items: flex-start; margin-top: 8px; max-width: 100%; white-space: normal; text-align: left; overflow-wrap: anywhere; font-size: 12px; }
+.reports-page .reports-history-table td:last-child > div { display: flex; flex-direction: column; gap: 8px; }
+.reports-page .reports-history-table .input-field { min-height: 38px; padding: 8px 10px; font-size: 12px; }
+.reports-page .record-pagination { gap: 12px 20px; padding: 8px 0; }
+.reports-page .record-pagination button { white-space: nowrap; }
+.reports-attendance > .action-row { justify-content: flex-start; flex-wrap: wrap; gap: 12px; padding-top: 20px; margin-top: 20px; border-top: 1px solid var(--border-color); }
+.reports-page .btn-primary, .reports-page .btn-secondary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 13px; }
+.reports-history-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; font-size: 13px; color: var(--text-secondary); }
+.reports-sf2 > .page-stack { gap: 16px; }
+.reports-page .report-action-bar { flex-wrap: wrap; gap: 20px; padding-block: 20px; margin-top: 20px; }
+.reports-page .report-action-bar > div { min-width: 0; }
+.reports-page .report-action-bar > div > span { overflow-wrap: anywhere; }
+.reports-page .report-action-bar .action-row { flex-wrap: wrap; justify-content: flex-start; gap: 12px; }
+@media (max-width: 760px) {
+  .reports-navigation a { padding: 10px 12px; }
+  .reports-page .card-static { padding: 20px; }
+  .reports-page .report-action-bar { align-items: flex-start; flex-direction: column; }
+  .reports-page .reports-preview-table, .reports-sf2 .interactive-table { min-width: 600px; }
+}
+
+.reports-technical-details { margin-top: 12px; font-size: 12px; }
+.reports-technical-details > summary { cursor: pointer; color: var(--text-secondary); padding-block: 4px; transition: color var(--motion-fast) var(--ease-standard); }
+.reports-technical-details > summary:hover { color: var(--text-primary); }
+.reports-technical-details dl { margin: 8px 0 0; padding: 10px; background: var(--surface-muted); border-radius: 6px; }
+.reports-technical-details dt { font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; }
+.reports-technical-details dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.reports-history-table .table-subline strong { font-weight: 500; color: var(--text-primary); }

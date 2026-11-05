@@ -27,12 +27,18 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class GoogleLoginRequest(BaseModel):
+    credential: str = Field(min_length=1, max_length=16384)
+    nonce: str = Field(min_length=32, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     role: str
     full_name: str
     must_change_password: bool = False
+    auth_provider: str = "password"
 
 
 class UserPublic(BaseModel):
@@ -581,6 +587,17 @@ class DedicatedDemoAdvisoryPayload(BaseModel):
 class DemoTeacherSetupPayload(BaseModel):
     school_year_id: int
     section_ids: list[int] = Field(min_length=1, max_length=200)
+
+
+class AnnexGSchoolProfilePayload(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    name: str = Field(min_length=1, max_length=180)
+    region: str = Field(min_length=1, max_length=100)
+    division: str = Field(min_length=1, max_length=150)
+    district: str = Field(min_length=1, max_length=150)
+    municipality: str = Field(min_length=1, max_length=150)
+    province: str = Field(min_length=1, max_length=150)
+    school_id: str = Field(default='', max_length=30)
 
 
 class AnnexGPlacementPayload(BaseModel):

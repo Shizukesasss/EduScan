@@ -227,9 +227,9 @@ def validate_score_value(item: AssessmentItem, score: float | None, status: str)
 
 
 def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=True,
-                       roster_person_ids: list[int] | None = None) -> dict | None:
+                       roster_person_ids: list[int] | None = None, _report_data: dict | None = None) -> dict | None:
     """Load a gradebook with all components, items, scores, and calculations."""
-    book = db.scalar(
+    book = _report_data['book'] if _report_data is not None else db.scalar(
         select(Gradebook)
         .options(
             joinedload(Gradebook.components).joinedload(GradebookComponent.items),
@@ -241,7 +241,11 @@ def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=
         return None
 
     # Load students for this grade/section
-    students = db.scalars(gradebook_roster_query(book, roster_person_ids)).all()
+    if _report_data is None:
+        students = db.scalars(gradebook_roster_query(book, roster_person_ids)).all()
+    else:
+        roster_ids = set(roster_person_ids) if roster_person_ids is not None else None
+        students = [student for student in _report_data['students'] if roster_ids is None or student.id in roster_ids]
 
     # Collect all assessment item IDs
     all_item_ids = []
@@ -274,7 +278,7 @@ def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=
     components_data = normalize_component_weights(components_data)
 
     # Load all scores for these items
-    scores = db.scalars(
+    scores = _report_data['scores'] if _report_data is not None else db.scalars(
         select(StudentScore).where(StudentScore.assessment_item_id.in_(all_item_ids))
     ).all() if all_item_ids else []
 
@@ -306,7 +310,7 @@ def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=
         })
 
     # Get policy
-    policy = get_policy(db, book.grading_policy_id)
+    policy = _report_data['policy'] if _report_data is not None else get_policy(db, book.grading_policy_id)
     trans_table = policy_transmutation_table(policy)
 
     rounding_dp = policy.rounding_decimal_places if policy else 2
@@ -389,7 +393,7 @@ def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=
             "subject_id": book.subject_id,
             "teacher_user_id": book.teacher_user_id,
             "school_year_name": book.school_year_name,
-            "school_head": get_json(db, "school.heads", {}).get(str(book.school_year_id), {}).get("full_name", ""),
+            "school_head": (_report_data['school_heads'] if _report_data is not None else get_json(db, "school.heads", {})).get(str(book.school_year_id), {}).get("full_name", ""),
             "term_order": book.term_order,
             "grade_name": normalize_grade_name(book.grade_name),
             "section_name": book.section_name,

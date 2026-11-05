@@ -25,7 +25,7 @@ def recognize_test_frames(db, frames, biometrics):
     people = {}
     for sample in samples:
         try:
-            feature = embedding(biometrics._load_sample_image(sample), biometrics)
+            feature = biometrics._load_sample_identity_feature(sample, legacy_embedding=embedding)
         except (OSError, RuntimeError, ValueError, InvalidToken, cv2.error, HTTPException) as error:
             raise HTTPException(503, 'An existing enrollment could not be read or aligned for SFace testing. The enrollment is unchanged.') from error
         gallery.append((sample.person_id, feature))

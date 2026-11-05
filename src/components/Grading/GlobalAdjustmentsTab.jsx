@@ -1,6 +1,5 @@
 import PaginatedBody from '../Common/PaginatedBody';
 import React, { useState, useEffect, useCallback } from 'react';
-import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { api } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 
@@ -8,7 +7,6 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
   const [loading, setLoading] = useState(true);
   const [adjustments, setAdjustments] = useState([]);
   const { showError } = useToast();
-  
   // Review state
   const [reviewingId, setReviewingId] = useState(null);
   const [reviewAction, setReviewAction] = useState('Approved');
@@ -48,7 +46,6 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
   if (loading && adjustments.length === 0) {
     return (
       <div className="card-static py-8 text-center mt-2">
-        <Loader2 size={32} className="spin text-primary mx-auto mb-2" />
         <p className="text-muted">Loading adjustment requests...</p>
       </div>
     );
@@ -62,7 +59,6 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
           <p className="text-sm text-secondary">Review teacher requests to correct grades or grading criteria. Approved changes are applied to the class record.</p>
         </div>
       </div>
-      
       <div className="card-body p-0">
         <div className="table-scroll">
           <table className="interactive-table mb-0">
@@ -184,7 +180,7 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
                                     setReviewAction('Approved');
                                   }}
                                 >
-                                  <CheckCircle2 size={16} className="mr-1 inline" /> Approve
+                                   Approve
                                 </button>
                                 <button
                                   type="button"
@@ -195,7 +191,7 @@ export default function GlobalAdjustmentsTab({ onRefresh }) {
                                     setReviewAction('Rejected');
                                   }}
                                 >
-                                  <XCircle size={16} className="mr-1 inline" /> Reject
+                                   Reject
                                 </button>
                               </>
                             )}

@@ -14,16 +14,18 @@ import time as monotonic_time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import ValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from .auth import create_token, current_user, hash_password, require_roles, seed_users, verify_password
+from .services.google_login import DOMAIN, google_user, verify_google_credential
+from .schemas import GoogleLoginRequest
 from .config import settings
 from .database import SessionLocal, engine, get_db
 from .migrations import run_migrations
@@ -44,7 +46,7 @@ from .schemas import (
     InterventionPayload, LoginRequest, LoginResponse, PasswordChangePayload, PersonCreate, PersonnelSchedulePayload, RecognitionResult,
     RecordDisposalPayload, SchedulePayload, SchoolYearPayload, SectionPayload, SmsSettingsPayload, SubjectPayload,
     SubjectTeachingAssignmentPayload,
-    UserCreate, UserUpdate, SchoolHeadPayload, AnnexGCommentPayload, AnnexGPlacementPayload,
+    UserCreate, UserUpdate, SchoolHeadPayload, AnnexGCommentPayload, AnnexGPlacementPayload, AnnexGSchoolProfilePayload,
 )
 from .services.attendance import attendance_event_query, close_day, latest_day_reset, list_rows, record_gate_match, reset_day, save_correction
 from .services.audit import add_audit, model_snapshot
@@ -56,8 +58,9 @@ from .services.gate_presence import gate_presence
 from .services.gate_exports import update_gate_export
 from .services.gate_defaults import configure_fast_gate
 from .services.disposal import dispose_person_records
+from .services.annex_g_pdf import AnnexGLayoutError, TEMPLATE_VERSION, render_annex_g_pdf
 from .services.annex_g import (import_annex_g_enrollments, backfill_annex_g_dobs,
-                               build_annex_g_section, render_annex_g_html)
+                               build_annex_g_section, render_annex_g_html, annex_g_school_profile_data, annex_g_class_record_people)
 from .services.scheduler import attendance_scheduler
 from .services import grading as grading_service
 from .services.grading import gradebook_summary
@@ -348,10 +351,31 @@ def health(db: Session = Depends(get_db)) -> dict:
     }
 
 
+@app.get("/api/auth/config")
+def auth_config() -> dict:
+    return {"google_client_id": settings.google_client_id, "deped_only": settings.deped_only, "allowed_domain": DOMAIN}
+
+
+@app.post("/api/auth/google", response_model=LoginResponse)
+def google_login(payload: GoogleLoginRequest, request: Request, db: Session = Depends(get_db)) -> LoginResponse:
+    origin = request.headers.get("origin")
+    if origin and origin not in settings.allowed_origins:
+        raise HTTPException(403, "Sign in from an authorized EduScan website")
+    if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+        raise HTTPException(415, "Google sign-in requires a JSON request")
+    user = google_user(db, verify_google_credential(payload.credential, payload.nonce))
+    return LoginResponse(access_token=create_token(user, auth_provider="google"), role=user.role,
+                         full_name=user.full_name, must_change_password=False, auth_provider="google")
+
+
 @app.post("/api/auth/login", response_model=LoginResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
+    if settings.deped_only:
+        raise HTTPException(403, "Password login is disabled. Sign in with your @deped.gov.ph Google account.")
     user = db.scalar(select(User).where(func.lower(
         User.username) == payload.username.strip().lower()))
+    if user and user.google_email:
+        raise HTTPException(403, "This account uses Google sign-in. Use your @deped.gov.ph Google account.")
     now = datetime.utcnow()
     if user and user.locked_until and user.locked_until > now:
         remaining = max(
@@ -378,12 +402,15 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
 @app.get("/api/auth/me")
 def me(user: User = Depends(current_user)) -> dict:
     return {"id": user.id, "username": user.username, "role": user.role, "full_name": user.full_name,
-            "must_change_password": user.must_change_password, "password_changed_at": user.password_changed_at}
+            "must_change_password": user.must_change_password, "password_changed_at": user.password_changed_at,
+            "auth_provider": "google" if user.google_sub else "password", "google_email": user.google_email}
 
 
 @app.post("/api/auth/change-password")
 def change_password(payload: PasswordChangePayload, db: Session = Depends(get_db),
                     user: User = Depends(current_user)) -> dict:
+    if settings.deped_only or user.google_email:
+        raise HTTPException(403, "Your password is managed by Google. Manage it through your DepEd Google account.")
     if not verify_password(payload.current_password, user.password_hash):
         raise HTTPException(
             status_code=422, detail="That password is incorrect. Check it and try again.")
@@ -405,6 +432,7 @@ def change_password(payload: PasswordChangePayload, db: Session = Depends(get_db
 @app.get("/api/admin/users")
 def admin_users(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))) -> list[dict]:
     return [{"id": item.id, "username": item.username, "role": item.role, "full_name": item.full_name,
+             "google_email": item.google_email, "auth_provider": "google" if item.google_email else "password",
              "active": item.active, "is_demo": item.is_demo, "must_change_password": item.must_change_password,
              "locked_until": item.locked_until, "last_login_at": item.last_login_at,
              "created_at": item.created_at}
@@ -414,6 +442,8 @@ def admin_users(db: Session = Depends(get_db), _: User = Depends(require_roles("
 @app.post("/api/admin/users")
 def create_user(payload: UserCreate, db: Session = Depends(get_db),
                 actor: User = Depends(require_roles("admin"))) -> dict:
+    if settings.deped_only:
+        raise HTTPException(403, "DepEd accounts are created automatically at first Google sign-in. Assign their roles afterward.")
     if db.scalar(select(User).where(User.username == payload.username)):
         raise HTTPException(
             status_code=409, detail="Username is already in use")
@@ -462,6 +492,8 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
     if item.id == actor.id and (not payload.active or payload.role != "admin"):
         raise HTTPException(
             status_code=422, detail="You cannot remove your own active administrator access")
+    if payload.new_password and (settings.deped_only or item.google_email):
+        raise HTTPException(403, "Google account passwords are managed by Google")
     before = model_snapshot(item)
     item.role, item.full_name, item.active = payload.role, payload.full_name, payload.active
     if payload.new_password:
@@ -833,6 +865,27 @@ def _annex_g_access(db: Session, user: User, enrollment: LearnerEnrollment) -> N
         raise HTTPException(status_code=403, detail="This school-year section is not assigned to you as adviser")
 
 
+@app.get("/api/annex-g/school-profile")
+def annex_g_school_profile(db: Session = Depends(get_db),
+                          user: User = Depends(require_roles("admin"))) -> dict:
+    return annex_g_school_profile_data(db)
+
+
+@app.put("/api/annex-g/school-profile")
+def save_annex_g_school_profile(payload: AnnexGSchoolProfilePayload, db: Session = Depends(get_db),
+                               user: User = Depends(require_roles("admin"))) -> dict:
+    before = get_json(db, "annex_g.school", {})
+    value = {**before, **payload.model_dump()}
+    try:
+        set_json(db, "annex_g.school", value, commit=False)
+        add_audit(db, user, "Update", "AnnexGSchoolProfile", "school", "Annex G school identity updated", before=before, after=value)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return value
+
+
 @app.get("/api/annex-g/options")
 def annex_g_options(db: Session = Depends(get_db),
                     user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> dict:
@@ -854,7 +907,7 @@ def annex_g_options(db: Session = Depends(get_db),
     else:
         contexts = {}
         years = db.scalars(select(SchoolYear).where(SchoolYear.deleted_at.is_(None))).all()
-        sections = db.scalars(select(SchoolSection).join(GradeLevel).where(
+        sections = db.scalars(select(SchoolSection).options(joinedload(SchoolSection.grade_level)).join(GradeLevel).where(
             GradeLevel.name.in_(["7", "8", "9", "10"]), GradeLevel.deleted_at.is_(None),
             GradeLevel.active.is_(True), SchoolSection.deleted_at.is_(None),
             SchoolSection.active.is_(True))).all()
@@ -865,6 +918,23 @@ def annex_g_options(db: Session = Depends(get_db),
                                        "grade": item.grade_level.name,
                                        "section": item.name} for item in sections}}
     for item in contexts.values():
+        year = db.get(SchoolYear, item['id'])
+        verified = {}
+        placed_ids = set()
+        for placement in db.scalars(select(LearnerEnrollment).options(joinedload(LearnerEnrollment.person))
+                                   .where(LearnerEnrollment.school_year_id == year.id)).all():
+            placed_ids.add(placement.person_id)
+            if placement.person.role == 'Student' and placement.starts_on <= year.ends_on and (not placement.ends_on or placement.ends_on >= year.starts_on):
+                verified.setdefault(placement.section_id, set()).add(placement.person_id)
+        recorded = {}
+        for section_id, person in annex_g_class_record_people(db, year.id, unplaced_only=False):
+            if person.id not in placed_ids or person.id in verified.get(section_id, set()):
+                recorded.setdefault(section_id, set()).add(person.id)
+        for section_id, section in item['sections'].items():
+            confirmed = verified.get(section_id, set())
+            evidence = recorded.get(section_id, set())
+            section.update(verified_learner_count=len(confirmed), class_record_learner_count=len(evidence), learner_count=len(confirmed | evidence))
+        item['is_current'] = year.starts_on <= date.today() <= year.ends_on
         item["sections"] = sorted(item["sections"].values(), key=lambda row: (int(row["grade"]), row["section"]))
         item["terms"] = db.scalars(select(GradingPeriod.term_order).where(
             GradingPeriod.school_year_id == item["id"], GradingPeriod.deleted_at.is_(None),
@@ -889,7 +959,7 @@ def annex_g_section(school_year_id: int = Query(gt=0), grade: str = Query(), sec
         adviser = adviser_for_section(db, year.id, section_record.id)
         if not adviser or adviser.id != user.id:
             raise HTTPException(status_code=403, detail="This school-year section is not assigned to you as adviser")
-    report = build_annex_g_section(db, year.id, grade_name, section_record.name, term_order)
+    report = build_annex_g_section(db, year.id, grade_name, section_record.name, term_order, include_unverified=True)
     adviser = adviser_for_section(db, year.id, section_record.id)
     released = []
     for item in db.scalars(select(GeneratedReport).where(GeneratedReport.report_type == "Annex G")
@@ -937,10 +1007,50 @@ def annex_g_preview(enrollment_id: int, term_order: int = Query(ge=1, le=3),
     return HTMLResponse(render_annex_g_html(report, enrollment.id))
 
 
+@app.get("/api/annex-g/preview/{enrollment_id}/pdf", response_class=Response)
+def annex_g_preview_pdf(enrollment_id: int, term_order: int = Query(ge=1, le=3),
+                        db: Session = Depends(get_db),
+                        user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> Response:
+    enrollment = _annex_g_enrollment(db, enrollment_id)
+    _annex_g_access(db, user, enrollment)
+    report = build_annex_g_section(db, enrollment.school_year_id, enrollment.grade_level.name,
+                                   enrollment.section.name, term_order)
+    if not any(row['enrollment_id'] == enrollment.id for row in report['learners']):
+        raise HTTPException(status_code=404, detail="The learner is outside the selected term report roster")
+    try:
+        content = render_annex_g_pdf(report, enrollment.id, draft=True)
+    except AnnexGLayoutError as error:
+        raise HTTPException(status_code=409, detail={"message": "Annex G does not fit the A5 form.", "blockers": [str(error)]}) from error
+    return Response(content, media_type="application/pdf", headers={
+        "Content-Disposition": f'inline; filename="Annex-G-DRAFT-{enrollment.id}-Term{term_order}.pdf"',
+        "Cache-Control": "private, no-store"})
+
+
+@app.get("/api/annex-g/draft/{person_id}/pdf", response_class=Response)
+def annex_g_class_record_draft_pdf(person_id: int, school_year_id: int = Query(gt=0),
+                                   grade: str = Query(), section: str = Query(),
+                                   term_order: int = Query(ge=1, le=3), db: Session = Depends(get_db),
+                                   user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> Response:
+    # Reuse the exact year/section adviser authorization from the report workspace.
+    report = annex_g_section(school_year_id, grade, section, term_order, db, user)
+    learner = next((row for row in report['learners'] if row['person_id'] == person_id and not row.get('placement_verified', True)), None)
+    if not learner:
+        raise HTTPException(status_code=404, detail='No unverified class-record learner exists in this report context')
+    try:
+        content = render_annex_g_pdf(report, learner['enrollment_id'], draft=True)
+    except AnnexGLayoutError as error:
+        raise HTTPException(status_code=409, detail={"message": "Annex G does not fit the A5 form.", "blockers": [str(error)]}) from error
+    return Response(content, media_type='application/pdf', headers={
+        'Content-Disposition': f'inline; filename="Annex-G-DRAFT-Person{person_id}-Term{term_order}.pdf"',
+        'Cache-Control': 'private, no-store'})
+
+
 @app.post("/api/annex-g/release/{enrollment_id}")
 def release_annex_g(enrollment_id: int, term_order: int = Query(ge=1, le=3),
                     db: Session = Depends(get_db),
                     user: User = Depends(require_roles("records_officer"))) -> dict:
+    if user.role != "records_officer":
+        raise HTTPException(status_code=403, detail="Only a Records Officer can release Annex G.")
     enrollment = _annex_g_enrollment(db, enrollment_id)
     report = build_annex_g_section(db, enrollment.school_year_id, enrollment.grade_level.name,
                                    enrollment.section.name, term_order)
@@ -952,18 +1062,25 @@ def release_annex_g(enrollment_id: int, term_order: int = Query(ge=1, le=3),
         raise HTTPException(status_code=409, detail={"message": "Resolve these Annex G items before release.",
                                                      "blockers": blockers})
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{report['school_year']}-Grade{report['grade']}-{report['section']}-Term{term_order}-{enrollment.person.external_id}").strip("-._")
-    source = new_report_path(REPORT_DIR.parent, f"Annex-G-{stem}.html")
-    source.write_text(render_annex_g_html(report, enrollment.id), encoding="utf-8")
     try:
+        content = render_annex_g_pdf(report, enrollment.id, draft=False)
+    except AnnexGLayoutError as error:
+        raise HTTPException(status_code=409, detail={"message": "Annex G does not fit the A5 form.", "blockers": [str(error)]}) from error
+    source = new_report_path(REPORT_DIR.parent, f"Annex-G-{stem}.pdf")
+    registered_path = None
+    try:
+        source.write_bytes(content)
         parameters = {"school_year_id": enrollment.school_year_id, "grade": report["grade"],
                       "section": report["section"], "section_id": enrollment.section_id,
-                      "term_order": term_order, "enrollment_id": enrollment.id}
+                      "term_order": term_order, "enrollment_id": enrollment.id,
+                      "template_version": TEMPLATE_VERSION, "paper_size": "A5 landscape", "format": "pdf"}
         for previous in db.scalars(select(GeneratedReport).where(GeneratedReport.report_type == "Annex G",
                 GeneratedReport.status == "Released").order_by(GeneratedReport.created_at.desc())).all():
             old = json.loads(previous.parameters_json)
             if old.get("enrollment_id") == enrollment.id and old.get("term_order") == term_order:
                 previous.status = "Superseded"
-        registered = register_report(db, source, "Annex G", parameters, user)
+        registered = register_report(db, source, "Annex G", parameters, user, commit=False)
+        registered_path = Path(registered.file_path)
         registered.status = "Released"
         registered.reviewed_by = user.id
         registered.reviewed_by_name = user.full_name
@@ -972,16 +1089,22 @@ def release_annex_g(enrollment_id: int, term_order: int = Query(ge=1, le=3),
         add_audit(db, user, "Release", "GeneratedReport", registered.id,
                   f"Annex G released for Grade {report['grade']} {report['section']}, Term {term_order}",
                   after={"parameters": parameters, "sha256": registered.file_sha256})
+        result = report_json(registered)
         db.commit()
-        return report_json(registered)
+        return result
+    except Exception:
+        db.rollback()
+        if registered_path:
+            registered_path.unlink(missing_ok=True)
+        raise
     finally:
         source.unlink(missing_ok=True)
         source.parent.rmdir()
 
 
-@app.get("/api/annex-g/releases/{report_id}", response_class=HTMLResponse)
+@app.get("/api/annex-g/releases/{report_id}", response_class=Response)
 def annex_g_released_file(report_id: str, db: Session = Depends(get_db),
-                          user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> HTMLResponse:
+                          user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> Response:
     item = db.get(GeneratedReport, report_id)
     if not item or item.report_type != "Annex G" or item.status not in {"Released", "Superseded"}:
         raise HTTPException(status_code=404, detail="Released Annex G report was not found")
@@ -991,7 +1114,12 @@ def annex_g_released_file(report_id: str, db: Session = Depends(get_db),
     path = Path(item.file_path)
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != item.file_sha256:
         raise HTTPException(status_code=409, detail="Released report integrity check failed")
-    return HTMLResponse(path.read_text(encoding="utf-8"))
+    if path.suffix.lower() == ".pdf":
+        return FileResponse(path, media_type="application/pdf", filename=item.filename,
+                            content_disposition_type="inline", headers={"Cache-Control": "private, no-store"})
+    if path.suffix.lower() != ".html":
+        raise HTTPException(status_code=409, detail="Unsupported Annex G snapshot format")
+    return HTMLResponse(path.read_text(encoding="utf-8"), headers={"Cache-Control": "private, no-store"})
 
 
 @app.get("/api/admin/backups")
@@ -1412,9 +1540,12 @@ def test_camera_frames(frame_data: list[bytes], bind, mode: str = 'recognition')
                     presentation = {}
                     try:
                         accepted, rejected = biometric_service.validate_enrollment_frames(frame_data, diagnostics=presentation)
-                        biometric_service._check_duplicate_enrollment(test_db, Person(id=-1), accepted)
+                        duplicate_check = biometric_service._check_duplicate_enrollment(test_db, Person(id=-1), accepted)
                         enrollment = {'can_enroll': True, 'accepted': len(accepted), 'rejected': rejected,
+                                      'duplicate_check': duplicate_check,
                                       'message': 'Enrollment camera checks passed. No enrollment or other records were saved.'}
+                        if duplicate_check['status'] == 'incomplete':
+                            enrollment['message'] = 'Face quality checks passed. Duplicate checks are incomplete because older enrollment files are missing. No records were saved.'
                     except HTTPException as error:
                         if error.status_code not in (409, 422):
                             raise
@@ -1597,7 +1728,7 @@ def schedules(db: Session = Depends(get_db), user: User = Depends(require_roles(
         same_name = db.scalar(select(func.count(User.id)).where(User.role == "teacher",
             func.lower(func.trim(User.full_name)) == teacher_name))
         items = [item for item in items if item.teacher_user_id == user.id or (
-            item.teacher_user_id is None and same_name == 1 and (item.teacher_name or "").strip().casefold() == teacher_name)]
+            not user.google_email and item.teacher_user_id is None and same_name == 1 and (item.teacher_name or "").strip().casefold() == teacher_name)]
     return [{"id": item.id, "grade": item.grade, "section": item.section, "subject": item.subject,
              "teacher_name": item.teacher_name, "teacher_user_id": item.teacher_user_id, "weekdays": item.weekdays, "start_time": item.start_time,
              "end_time": item.end_time, "late_grace_minutes": item.late_grace_minutes,
@@ -2067,9 +2198,39 @@ def save_section(payload: SectionPayload, db: Session = Depends(get_db), actor: 
 
 @app.post("/api/admin/subjects")
 def save_subject(payload: SubjectPayload, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))) -> dict:
+    from .services.tle_subjects import tle_code_base, tle_name_key, tle_specialization
+
     payload.category = " ".join(payload.category.split())
     payload.name = " ".join(payload.name.split())
     if not payload.is_elective and not payload.category.strip().upper().startswith("SHS"):
+        specialization = tle_specialization(payload.name)
+        if specialization is not None:
+            payload.name = f'TLE - {specialization}' if specialization else 'TECHNOLOGY AND LIVELIHOOD EDUCATION'
+            matching_tle = [item for item in db.scalars(select(Subject).where(
+                _subject_category_condition(Subject, payload.category),
+                Subject.id != payload.id if payload.id else True,
+            )).all() if not item.is_elective and tle_name_key(item.name) == tle_name_key(payload.name)]
+            if any(item.deleted_at is None for item in matching_tle):
+                raise HTTPException(409, 'A subject with this name already exists in this category. Edit the existing subject instead.')
+            if matching_tle and (payload.id or len(matching_tle) > 1):
+                raise HTTPException(409, 'Restore the matching TLE subject from Deleted items before editing it.')
+            deleted_match = matching_tle[0] if matching_tle else None
+            existing = db.get(Subject, payload.id) if payload.id else None
+            if specialization:
+                if existing and tle_specialization(existing.name):
+                    payload.code = existing.code
+                elif deleted_match:
+                    payload.code = deleted_match.code
+                else:
+                    base_code = tle_code_base(specialization)
+                    payload.code = base_code
+                    suffix = 2
+                    while db.scalar(select(Subject.id).where(func.upper(Subject.code) == payload.code)) is not None:
+                        suffix_text = f'-{suffix}'
+                        payload.code = f'{base_code[:40 - len(suffix_text)].rstrip("-")}{suffix_text}'
+                        suffix += 1
+            else:
+                payload.code = 'TLE'
         approved_jhs_subjects = {
             "AP": {"ARALING PANLIPUNAN", "AP"},
             "SCI": {"SCIENCE"},
@@ -2082,7 +2243,7 @@ def save_subject(payload: SubjectPayload, db: Session = Depends(get_db), actor: 
         }
         code = " ".join(payload.code.split()).upper()
         name = " ".join(payload.name.split()).upper()
-        if name not in approved_jhs_subjects.get(code, set()):
+        if specialization is None and name not in approved_jhs_subjects.get(code, set()):
             if payload.id:
                 existing = db.get(Subject, payload.id)
                 if not existing:

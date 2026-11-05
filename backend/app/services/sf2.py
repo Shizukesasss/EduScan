@@ -17,8 +17,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import EXPORT_DIR, TEMPLATE_DIR, settings
-from ..models import Person
-from .attendance import active_people, is_instructional_day, rows_for_people, local_now, MANILA
+from ..models import CalendarException, Person
+from .attendance import active_people, rows_for_people, rows_for_people_on_days, local_now, MANILA
 from .export_files import new_report_path
 from .enrollment import enrollment_remark
 
@@ -67,8 +67,13 @@ def save_template(data: bytes) -> Path:
 
 
 def _school_days(db: Session, year: int, month: int) -> list[date]:
-    return [date(year, month, day) for day in range(1, calendar.monthrange(year, month)[1] + 1)
-            if is_instructional_day(db, date(year, month, day))]
+    first = date(year, month, 1)
+    last = date(year, month, calendar.monthrange(year, month)[1])
+    exceptions = {item.event_date: item.event_type for item in db.scalars(select(CalendarException).where(
+        CalendarException.event_date >= first, CalendarException.event_date <= last))}
+    return [date(year, month, day) for day in range(1, last.day + 1)
+            if date(year, month, day).weekday() < 5
+            and exceptions.get(date(year, month, day), 'Special Schedule') == 'Special Schedule']
 
 
 def _column_name(column: int) -> str:
@@ -217,18 +222,18 @@ def sf2_pending_attendance(db: Session, people: list[Person], year: int, month: 
     today = local_now().date()
     unresolved = 0
     examples = []
-    for day in _school_days(db, year, month):
-        if day >= today:
-            continue
-        eligible = []
-        for person in people:
-            registered = person.created_at
-            if registered and registered.tzinfo is None:
-                registered = registered.replace(tzinfo=timezone.utc)
-            if not person.enrollment_start_date and registered and day < registered.astimezone(MANILA).date():
+    days = [day for day in _school_days(db, year, month) if day < today]
+    registrations = {}
+    for person in people:
+        registered = person.created_at
+        if registered and registered.tzinfo is None:
+            registered = registered.replace(tzinfo=timezone.utc)
+        if not person.enrollment_start_date and registered:
+            registrations[person.id] = registered.astimezone(MANILA).date()
+    for day, rows in rows_for_people_on_days(db, people, days).items():
+        for row in rows:
+            if day < registrations.get(row['person_id'], day):
                 continue
-            eligible.append(person)
-        for row in rows_for_people(db, eligible, day):
             if row['status'] == 'No scan':
                 unresolved += 1
                 if len(examples) < 5:

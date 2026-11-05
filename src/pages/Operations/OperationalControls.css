@@ -1,0 +1,104 @@
+/* Keep long review reasons from stretching the table and its pagination. */
+.recognition-review-table {
+  width: 100%;
+  table-layout: fixed;
+}
+.recognition-review-table th,
+.recognition-review-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+  line-height: 1.6;
+}
+.recognition-review-table th {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 13px;
+}
+.recognition-review-table .record-pagination {
+  min-width: 0;
+  gap: 12px 20px;
+  padding: 8px 0;
+}
+.recognition-review-table .record-pagination > div {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.recognition-review-table .record-pagination button {
+  white-space: nowrap;
+}
+
+/* SMS delivery reconciliation */
+.sms-reconcile-header-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.sms-reconcile-toolbar {
+  padding: 14px 18px;
+}
+
+.sms-reconcile-toolbar__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+}
+
+.sms-filter-pills {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.sms-reconcile-search {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex: 1 1 320px;
+  justify-content: flex-end;
+}
+
+.sms-reconcile-search .search-box {
+  flex: 1 1 220px;
+  max-width: 320px;
+  min-width: 200px;
+}
+
+.sms-reconcile-search .search-box .input-field {
+  background: #fff;
+}
+
+.sms-reconcile-table {
+  width: 100%;
+  min-width: 780px;
+  table-layout: fixed;
+}
+
+.sms-reconcile-table th,
+.sms-reconcile-table td {
+  vertical-align: top;
+}
+
+.sms-reconcile-table td.message-cell,
+.sms-reconcile-table td.sms-gateway-cell {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
+.sms-reconcile-table td.sms-attempts-cell {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.sms-error-subline {
+  color: var(--danger);
+  white-space: normal;
+}

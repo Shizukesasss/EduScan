@@ -1,4 +1,5 @@
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000/api';
+const pendingGets = new Map();
 
 function readableValidationErrors(errors) {
   return errors.map(({ loc = [], msg = 'Check this field.', type }) => {
@@ -18,11 +19,13 @@ export const auth = {
   token: () => localStorage.getItem('eduscan.token'),
   role: () => localStorage.getItem('userRole'),
   name: () => localStorage.getItem('eduscan.fullName'),
+  provider: () => localStorage.getItem('eduscan.authProvider') || 'password',
   mustChangePassword: () => localStorage.getItem('eduscan.mustChangePassword') === 'true',
   save(result) {
     localStorage.setItem('eduscan.token', result.access_token);
     localStorage.setItem('userRole', result.role);
     localStorage.setItem('eduscan.fullName', result.full_name);
+    localStorage.setItem('eduscan.authProvider', result.auth_provider || 'password');
     localStorage.setItem('eduscan.mustChangePassword', String(Boolean(result.must_change_password)));
   },
   passwordChanged() { localStorage.setItem('eduscan.mustChangePassword', 'false'); },
@@ -30,11 +33,15 @@ export const auth = {
     localStorage.removeItem('eduscan.token');
     localStorage.removeItem('userRole');
     localStorage.removeItem('eduscan.fullName');
+    localStorage.removeItem('eduscan.authProvider');
+    window.google?.accounts?.id?.disableAutoSelect();
     localStorage.removeItem('eduscan.mustChangePassword');
   },
 };
 
 async function request(path, options = {}) {
+  const mutating = !['GET', 'HEAD'].includes((options.method || 'GET').toUpperCase());
+  if (mutating) pendingGets.clear();
   const headers = new Headers(options.headers || {});
   const token = auth.token();
   if (token) headers.set('Authorization', `Bearer ${token}`);
@@ -48,6 +55,8 @@ async function request(path, options = {}) {
     if (error.name === 'TimeoutError') throw new Error('EduScan backend took too long to respond. Check the API connection and try again.');
     if (error.name === 'AbortError') throw new Error('EduScan request was cancelled.');
     throw new Error('EduScan backend is not reachable. Start the API server and try again.');
+  } finally {
+    if (mutating) pendingGets.clear();
   }
   if (response.status === 401) auth.clear();
   if (!response.ok) {
@@ -69,8 +78,22 @@ async function request(path, options = {}) {
   return response.headers.get('content-type')?.includes('application/json') ? response.json() : response;
 }
 
+function get(path, options = {}) {
+  // Share only simultaneous default reads. Refreshes still fetch fresh data,
+  // and callers with their own headers/signals retain independent requests.
+  if (Object.keys(options).length) return request(path, options);
+  const key = JSON.stringify([auth.token(), path]);
+  if (!pendingGets.has(key)) {
+    const pending = request(path, options).finally(() => {
+      if (pendingGets.get(key) === pending) pendingGets.delete(key);
+    });
+    pendingGets.set(key, pending);
+  }
+  return pendingGets.get(key);
+}
+
 export const api = {
-  get: (path, options = {}) => request(path, options),
+  get,
   post: (path, body, options = {}) => request(path, { ...options, method: 'POST', body: body instanceof FormData ? body : JSON.stringify(body) }),
   put: (path, body) => request(path, { method: 'PUT', body: body instanceof FormData ? body : JSON.stringify(body) }),
   patch: (path, body) => request(path, { method: 'PATCH', body: JSON.stringify(body) }),
@@ -86,6 +109,24 @@ export const api = {
     link.download = filename;
     link.click();
     URL.revokeObjectURL(url);
+  },
+  openDocument: async (path) => {
+    // Open synchronously from the click, before the authenticated request can delay it.
+    const target = window.open('about:blank', '_blank');
+    if (!target) throw new Error('Allow pop-ups for EduScan to preview this report.');
+    target.opener = null;
+    try {
+      target.document.body.textContent = 'Preparing EduScan report preview…';
+      const response = await request(path);
+      const type = response.headers.get('content-type') || '';
+      if (!type.includes('application/pdf') && !type.includes('text/html')) throw new Error('The report format is not supported.');
+      const url = URL.createObjectURL(await response.blob());
+      if (target.closed) { URL.revokeObjectURL(url); return; }
+      target.location.href = url;
+      const cleanup = () => { URL.revokeObjectURL(url); window.clearInterval(timer); window.removeEventListener('pagehide', cleanup); };
+      const timer = window.setInterval(() => { if (target.closed) cleanup(); }, 10000);
+      window.addEventListener('pagehide', cleanup, { once: true });
+    } catch (error) { target.close(); throw error; }
   },
   printHtml: async (path) => {
     const target = window.open('about:blank', '_blank');

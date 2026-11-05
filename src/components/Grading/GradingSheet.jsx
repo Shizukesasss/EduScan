@@ -1,5 +1,5 @@
+import Modal from '../Common/Modal';
 import React, { useState, useMemo, useRef } from 'react';
-import { Search, Calculator, ArrowUpDown } from 'lucide-react';
 import { calculateComponentPercentage, calculateStudentGrade, isBlankScore, resolveScoreEntry, roundGradeValue } from '../../services/gradingCalculations';
 import { useToast } from '../../contexts/useToast';
 import { gradingPeriodLabel } from '../../services/academicContext';
@@ -292,7 +292,6 @@ export default function GradingSheet({
           {/* â• â•  Controls Bar â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â•  */}
           <div className="deped-controls">
             <div className="deped-search-box">
-              <Search size={13} className="deped-search-icon" />
               <input
                 type="text"
                 className="deped-search-input"
@@ -318,8 +317,7 @@ export default function GradingSheet({
                 className="deped-sort-btn"
                 onClick={() => setSortBy(cur => cur === 'name' ? 'grade' : 'name')}
               >
-                <ArrowUpDown size={11} />
-                <span>{sortBy === 'name' ? 'Name' : 'Grade'}</span>
+                <span>{sortBy === 'name' ? 'Name A–Z' : 'Grade high–low'}</span>
               </button>
             </div>
 
@@ -363,7 +361,7 @@ export default function GradingSheet({
                     <th className="deped-th deped-th-name deped-sticky-col">LEARNERS' NAMES</th>
                     <th className="deped-th deped-th-grade-col">Initial Grade</th>
                     <th className="deped-th deped-th-quarterly-col">Term Grade</th>
-                    <th className="deped-th deped-th-action-col"><Calculator size={11} /><span className="control-label">Calculation</span></th>
+                    <th className="deped-th deped-th-action-col"><span className="control-label">Calculation</span></th>
                   </tr>
                 ) : (
                   <>
@@ -457,7 +455,7 @@ export default function GradingSheet({
                                 </td>
                                 <td className="deped-cell deped-cell-action">
                                   <button type="button" className="deped-calc-btn" title="View step-by-step DepEd computation" onClick={() => onStudentBreakdown?.(student.person_id)}>
-                                    <Calculator size={11} /><span className="control-label">Calculation</span>
+                                    <span className="control-label">Calculation</span>
                                   </button>
                                 </td>
                               </>
@@ -553,7 +551,7 @@ export default function GradingSheet({
           </div>
         </>
       {scoreCell && (
-        <div className="modal-backdrop">
+        <Modal onClose={() => setScoreCell(null)} label="Assessment score and status">
           <form className="modal-card modal-sm" role="dialog" aria-modal="true" aria-labelledby="score-status-title" onSubmit={event => {
             event.preventDefault();
             if (disabled) return;
@@ -575,7 +573,7 @@ export default function GradingSheet({
             {scoreCell.status === 'Scored' && <label><span className="field-label">Score (0–{scoreCell.item.max_score})</span><input placeholder="Enter a score" className="input-field" type="number" step="any" min="0" max={scoreCell.item.max_score} value={scoreCell.value} disabled={disabled} onChange={event => setScoreCell({ ...scoreCell, value: event.target.value })} required /></label>}
             <div className="modal-actions"><button className="btn-secondary" type="button" onClick={() => setScoreCell(null)}>Cancel</button><button className="btn-primary" type="submit" disabled={disabled}>Apply to draft</button></div>
           </form>
-        </div>
+        </Modal>
       )}
     </section>
   );
