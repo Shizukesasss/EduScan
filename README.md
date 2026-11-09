@@ -11,10 +11,12 @@ git clone https://github.com/Shizukesasss/EduScan.git
 Set-Location .\EduScan
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 .\scripts\setup.ps1
-.\scripts\start.ps1
+.\scripts\eduscan.ps1 start
 ```
 
-Open `http://127.0.0.1:5175`; the API health endpoint is `http://127.0.0.1:8000/api/health`. To start or restart from Command Prompt, run `scripts\eduscan.cmd start` or `scripts\eduscan.cmd restart`. The CMD launcher asks before applying migrations and seed data to a configured remote database.
+Open `http://127.0.0.1:5175`. The API health endpoint is `http://127.0.0.1:8000/api/health`. To restart both services in PowerShell, run `.\scripts\eduscan.ps1 restart`. In Command Prompt, use `scripts\eduscan.cmd start` or `scripts\eduscan.cmd restart`. Both launchers ask before applying migrations and seed data to a configured remote database.
+
+For development, run `npm run dev` after setup. It starts the API on port 8000 and Vite together, then opens `http://127.0.0.1:5173` in your default browser once both are ready. Press Ctrl+C to stop both services. Startup logs are in `logs/`.
 
 `setup.ps1` creates a Python virtual environment, installs pinned packages from `backend/requirements.txt`, runs `npm ci` from `package-lock.json`, creates `backend/.env` from the example, and seeds a local SQLite demo database when appropriate. It now stops if a dependency installation or local seed fails. The repository includes the official class-record workbooks, an SF2 template, and the public YuNet, SFace, and anti-spoof ONNX files. Node packages and Python wheels are installed during setup rather than committed to Git. PostgreSQL/MySQL servers, a webcam, and an Android SMS gateway are external services or devices; configure them as needed. See [the full installation guide](docs/INSTALLATION.md).
 

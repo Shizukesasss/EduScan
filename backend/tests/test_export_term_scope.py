@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from tests import test_grading_regressions as fixtures
 from fastapi import HTTPException
-from app.main import gradebook_report_xlsx_new
+from app.main import gradebook_report_pdf_new
 from app.models import GradingPeriod, SubjectTeachingAssignment, User
 
 
@@ -42,8 +42,8 @@ class ExportTermScopeTests(unittest.TestCase):
                 with self.subTest(scope=scope), \
                      patch('app.main.grading_service.get_gradebook_full', return_value=full), \
                      patch('app.main.generate_gradebook_report_xlsx', return_value=path) as export, \
-                     patch('app.main.register_report', return_value=report):
-                    response = gradebook_report_xlsx_new(book.id, db=f.db, user=f.teacher, **scope)
+                     patch('app.main.register_workbook_report', return_value=report):
+                    response = gradebook_report_pdf_new(book.id, db=f.db, user=f.teacher, **scope)
                     self.assertEqual(response.path, str(path))
                     self.assertEqual(export.call_args.kwargs['allowed_teacher_id'], f.teacher.id)
                     self.assertEqual(export.call_args.kwargs['through_term'], scope.get('through_term'))
@@ -56,13 +56,13 @@ class ExportTermScopeTests(unittest.TestCase):
         f.db.add(other)
         f.db.commit()
         with self.assertRaises(HTTPException) as denied:
-            gradebook_report_xlsx_new(book.id, through_term=2, db=f.db, user=other)
+            gradebook_report_pdf_new(book.id, through_term=2, db=f.db, user=other)
         self.assertEqual(denied.exception.status_code, 403)
 
     def test_admin_and_school_head_still_cannot_export_combined_terms(self):
         for role in ('school_head', 'admin'):
             with self.subTest(role=role), self.assertRaises(HTTPException) as denied:
-                gradebook_report_xlsx_new(1, through_term=2, db=Mock(), user=SimpleNamespace(role=role))
+                gradebook_report_pdf_new(1, through_term=2, db=Mock(), user=SimpleNamespace(role=role))
             self.assertEqual(denied.exception.status_code, 403)
 
     def test_invalid_or_conflicting_scope_is_rejected(self):
@@ -70,7 +70,7 @@ class ExportTermScopeTests(unittest.TestCase):
         book = self.make_book(2)
         for arguments in ({'through_term': 1}, {'through_term': 3}, {'through_term': 2, 'all_terms': True}):
             with self.subTest(arguments=arguments), self.assertRaises(HTTPException) as denied:
-                gradebook_report_xlsx_new(book.id, **arguments, db=f.db, user=SimpleNamespace(role='records_officer', id=999))
+                gradebook_report_pdf_new(book.id, **arguments, db=f.db, user=SimpleNamespace(role='records_officer', id=999))
             self.assertEqual(denied.exception.status_code, 409)
             self.assertIn('SHS_ECR_TERM_SCOPE_INVALID', {issue['code'] for issue in denied.exception.detail['issues']})
 
@@ -80,6 +80,6 @@ class ExportTermScopeTests(unittest.TestCase):
         book.status = 'Finalized'
         f.db.commit()
         with self.assertRaises(HTTPException) as denied:
-            gradebook_report_xlsx_new(book.id, through_term=2, db=f.db, user=SimpleNamespace(role='records_officer', id=999))
+            gradebook_report_pdf_new(book.id, through_term=2, db=f.db, user=SimpleNamespace(role='records_officer', id=999))
         self.assertEqual(denied.exception.status_code, 409)
         self.assertIn('SHS_ECR_TERM_SCOPE_INVALID', {issue['code'] for issue in denied.exception.detail['issues']})

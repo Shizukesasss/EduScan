@@ -15,9 +15,7 @@ import GradingSheet from '../../components/Grading/GradingSheet';
 import AssessmentConfig from '../../components/Grading/AssessmentConfig';
 import CalculationBreakdown from '../../components/Grading/CalculationBreakdown';
 import AuditHistory from '../../components/Grading/AuditHistory';
-import AdjustmentRequestsModal from '../../components/Grading/AdjustmentRequestsModal';
 import ValidationChecklist from '../../components/Grading/ValidationChecklist';
-import GlobalAdjustmentsTab from '../../components/Grading/GlobalAdjustmentsTab';
 import './Grading.css';
 import { useToast } from '../../contexts/useToast';
 
@@ -25,7 +23,6 @@ export default function Grading() {
   const currentRole = String(auth.role()).toLowerCase();
   const isTeacher = currentRole === 'teacher';
   const isReviewer = ['admin', 'records_officer', 'school_head'].includes(currentRole);
-  const canReviewAdjustments = currentRole === 'records_officer';
   const [structure, setStructure] = useState({
     school_years: [],
     grading_periods: [],
@@ -83,97 +80,15 @@ export default function Grading() {
   // Modal / drawer states
   const [showConfig, setShowConfig] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
-  const [showAdjustments, setShowAdjustments] = useState(false);
   const [showValidation, setShowValidation] = useState(false);
   const [validationIssues, setValidationIssues] = useState([]);
   const [validationError, setValidationError] = useState('');
   const [validationLoading, setValidationLoading] = useState(false);
   const [breakdownData, setBreakdownData] = useState(null);
   const [auditList, setAuditList] = useState([]);
-  const [adjustmentsList, setAdjustmentsList] = useState([]);
 
   // Navigation State
   const [activeTab, setActiveTab] = useState('gradebook');
-
-  // Badge States
-  const [adminPendingCount, setAdminPendingCount] = useState(0);
-  const [teacherAdjustmentCount, setTeacherAdjustmentCount] = useState(0);
-  const lastAdminPendingCount = useRef(null);
-
-  const updateAdminPendingCount = useCallback((data) => {
-    const count = data.filter(request => request.status === 'Pending').length;
-    lastAdminPendingCount.current = count;
-    setAdminPendingCount(count);
-  }, []);
-
-  const loadAdminPendingCount = useCallback(() => {
-    if (canReviewAdjustments) {
-      api.get('/admin/grade-adjustments')
-        .then(data => {
-          const count = data.filter(request => request.status === 'Pending').length;
-          if (lastAdminPendingCount.current !== null && count > lastAdminPendingCount.current) {
-            if (document.visibilityState === 'visible') showSuccess('A new teacher grade adjustment request is waiting for review.');
-            else return setAdminPendingCount(count);
-          }
-          lastAdminPendingCount.current = count;
-          setAdminPendingCount(count);
-        })
-        .catch(console.error);
-    }
-  }, [canReviewAdjustments, showSuccess]);
-
-  useEffect(() => {
-    loadAdminPendingCount();
-    if (!canReviewAdjustments) return undefined;
-    const interval = window.setInterval(loadAdminPendingCount, 15000);
-    return () => window.clearInterval(interval);
-  }, [canReviewAdjustments, loadAdminPendingCount]);
-
-  useEffect(() => {
-    if (!isTeacher) return undefined;
-    let stopped = false;
-    const notified = new Set();
-    const checkNotifications = async () => {
-      try {
-        if (document.visibilityState !== 'visible') return;
-        const notifications = await api.get('/teacher/grade-adjustment-notifications');
-        if (stopped || notifications.length === 0) return;
-        const unseen = notifications.filter(item => !notified.has(item.id));
-        for (const item of unseen) {
-          notified.add(item.id);
-          const outcome = item.status === 'Approved' ? 'approved' : 'rejected';
-          const context = [item.person_name, item.grading_period_name, item.subject_name].filter(Boolean).join(' · ');
-          const requestLabel = item.request_type === 'criteria' ? 'criteria adjustment' : 'grade adjustment';
-          const message = `Your ${requestLabel} was ${outcome}${context ? `: ${context}` : ''}${item.review_note ? `. ${item.review_note}` : ''}`;
-          (item.status === 'Approved' ? showSuccess : showError)(message);
-        }
-        if (unseen.length) {
-          await api.post('/teacher/grade-adjustment-notifications/read', { request_ids: unseen.map(item => item.id) });
-        }
-      } catch (error) {
-        if (!stopped) console.error('Failed to check grade adjustment notifications:', error);
-      }
-    };
-    checkNotifications();
-    const interval = window.setInterval(checkNotifications, 15000);
-    return () => { stopped = true; window.clearInterval(interval); };
-  }, [isTeacher, showError, showSuccess]);
-
-  // Load specific gradebook adjustments count for teachers
-  const loadTeacherAdjustmentCount = useCallback(() => {
-    const currentRole = String(auth.role()).toLowerCase();
-    if (currentRole === 'teacher' && gradebookId) {
-      api.get(`/gradebooks/${gradebookId}/adjustments`)
-        .then(data => {
-          setTeacherAdjustmentCount(data.filter(request => request.status === 'Pending').length);
-        })
-        .catch(console.error);
-    }
-  }, [gradebookId]);
-
-  useEffect(() => {
-    loadTeacherAdjustmentCount();
-  }, [loadTeacherAdjustmentCount]);
 
   // 1. Initial Load: Academic Structure
   useEffect(() => {
@@ -372,7 +287,7 @@ export default function Grading() {
     return () => { loadRequestRef.current += 1; };
   }, [loadGradebook]);
 
-  // Refresh gradebook when switching tabs to ensure changes from other tabs (like Adjustments) are reflected
+  // Refresh gradebook when switching tabs
   useEffect(() => {
     let cancelled = false;
     const requestId = loadRequestRef.current;
@@ -665,25 +580,13 @@ export default function Grading() {
     }
   };
 
-  // 7. Audit and Adjustments Fetchers
+  // 7. Audit Fetcher
   const handleOpenAudit = async () => {
     if (!gradebookId) return;
     try {
       const data = await api.get(`/gradebooks/${gradebookId}/audit`);
       setAuditList(data);
       setShowAudit(true);
-    } catch (err) {
-      showError(err.message);
-    }
-  };
-
-  const handleOpenAdjustments = async () => {
-    if (!gradebookId) return;
-    try {
-      const data = await api.get(`/gradebooks/${gradebookId}/adjustments`);
-      setAdjustmentsList(data);
-      setTeacherAdjustmentCount(data.filter(request => request.status === 'Pending').length);
-      setShowAdjustments(true);
     } catch (err) {
       showError(err.message);
     }
@@ -702,8 +605,9 @@ export default function Grading() {
   };
 
   // 9. Export & Print Handlers
-  const handleExportXlsx = async (allTerms = false, throughTerm = null, draftPreview = false) => {
+  const handleExport = async (scope, format) => {
     if (!gradebookId || !fullGradebook) return;
+    const draftPreview = scope === 'draft_preview';
     if (isDirty) {
       const localIssues = collectGradebookValidationIssues({
         gradebook: fullGradebook.gradebook,
@@ -721,18 +625,12 @@ export default function Grading() {
     }
 
     const gb = fullGradebook.gradebook;
-    const baseFilename = `ClassRecord-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-${throughTerm === 2 ? 'Terms1-2' : allTerms ? 'AllTerms' : `Term${gb.term_order}`}.xlsx`;
+    const query = buildGradebookExportQuery({ region, division, schoolId, scope, termOrder: gb.term_order, draftPreview });
+    const termLabel = query.has('through_term') ? 'Terms1-2' : scope === 'all_terms' ? 'AllTerms' : `Term${gb.term_order}`;
+    const baseFilename = `ClassRecord-${gb.grade_name}-${gb.section_name}-${gb.subject_name}-${termLabel}.${format}`;
     const filename = `${draftPreview ? 'DRAFT-PREVIEW-NOT-FINAL-' : ''}${baseFilename}`;
     try {
-      const q = buildGradebookExportQuery({
-        region,
-        division,
-        schoolId,
-        scope: allTerms || throughTerm ? 'all_terms' : 'term',
-        termOrder: throughTerm || gb.term_order,
-        draftPreview,
-      });
-      await api.download(`/gradebooks/${gradebookId}/report.xlsx?${q.toString()}`, filename);
+      await api.download(`/gradebooks/${gradebookId}/report.${format}?${query}`, filename);
       return { ok: true };
     } catch (err) {
       if (Array.isArray(err.details?.issues)) return { issues: normalizeValidationIssues(err.details.issues) };
@@ -781,11 +679,6 @@ export default function Grading() {
         >
           Class Performance Metrics
         </button>
-        {canReviewAdjustments && <button className={activeTab === 'adjustments' ? 'active' : ''} onClick={() => setActiveTab('adjustments')}>
-          Adjustment Requests
-          {adminPendingCount > 0 && <span className="notification-badge">{adminPendingCount}</span>}
-        </button>}
-
       </div>
 
       {teacherAssignmentConflict && <div className="notice notice-warning" role="alert">
@@ -819,7 +712,6 @@ export default function Grading() {
         {gb?.learning_area && <p className="muted-small">WW 20% · PT 60% · Exams 20%. Each requested term export requires both learning areas complete and finalized.</p>}
       </section>}
 
-      {activeTab === 'adjustments' && canReviewAdjustments && <GlobalAdjustmentsTab onRefresh={updateAdminPendingCount} />}
 
       {(activeTab === 'gradebook' || activeTab === 'metrics') && (
         <>
@@ -1039,8 +931,6 @@ export default function Grading() {
                     onLock={handleLockGradebook}
                     onReopen={handleReopenGradebook}
                     onOpenAudit={handleOpenAudit}
-                    onOpenAdjustments={handleOpenAdjustments}
-                    adjustmentCount={teacherAdjustmentCount}
                     onToggleValidation={() => {
                       if (showValidation) setShowValidation(false);
                       else {
@@ -1048,9 +938,7 @@ export default function Grading() {
                         void handleRefreshValidation();
                       }
                     }}
-                    onExportXlsx={handleExportXlsx}
-                    onExportAllTerms={() => Number(fullGradebook.gradebook.term_order) === 2 ? handleExportXlsx(false, 2) : handleExportXlsx(true)}
-                    onExportDraftPreview={() => handleExportXlsx(false, null, true)}
+                    onExport={handleExport}
                     onValidateExport={handleValidateExport}
                     disabled={loading || saving}
                     onValidateFinalize={handleValidateFinalize}
@@ -1089,17 +977,6 @@ export default function Grading() {
             />
           )}
 
-          {/* Post-Finalization Grade Adjustment Requests Modal */}
-          {showAdjustments && fullGradebook && (
-            <AdjustmentRequestsModal
-              gradebookId={gradebookId}
-              students={fullGradebook.students}
-              components={fullGradebook.components}
-              adjustments={adjustmentsList}
-              onClose={() => setShowAdjustments(false)}
-              onRefresh={handleOpenAdjustments}
-            />
-          )}
         </>
       )}
     </div>

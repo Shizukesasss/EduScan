@@ -168,8 +168,8 @@ export default function OperationalControls({ view, embedded = false }) {
             </p>
           </div>
           <div className="sms-reconcile-header-actions">
-            <button type="button" className="btn-secondary" onClick={() => api.download('/sms/outbox.csv', 'sms-delivery-log.csv')}>
-              Export delivery log
+            <button type="button" className="btn-secondary" onClick={() => api.download('/sms/outbox.pdf', 'sms-delivery-log.pdf')}>
+              Download delivery log PDF
             </button>
             <button type="button" className="btn-primary" onClick={() => smsAction('/sms/reconcile', 'Gateway delivery statuses reconciled.')}>
               Reconcile now

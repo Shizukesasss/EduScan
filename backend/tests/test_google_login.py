@@ -11,7 +11,7 @@ import test_attendance_sync as fixtures
 from app import auth, main
 from app.models import User, ClassSchedule
 from app.migrations import MIGRATIONS, run_migrations
-from app.services import google_login
+from app.services import google_login, password_recovery
 
 
 def claims(**changes):
@@ -24,8 +24,9 @@ def claims(**changes):
 def school(monkeypatch):
     fixture = fixtures.AttendanceSyncTest()
     fixture.setUp()
-    configured = replace(main.settings, google_client_id="school.apps.googleusercontent.com", deped_only=True)
-    for module in (main, auth, google_login):
+    configured = replace(main.settings, google_client_id="school.apps.googleusercontent.com", deped_only=True,
+                         deped_password_recovery=False)
+    for module in (main, auth, google_login, password_recovery):
         monkeypatch.setattr(module, "settings", configured)
     yield fixture
     fixture.tearDown()
@@ -177,7 +178,8 @@ def test_missing_configuration_fails_closed_and_exposes_setup_state(school, monk
     monkeypatch.setattr(google_login, "settings", configured)
     response = school.client.get("/api/auth/config")
     assert response.status_code == 200
-    assert response.json() == {"google_client_id": "", "deped_only": True, "allowed_domain": "deped.gov.ph"}
+    assert response.json() == {"google_client_id": "", "deped_only": True, "allowed_domain": "deped.gov.ph",
+                               "deped_password_recovery": False}
     assert google_sign_in(school).status_code == 503
 
 

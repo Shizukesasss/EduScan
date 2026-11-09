@@ -4,8 +4,6 @@ from .models import SectionAdviserAssignment
 from .services.section_advisers import adviser_for_section, current_school_year_id
 
 import hashlib
-import csv
-import io
 import json
 import math
 import re
@@ -13,19 +11,22 @@ import uuid
 import time as monotonic_time
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Annotated, Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import ValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from .auth import create_token, current_user, hash_password, require_roles, seed_users, verify_password
+from .auth import (DEPED_PASSWORD_PREFIX, DEPED_PASSWORD_PROVIDER, create_token, current_user, has_deped_password,
+                   hash_password, require_roles, seed_users, verify_password)
 from .services.google_login import DOMAIN, google_user, verify_google_credential
-from .schemas import GoogleLoginRequest
+from .schemas import DepedRecoveryConfirm, DepedRecoveryRequest, GoogleLoginRequest
+from .services import password_recovery
 from .config import settings
 from .database import SessionLocal, engine, get_db
 from .migrations import run_migrations
@@ -60,29 +61,30 @@ from .services.gate_defaults import configure_fast_gate
 from .services.disposal import dispose_person_records
 from .services.annex_g_pdf import AnnexGLayoutError, TEMPLATE_VERSION, render_annex_g_pdf
 from .services.annex_g import (import_annex_g_enrollments, backfill_annex_g_dobs,
-                               build_annex_g_section, render_annex_g_html, annex_g_school_profile_data, annex_g_class_record_people)
+                               build_annex_g_section, annex_g_school_profile_data, annex_g_class_record_people)
 from .services.scheduler import attendance_scheduler
 from .services import grading as grading_service
 from .services.grading import gradebook_summary
 from .services.grading_engine import reporting_method_for_school_year
 from .services.academic_context import SHS_TRACK_CLUSTERS, elective_track_for_subject, is_junior_high, is_senior_high
 from .models_grading import (
-    AssessmentItem, GradeAdjustmentRequest, GradeCriteriaAdjustmentRequest, Gradebook, GradebookAuditEntry,
+    AssessmentItem, Gradebook, GradebookAuditEntry,
     GradebookComponent, GradingPolicy, StudentScore,
 )
 from .schemas_grading import (
-    GradeAdjustmentCreate, GradeAdjustmentNotificationsRead, GradeAdjustmentReview, GradeCriteriaAdjustmentCreate, GradebookComponentsUpdate,
+    GradebookComponentsUpdate,
     GradebookCreate, GradebookScoresUpdate, GradebookWorkflowPayload,
     GradingPolicyCreate, GradingPolicyUpdate,
 )
 from .services.reports import (
-    REPORT_DIR, attendance_report_html, generate_attendance_range_xlsx, generate_grade_report_xlsx,
-    grade_report_html, register_report, generate_gradebook_report_xlsx, gradebook_report_html, official_sf2_preview
+    REPORT_DIR, generate_attendance_range_xlsx, generate_grade_report_xlsx, generate_gradebook_summary_workbook,
+    register_report, register_workbook_report, generate_gradebook_report_xlsx, official_sf2_preview,
 )
 from .services.export_files import new_report_path
+from .services.report_pdf import table_report_pdf
 from .services.retention import execute_retention, public_preview, retention_policy, retention_preview
 from .services.settings_store import get_json, get_secret, set_json, set_secret
-from .services.sf2 import sf2_pending_attendance, sf2_students, generate_sf2, generate_temporary_log, save_template, template_path
+from .services.sf2 import sf2_pending_attendance, sf2_students, generate_sf2, generate_temporary_log, refresh_temporary_log_pdf, save_template, template_path
 from .services.sms import (
     cancel_record, dispatch_outbox, dispatch_queued, dispatch_record_by_id, gateway_diagnostics,
     mask_phone, reconcile_outbox, requeue_record, send_record, sms_config,
@@ -97,6 +99,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 
@@ -353,7 +356,8 @@ def health(db: Session = Depends(get_db)) -> dict:
 
 @app.get("/api/auth/config")
 def auth_config() -> dict:
-    return {"google_client_id": settings.google_client_id, "deped_only": settings.deped_only, "allowed_domain": DOMAIN}
+    return {"google_client_id": settings.google_client_id, "deped_only": settings.deped_only, "allowed_domain": DOMAIN,
+            "deped_password_recovery": settings.deped_password_recovery}
 
 
 @app.post("/api/auth/google", response_model=LoginResponse)
@@ -370,11 +374,15 @@ def google_login(payload: GoogleLoginRequest, request: Request, db: Session = De
 
 @app.post("/api/auth/login", response_model=LoginResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
-    if settings.deped_only:
+    identifier = payload.username.strip().lower()
+    deped_login = settings.deped_password_recovery and identifier.endswith(f"@{DOMAIN}")
+    if settings.deped_only and not deped_login:
         raise HTTPException(403, "Password login is disabled. Sign in with your @deped.gov.ph Google account.")
-    user = db.scalar(select(User).where(func.lower(
-        User.username) == payload.username.strip().lower()))
-    if user and user.google_email:
+    lookup = User.google_email if deped_login else func.lower(User.username)
+    user = db.scalar(select(User).where(lookup == identifier))
+    if deped_login and user and not has_deped_password(user):
+        user = None
+    if not deped_login and user and user.google_email:
         raise HTTPException(403, "This account uses Google sign-in. Use your @deped.gov.ph Google account.")
     now = datetime.utcnow()
     if user and user.locked_until and user.locked_until > now:
@@ -382,7 +390,10 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
             1, int((user.locked_until - now).total_seconds() // 60) + 1)
         raise HTTPException(
             status_code=423, detail=f"Account temporarily locked; try again in {remaining} minute(s)")
-    if not user or not user.active or not verify_password(payload.password, user.password_hash):
+    stored = user.password_hash if user else ""
+    if deped_login:
+        stored = stored.removeprefix(DEPED_PASSWORD_PREFIX)
+    if not user or not user.active or not verify_password(payload.password, stored):
         if user and user.active:
             user.failed_login_count = (user.failed_login_count or 0) + 1
             if user.failed_login_count >= 5:
@@ -394,9 +405,34 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
     user.failed_login_count = 0
     user.locked_until = None
     user.last_login_at = now
+    provider = DEPED_PASSWORD_PROVIDER if deped_login else "password"
+    token = create_token(user, auth_provider=provider)
     db.commit()
-    return LoginResponse(access_token=create_token(user), role=user.role, full_name=user.full_name,
-                         must_change_password=user.must_change_password)
+    return LoginResponse(access_token=token, role=user.role, full_name=user.full_name,
+                         must_change_password=user.must_change_password, auth_provider=provider)
+
+
+@app.post("/api/auth/password-reset/request", status_code=202)
+def request_password_reset(payload: DepedRecoveryRequest, background: BackgroundTasks,
+                           db: Session = Depends(get_db)) -> dict:
+    password_recovery.require_recovery_configuration()
+    challenge = password_recovery.issue_code(db, payload.email)
+    if challenge:
+        email, code = challenge
+        background.add_task(password_recovery.send_email, email, "EduScan password reset code",
+                            f"Your EduScan reset code is {code}. It expires in 10 minutes. "
+                            "If you did not request this code, you can ignore this email.")
+    return {"message": "If this DepEd account is eligible, a reset code will be sent to its inbox."}
+
+
+@app.post("/api/auth/password-reset/confirm")
+def confirm_password_reset(payload: DepedRecoveryConfirm, background: BackgroundTasks,
+                           db: Session = Depends(get_db)) -> dict:
+    password_recovery.require_recovery_configuration()
+    email = password_recovery.reset_password(db, payload.email, payload.code, payload.new_password)
+    background.add_task(password_recovery.send_email, email, "EduScan password changed",
+                        "Your EduScan password was reset. If you did not make this change, contact your school administrator.")
+    return {"message": "Your EduScan password was updated. You can now sign in."}
 
 
 @app.get("/api/auth/me")
@@ -409,15 +445,17 @@ def me(user: User = Depends(current_user)) -> dict:
 @app.post("/api/auth/change-password")
 def change_password(payload: PasswordChangePayload, db: Session = Depends(get_db),
                     user: User = Depends(current_user)) -> dict:
-    if settings.deped_only or user.google_email:
+    deped_password = settings.deped_password_recovery and has_deped_password(user)
+    if (settings.deped_only or user.google_email) and not deped_password:
         raise HTTPException(403, "Your password is managed by Google. Manage it through your DepEd Google account.")
-    if not verify_password(payload.current_password, user.password_hash):
+    stored = user.password_hash.removeprefix(DEPED_PASSWORD_PREFIX) if deped_password else user.password_hash
+    if not verify_password(payload.current_password, stored):
         raise HTTPException(
             status_code=422, detail="That password is incorrect. Check it and try again.")
     if payload.current_password == payload.new_password:
         raise HTTPException(
             status_code=422, detail="Choose a new password that is different from your current one.")
-    user.password_hash = hash_password(payload.new_password)
+    user.password_hash = (DEPED_PASSWORD_PREFIX if deped_password else "") + hash_password(payload.new_password)
     user.must_change_password = False
     user.password_changed_at = datetime.utcnow()
     user.failed_login_count = 0
@@ -996,17 +1034,7 @@ def save_annex_g_comment(payload: AnnexGCommentPayload, db: Session = Depends(ge
             "updated_at": comment.updated_at}
 
 
-@app.get("/api/annex-g/preview/{enrollment_id}", response_class=HTMLResponse)
-def annex_g_preview(enrollment_id: int, term_order: int = Query(ge=1, le=3),
-                    db: Session = Depends(get_db),
-                    user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> HTMLResponse:
-    enrollment = _annex_g_enrollment(db, enrollment_id)
-    _annex_g_access(db, user, enrollment)
-    report = build_annex_g_section(db, enrollment.school_year_id, enrollment.grade_level.name,
-                                   enrollment.section.name, term_order)
-    return HTMLResponse(render_annex_g_html(report, enrollment.id))
-
-
+@app.get("/api/annex-g/preview/{enrollment_id}", response_class=Response, include_in_schema=False)
 @app.get("/api/annex-g/preview/{enrollment_id}/pdf", response_class=Response)
 def annex_g_preview_pdf(enrollment_id: int, term_order: int = Query(ge=1, le=3),
                         db: Session = Depends(get_db),
@@ -1633,7 +1661,7 @@ def attendance_close(background_tasks: BackgroundTasks, day: date = Query(alias=
                 status_code=422, detail="Teachers must select their assigned grade and section")
         ensure_adviser_access(db, user, grade, section, current_school_year_id(db, day) or -1)
     created = close_day(db, day, grade, section)
-    generate_temporary_log(db, day)
+    refresh_temporary_log_pdf(db, day)
     background_tasks.add_task(dispatch_outbox)
     return {"created": created}
 
@@ -1661,42 +1689,59 @@ def correct(payload: AttendanceCorrectionPayload, db: Session = Depends(get_db),
         item = save_correction(db, payload, user)
         if payload.status == "No scan":
             gate_presence.forget_person(person.id)
-    generate_temporary_log(db, payload.attendance_date)
+    refresh_temporary_log_pdf(db, payload.attendance_date)
     return correction_json(item)
+
+
+ReportFormat = Literal["pdf", "xlsx"]
+REPORT_MEDIA_TYPES = {
+    "pdf": "application/pdf",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+def report_path_format(request: Request) -> ReportFormat:
+    return "xlsx" if request.url.path.endswith(".xlsx") else "pdf"
 
 
 @app.get("/api/attendance/temporary-log")
 def temporary_log(day: date = Query(alias="date"), grade: str | None = None, section: str | None = None,
-                  db: Session = Depends(get_db), user: User = Depends(require_roles("admin"))) -> FileResponse:
+                  db: Session = Depends(get_db), user: User = Depends(require_roles("admin")),
+                  file_format: Annotated[ReportFormat, Query(alias="format")] = "pdf") -> FileResponse:
     if bool(grade) != bool(section):
         raise HTTPException(
             status_code=422, detail="Select both grade and section, or neither for the all-school log")
     path = generate_temporary_log(db, day, grade, section, snapshot=True)
-    report = register_report(db, path, "Temporary Attendance Log", {
-                             "date": day, "grade": grade, "section": section}, user)
-    return FileResponse(report.file_path, filename=report.filename, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    report = register_workbook_report(db, path, "Temporary Attendance Log", {
+                             "date": day, "grade": grade, "section": section}, user, file_format=file_format)
+    return FileResponse(report.file_path, filename=report.filename, media_type=REPORT_MEDIA_TYPES[file_format])
 
 
 @app.get("/api/attendance/report.xlsx")
-def attendance_report_xlsx(starts_on: date, ends_on: date, role: str | None = None, grade: str | None = None,
+@app.get("/api/attendance/report.pdf")
+def attendance_report_pdf(starts_on: date, ends_on: date, role: str | None = None, grade: str | None = None,
                            section: str | None = None, person_id: int | None = None,
                            db: Session = Depends(get_db),
-                           user: User = Depends(require_roles("admin"))) -> FileResponse:
+                           user: User = Depends(require_roles("admin")),
+                           file_format: Annotated[ReportFormat, Depends(report_path_format)] = "pdf") -> FileResponse:
     path = generate_attendance_range_xlsx(
         db, starts_on, ends_on, role, grade, section, person_id)
     parameters = {"starts_on": starts_on, "ends_on": ends_on, "role": role, "grade": grade,
                   "section": section, "person_id": person_id}
-    report = register_report(db, path, "Daily Attendance" if starts_on == ends_on else "Attendance Range", parameters, user)
+    report = register_workbook_report(db, path, "Daily Attendance" if starts_on == ends_on else "Attendance Range",
+                                      parameters, user, file_format=file_format)
     return FileResponse(report.file_path, filename=report.filename,
-                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        media_type=REPORT_MEDIA_TYPES[file_format])
 
 
-@app.get("/api/attendance/report/print", response_class=HTMLResponse)
+@app.get("/api/attendance/report/print")
 def attendance_report_print(starts_on: date, ends_on: date, role: str | None = None, grade: str | None = None,
                             section: str | None = None, person_id: int | None = None,
                             db: Session = Depends(get_db),
-                            user: User = Depends(require_roles("admin"))) -> HTMLResponse:
-    return HTMLResponse(attendance_report_html(db, starts_on, ends_on, role, grade, section, person_id))
+                            user: User = Depends(require_roles("admin"))) -> FileResponse:
+    response = attendance_report_pdf(starts_on, ends_on, role, grade, section, person_id, db, user)
+    response.headers["content-disposition"] = response.headers["content-disposition"].replace("attachment", "inline", 1)
+    return response
 
 
 @app.post("/api/attendance/reset")
@@ -1707,7 +1752,7 @@ def attendance_reset(payload: AttendanceResetPayload, db: Session = Depends(get_
             status_code=422, detail="Type the attendance date exactly to confirm the clean slate")
     audit = reset_day(db, payload.attendance_date, payload.reason, user)
     gate_presence.clear()
-    generate_temporary_log(db, payload.attendance_date)
+    refresh_temporary_log_pdf(db, payload.attendance_date)
     return reset_json(audit)
 
 
@@ -2743,22 +2788,21 @@ def cancel_sms(record_id: str, db: Session = Depends(get_db),
     return {"id": record.id, "status": record.status}
 
 
-@app.get("/api/sms/outbox.csv")
+@app.get("/api/sms/outbox.csv", include_in_schema=False)
+@app.get("/api/sms/outbox.pdf")
 def export_sms_outbox(db: Session = Depends(get_db),
-                      _: User = Depends(require_roles("admin", "records_officer"))) -> StreamingResponse:
+                      _: User = Depends(require_roles("admin", "records_officer"))) -> Response:
     items = db.scalars(select(SmsOutbox).order_by(
         SmsOutbox.created_at.desc())).all()
-    output = io.StringIO(newline="")
-    writer = csv.writer(output)
-    writer.writerow(["Created", "Event", "Recipient", "Status", "Attempts", "Gateway ID",
-                     "Accepted/Sent", "Delivered", "Cancelled", "Last error", "Message"])
-    for item in items:
-        writer.writerow([item.created_at, item.event_type, item.recipient, item.status, item.attempts,
-                         item.gateway_message_id or "", item.sent_at or "", item.delivered_at or "",
-                         item.cancelled_at or "", item.last_error or "", item.message])
-    filename = f"EduScan-SMS-delivery-log-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"
-    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv; charset=utf-8",
-                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    columns = {"Created": 23, "Event": 19, "Recipient": 18, "Status": 12, "Attempts": 8, "Gateway ID": 15,
+               "Accepted/Sent": 23, "Delivered": 23, "Cancelled": 23, "Last error": 24, "Message": 45}
+    rows = ([item.created_at, item.event_type, item.recipient, item.status, item.attempts,
+             item.gateway_message_id, item.sent_at, item.delivered_at, item.cancelled_at,
+             item.last_error, item.message] for item in items)
+    filename = f"EduScan-SMS-delivery-log-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pdf"
+    return Response(table_report_pdf("EduScan SMS Delivery Log", columns, rows), media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                             "Cache-Control": "private, no-store"})
 
 
 @app.post("/api/sms/test")
@@ -2810,7 +2854,8 @@ def sf2_preview(year: int, month: int, grade: str, section: str, db: Session = D
 @app.get("/api/sf2/export")
 def sf2_export(year: int, month: int, grade: str, section: str, school_id: str = "",
                school_year: str = "", school_name: str = "SAN JOSE NATIONAL HIGH SCHOOL",
-               db: Session = Depends(get_db), user: User = Depends(require_roles("admin"))) -> FileResponse:
+               db: Session = Depends(get_db), user: User = Depends(require_roles("admin")),
+               file_format: Annotated[ReportFormat, Query(alias="format")] = "pdf") -> FileResponse:
     if not 1 <= month <= 12:
         raise HTTPException(
             status_code=422, detail="Month must be between 1 and 12")
@@ -2832,16 +2877,17 @@ def sf2_export(year: int, month: int, grade: str, section: str, school_id: str =
         raise HTTPException(status_code=409, detail={"message": "Review or close the unresolved daily attendance before generating official SF2. No attendance was changed.", **pending})
     path = generate_sf2(db, year, month, grade, section,
                         school_id, school_year, school_name)
-    report = register_report(db, path, "Official SF2", {"year": year, "month": month, "grade": grade,
+    report = register_workbook_report(db, path, "Official SF2", {"year": year, "month": month, "grade": grade,
                                                         "section": section, "school_id": school_id,
-                                                        "school_year": school_year}, user)
+                                                        "school_year": school_year}, user, file_format=file_format)
     return FileResponse(report.file_path, filename=report.filename,
-                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        media_type=REPORT_MEDIA_TYPES[file_format])
 
 
 def report_json(item: GeneratedReport) -> dict:
     return {"id": item.id, "report_type": item.report_type, "filename": item.filename,
-            "sha256": item.file_sha256, "parameters": json.loads(item.parameters_json),
+            "sha256": item.file_sha256, "parameters": {key: value for key, value in json.loads(item.parameters_json).items()
+                                                         if key != "_sf2_preview"},
             "status": item.status, "generated_by_name": item.generated_by_name,
             "reviewed_by_name": item.reviewed_by_name, "review_note": item.review_note,
             "reviewed_at": item.reviewed_at, "created_at": item.created_at}
@@ -2866,7 +2912,10 @@ def preview_generated_report(report_id: str, db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="Official SF2 file was not found")
     if hashlib.sha256(path.read_bytes()).hexdigest() != item.file_sha256:
         raise HTTPException(status_code=409, detail="Report integrity check failed; ask the administrator to regenerate it")
-    return {"report": report_json(item), **official_sf2_preview(path)}
+    preview = json.loads(item.parameters_json).get("_sf2_preview")
+    if preview is None:
+        preview = official_sf2_preview(path)  # Previously registered SF2 workbooks.
+    return {"report": report_json(item), **preview}
 
 
 @app.get("/api/reports/history")
@@ -2889,7 +2938,9 @@ def download_generated_report(report_id: str, db: Session = Depends(get_db),
     if not item or not Path(item.file_path).is_file():
         raise HTTPException(
             status_code=404, detail="Generated report file was not found")
-    return FileResponse(item.file_path, filename=item.filename)
+    if hashlib.sha256(Path(item.file_path).read_bytes()).hexdigest() != item.file_sha256:
+        raise HTTPException(status_code=409, detail="Report integrity check failed")
+    return FileResponse(item.file_path, filename=item.filename, headers={"Cache-Control": "private, no-store"})
 
 
 @app.post("/api/reports/history/{report_id}/review")
@@ -3155,28 +3206,28 @@ def reopen_gradebook(class_key: str, payload: GradebookActionPayload, db: Sessio
 
 
 @app.get("/api/gradebook/{class_key}/report.xlsx")
-def gradebook_report_xlsx(class_key: str, grade: str = "", section: str = "", db: Session = Depends(get_db),
-                          user: User = Depends(require_roles("teacher", "records_officer"))) -> FileResponse:
+@app.get("/api/gradebook/{class_key}/report.pdf")
+def gradebook_report_pdf(class_key: str, grade: str = "", section: str = "", db: Session = Depends(get_db),
+                          user: User = Depends(require_roles("teacher", "records_officer")),
+                          file_format: Annotated[ReportFormat, Depends(report_path_format)] = "pdf") -> FileResponse:
     state = db.get(GradebookState, class_key)
     if not state:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
     ensure_legacy_gradebook_access(db, user, class_key)
     path = generate_grade_report_xlsx(db, class_key)
-    report = register_report(db, path, "Grading Summary", {"class_key": class_key, "grade": state.grade, "section": state.section,
+    report = register_workbook_report(db, path, "Grading Summary", {"class_key": class_key, "grade": state.grade, "section": state.section,
                                                            "school_year": state.school_year, "term_order": state.term_order,
-                                                           "subject": state.subject}, user)
+                                                           "subject": state.subject}, user, file_format=file_format)
     return FileResponse(report.file_path, filename=report.filename,
-                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        media_type=REPORT_MEDIA_TYPES[file_format])
 
 
-@app.get("/api/gradebook/{class_key}/report/print", response_class=HTMLResponse)
+@app.get("/api/gradebook/{class_key}/report/print")
 def gradebook_report_print(class_key: str, grade: str = "", section: str = "", db: Session = Depends(get_db),
-                           user: User = Depends(require_roles("admin", "records_officer"))) -> HTMLResponse:
-    state = db.get(GradebookState, class_key)
-    if not state:
-        raise HTTPException(status_code=404, detail="Gradebook was not found")
-    ensure_legacy_gradebook_access(db, user, class_key)
-    return HTMLResponse(grade_report_html(db, class_key))
+                           user: User = Depends(require_roles("admin", "records_officer"))) -> FileResponse:
+    response = gradebook_report_pdf(class_key, grade, section, db, user)
+    response.headers["content-disposition"] = response.headers["content-disposition"].replace("attachment", "inline", 1)
+    return response
 
 
 @app.get("/api/gradebook/{class_key}/audit")
@@ -3722,291 +3773,9 @@ def gradebook_audit_new_endpoint(
     } for e in entries]
 
 
-@app.post("/api/gradebooks/{gradebook_id}/adjustments")
-def create_adjustment_endpoint(
-    gradebook_id: int,
-    payload: GradeAdjustmentCreate,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_roles("teacher")),
-):
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
-    if not book:
-        raise HTTPException(status_code=404, detail="Gradebook not found")
-    try:
-        req = grading_service.create_adjustment_request(
-            db, gradebook_id, user,
-            person_id=payload.person_id,
-            assessment_item_id=payload.assessment_item_id,
-            new_score=payload.new_score,
-            new_status=payload.new_status,
-            reason=payload.reason,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"id": req.id, "status": req.status}
-
-
-@app.post("/api/gradebooks/{gradebook_id}/criteria-adjustments")
-def create_criteria_adjustment_endpoint(
-    gradebook_id: int,
-    payload: GradeCriteriaAdjustmentCreate,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_roles("teacher")),
-):
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
-    if not book:
-        raise HTTPException(status_code=404, detail="Gradebook not found")
-    try:
-        req = grading_service.create_criteria_adjustment_request(
-            db, gradebook_id, user, [item.model_dump() for item in payload.components], payload.reason)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"id": -req.id, "status": req.status}
-
-
-@app.get("/api/gradebooks/{gradebook_id}/adjustments")
-def list_adjustments_endpoint(
-    gradebook_id: int,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_roles("admin", "teacher", "records_officer")),
-):
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
-    if not book:
-        raise HTTPException(status_code=404, detail="Gradebook not found")
-    reqs = db.scalars(
-        select(GradeAdjustmentRequest)
-        .where(GradeAdjustmentRequest.gradebook_id == gradebook_id)
-        .order_by(GradeAdjustmentRequest.created_at.desc())
-    ).all()
-    results = [{
-        "id": r.id,
-        "request_type": "score",
-        "school_year_name": book.school_year_name,
-        "grading_period_name": book.grading_period.name if book.grading_period else None,
-        "person_id": r.person_id,
-        "person_name": r.person.full_name if r.person else None,
-        "assessment_item_id": r.assessment_item_id,
-        "assessment_label": r.assessment_item.label if r.assessment_item else None,
-        "old_score": r.old_score,
-        "old_status": r.old_status,
-        "new_score": r.new_score,
-        "new_status": r.new_status,
-        "reason": r.reason,
-        "requested_by_name": r.requested_by_name,
-        "status": r.status,
-        "reviewed_by_name": r.reviewed_by_name,
-        "review_note": r.review_note,
-        "reviewed_at": r.reviewed_at,
-        "created_at": r.created_at,
-    } for r in reqs]
-    criteria_reqs = db.scalars(select(GradeCriteriaAdjustmentRequest).where(
-        GradeCriteriaAdjustmentRequest.gradebook_id == gradebook_id
-    )).all()
-    results.extend({
-        "id": -r.id,
-        "request_type": "criteria",
-        "school_year_name": book.school_year_name,
-        "grading_period_name": book.grading_period.name if book.grading_period else None,
-        "old_criteria": json.loads(r.old_criteria_json),
-        "new_criteria": json.loads(r.new_criteria_json),
-        "reason": r.reason,
-        "requested_by_name": r.requested_by_name,
-        "status": r.status,
-        "reviewed_by_name": r.reviewed_by_name,
-        "review_note": r.review_note,
-        "reviewed_at": r.reviewed_at,
-        "created_at": r.created_at,
-    } for r in criteria_reqs)
-    return sorted(results, key=lambda item: item["created_at"], reverse=True)
-
-
-@app.get("/api/admin/grade-adjustments")
-def list_global_adjustments_endpoint(
-    db: Session = Depends(get_db),
-    user: User = Depends(require_roles("admin", "records_officer")),
-):
-    reqs = db.scalars(
-        select(GradeAdjustmentRequest)
-        .join(User, GradeAdjustmentRequest.requested_by == User.id)
-        .where(User.role == 'teacher')
-        .options(
-            joinedload(GradeAdjustmentRequest.gradebook),
-            joinedload(GradeAdjustmentRequest.person),
-            joinedload(GradeAdjustmentRequest.assessment_item)
-        )
-        .order_by(GradeAdjustmentRequest.created_at.desc())
-    ).all()
-    results = [{
-        "id": r.id,
-        "request_type": "score",
-        "gradebook_id": r.gradebook_id,
-        "grade_name": r.gradebook.grade_name if r.gradebook else None,
-        "section_name": r.gradebook.section_name if r.gradebook else None,
-        "subject_name": r.gradebook.subject_name if r.gradebook else None,
-        "school_year_name": r.gradebook.school_year_name if r.gradebook else None,
-        "grading_period_name": r.gradebook.grading_period.name if r.gradebook and r.gradebook.grading_period else None,
-        "person_id": r.person_id,
-        "person_name": r.person.full_name if r.person else None,
-        "assessment_item_id": r.assessment_item_id,
-        "assessment_label": r.assessment_item.label if r.assessment_item else None,
-        "old_score": r.old_score,
-        "old_status": r.old_status,
-        "new_score": r.new_score,
-        "new_status": r.new_status,
-        "reason": r.reason,
-        "requested_by_name": r.requested_by_name,
-        "status": r.status,
-        "reviewed_by_name": r.reviewed_by_name,
-        "review_note": r.review_note,
-        "reviewed_at": r.reviewed_at,
-        "created_at": r.created_at,
-    } for r in reqs]
-    criteria_reqs = db.scalars(select(GradeCriteriaAdjustmentRequest)
-        .join(User, GradeCriteriaAdjustmentRequest.requested_by == User.id)
-        .where(User.role == "teacher")
-        .options(joinedload(GradeCriteriaAdjustmentRequest.gradebook))
-    ).all()
-    results.extend({
-        "id": -r.id,
-        "request_type": "criteria",
-        "gradebook_id": r.gradebook_id,
-        "grade_name": r.gradebook.grade_name if r.gradebook else None,
-        "section_name": r.gradebook.section_name if r.gradebook else None,
-        "subject_name": r.gradebook.subject_name if r.gradebook else None,
-        "school_year_name": r.gradebook.school_year_name if r.gradebook else None,
-        "grading_period_name": r.gradebook.grading_period.name if r.gradebook and r.gradebook.grading_period else None,
-        "old_criteria": json.loads(r.old_criteria_json),
-        "new_criteria": json.loads(r.new_criteria_json),
-        "reason": r.reason,
-        "requested_by_name": r.requested_by_name,
-        "status": r.status,
-        "reviewed_by_name": r.reviewed_by_name,
-        "review_note": r.review_note,
-        "reviewed_at": r.reviewed_at,
-        "created_at": r.created_at,
-    } for r in criteria_reqs)
-    return sorted(results, key=lambda item: item["created_at"], reverse=True)
-
-
-@app.get("/api/teacher/grade-adjustment-notifications")
-def teacher_grade_adjustment_notifications(
-    db: Session = Depends(get_db),
-    user: User = Depends(require_roles("teacher")),
-) -> list[dict]:
-    requests = db.scalars(
-        select(GradeAdjustmentRequest)
-        .where(
-            GradeAdjustmentRequest.requested_by == user.id,
-            GradeAdjustmentRequest.status.in_(("Approved", "Rejected")),
-            GradeAdjustmentRequest.requester_seen_at.is_(None),
-        )
-        .options(
-            joinedload(GradeAdjustmentRequest.gradebook).joinedload(Gradebook.grading_period),
-            joinedload(GradeAdjustmentRequest.person),
-        )
-        .order_by(GradeAdjustmentRequest.reviewed_at, GradeAdjustmentRequest.id)
-        .limit(100)
-    ).all()
-    results = [{
-        "id": item.id,
-        "request_type": "score",
-        "status": item.status,
-        "review_note": item.review_note,
-        "person_name": item.person.full_name if item.person else None,
-        "school_year_name": item.gradebook.school_year_name if item.gradebook else None,
-        "grading_period_name": item.gradebook.grading_period.name if item.gradebook and item.gradebook.grading_period else None,
-        "grade_name": item.gradebook.grade_name if item.gradebook else None,
-        "section_name": item.gradebook.section_name if item.gradebook else None,
-        "subject_name": item.gradebook.subject_name if item.gradebook else None,
-    } for item in requests]
-    criteria_requests = db.scalars(select(GradeCriteriaAdjustmentRequest).where(
-        GradeCriteriaAdjustmentRequest.requested_by == user.id,
-        GradeCriteriaAdjustmentRequest.status.in_(("Approved", "Rejected")),
-        GradeCriteriaAdjustmentRequest.requester_seen_at.is_(None),
-    ).options(joinedload(GradeCriteriaAdjustmentRequest.gradebook).joinedload(Gradebook.grading_period))
-    .order_by(GradeCriteriaAdjustmentRequest.reviewed_at, GradeCriteriaAdjustmentRequest.id).limit(100)).all()
-    results.extend({
-        "id": -item.id,
-        "request_type": "criteria",
-        "status": item.status,
-        "review_note": item.review_note,
-        "person_name": None,
-        "school_year_name": item.gradebook.school_year_name if item.gradebook else None,
-        "grading_period_name": item.gradebook.grading_period.name if item.gradebook and item.gradebook.grading_period else None,
-        "grade_name": item.gradebook.grade_name if item.gradebook else None,
-        "section_name": item.gradebook.section_name if item.gradebook else None,
-        "subject_name": item.gradebook.subject_name if item.gradebook else None,
-    } for item in criteria_requests)
-    return results
-
-
-@app.post("/api/teacher/grade-adjustment-notifications/read")
-def mark_teacher_grade_adjustment_notifications_read(
-    payload: GradeAdjustmentNotificationsRead,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_roles("teacher")),
-) -> dict:
-    score_ids = [request_id for request_id in payload.request_ids if request_id > 0]
-    criteria_ids = [-request_id for request_id in payload.request_ids if request_id < 0]
-    requests = db.scalars(select(GradeAdjustmentRequest).where(
-        GradeAdjustmentRequest.id.in_(score_ids),
-        GradeAdjustmentRequest.requested_by == user.id,
-        GradeAdjustmentRequest.status.in_(("Approved", "Rejected")),
-        GradeAdjustmentRequest.requester_seen_at.is_(None),
-    )).all()
-    for item in requests:
-        item.requester_seen_at = datetime.utcnow()
-    criteria_requests = db.scalars(select(GradeCriteriaAdjustmentRequest).where(
-        GradeCriteriaAdjustmentRequest.id.in_(criteria_ids),
-        GradeCriteriaAdjustmentRequest.requested_by == user.id,
-        GradeCriteriaAdjustmentRequest.status.in_(("Approved", "Rejected")),
-        GradeCriteriaAdjustmentRequest.requester_seen_at.is_(None),
-    )).all()
-    for item in criteria_requests:
-        item.requester_seen_at = datetime.utcnow()
-    db.commit()
-    return {"read": len(requests) + len(criteria_requests)}
-
-
-@app.put("/api/adjustment-requests/{request_id}")
-def review_adjustment_endpoint(
-    request_id: int,
-    payload: GradeAdjustmentReview,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_roles("records_officer")),
-):
-    try:
-        req = (grading_service.review_criteria_adjustment_request(
-            db, -request_id, user, payload.status, payload.note) if request_id < 0 else
-            grading_service.review_adjustment_request(
-                db, request_id, user, payload.status, payload.note))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"id": request_id, "status": req.status}
-
-
-@app.delete("/api/adjustment-requests/{request_id}")
-def delete_adjustment_endpoint(
-    request_id: int,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_roles("teacher", "records_officer")),
-):
-    try:
-        (grading_service.delete_criteria_adjustment_request(db, -request_id, user) if request_id < 0 else
-         grading_service.delete_adjustment_request(db, request_id, user))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"status": "deleted"}
-
-
 @app.get("/api/gradebooks/{gradebook_id}/report.xlsx")
-def gradebook_report_xlsx_new(
+@app.get("/api/gradebooks/{gradebook_id}/report.pdf")
+def gradebook_report_pdf_new(
     gradebook_id: int,
     region: str = "",
     division: str = "",
@@ -4016,6 +3785,7 @@ def gradebook_report_xlsx_new(
     draft_preview: bool = False,
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("teacher", "records_officer", "school_head")),
+    file_format: Annotated[ReportFormat, Depends(report_path_format)] = "pdf",
 ):
     if (all_terms or through_term) and user.role not in {'teacher', 'records_officer'}:
         raise HTTPException(status_code=403, detail="Only the assigned teacher or records officer can export multiple terms")
@@ -4027,15 +3797,17 @@ def gradebook_report_xlsx_new(
     path = generate_gradebook_report_xlsx(db, book.id, region=region, division=division, school_id=school_id,
                                         allowed_teacher_id=user.id if user.role == 'teacher' else None, all_terms=all_terms, through_term=through_term,
                                         draft_preview=draft_preview)
-    report = register_report(db, path, "Grading Summary", {
+    report = register_workbook_report(db, path, "Grading Summary", {
         "gradebook_id": book.id, "grade": book.grade_name, "section": book.section_name,
         "school_year": book.school_year_name, "term_order": book.term_order, "subject": book.subject_name,
         "all_terms": all_terms,
         "through_term": through_term,
         "draft_preview": draft_preview,
-    }, user)
+    }, user, file_format=file_format,
+       terms=tuple(range(1, (through_term or 3) + 1)) if all_terms or through_term else (book.term_order,),
+       draft=draft_preview)
     return FileResponse(report.file_path, filename=report.filename,
-                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        media_type=REPORT_MEDIA_TYPES[file_format])
 
 
 @app.get("/api/gradebooks/{gradebook_id}/report/validation")
@@ -4066,7 +3838,7 @@ def gradebook_report_validation(
     return {"issues": issues}
 
 
-@app.get("/api/gradebooks/{gradebook_id}/report/print", response_class=HTMLResponse)
+@app.get("/api/gradebooks/{gradebook_id}/report/print")
 def gradebook_report_print_new(
     gradebook_id: int,
     db: Session = Depends(get_db),
@@ -4077,7 +3849,12 @@ def gradebook_report_print_new(
         ensure_gradebook_access(db, user, book)
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
-    return HTMLResponse(gradebook_report_html(db, book.id))
+    report = register_workbook_report(db, generate_gradebook_summary_workbook(db, book.id), "Grading Summary", {
+        "gradebook_id": book.id, "grade": book.grade_name, "section": book.section_name,
+        "school_year": book.school_year_name, "term_order": book.term_order, "subject": book.subject_name,
+    }, user, draft=book.status not in {"Finalized", "Locked"})
+    return FileResponse(report.file_path, filename=report.filename, media_type="application/pdf",
+                        content_disposition_type="inline")
 
 
 @app.get("/api/dashboard")

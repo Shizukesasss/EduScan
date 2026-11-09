@@ -31,6 +31,15 @@ class User(Base):
         DateTime, default=datetime.utcnow)
 
 
+class DepedPasswordReset(Base):
+    __tablename__ = "deped_password_resets"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    code_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class Person(Base):
     __tablename__ = "persons"
     id: Mapped[int] = mapped_column(primary_key=True)

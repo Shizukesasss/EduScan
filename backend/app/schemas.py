@@ -27,6 +27,17 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class DepedRecoveryRequest(BaseModel):
+    email: str = Field(min_length=1, max_length=254)
+
+
+class DepedRecoveryConfirm(DepedRecoveryRequest):
+    code: str = Field(pattern=r"^[0-9]{8}$")
+    new_password: str = Field(min_length=12, max_length=200)
+
+    _strong_password = field_validator("new_password")(strong_password)
+
+
 class GoogleLoginRequest(BaseModel):
     credential: str = Field(min_length=1, max_length=16384)
     nonce: str = Field(min_length=32, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")

@@ -170,7 +170,7 @@ class ReportingReliabilityTest(unittest.TestCase):
     def test_failed_export_retries_on_next_tick_without_reclosing_attendance(self):
         set_json(self.db, "attendance", {"auto_close_enabled": True, "absence_cutoff": "09:00"})
         worker = scheduler.AttendanceScheduler()
-        with patch.object(gate_exports, "generate_temporary_log", side_effect=[OSError("test disk failure"), self.root / "retried.xlsx"]) as output:
+        with patch.object(gate_exports, "refresh_temporary_log_pdf", side_effect=[OSError("test disk failure"), self.root / "retried.xlsx"]) as output:
             with self.assertLogs(gate_exports.__name__, level="ERROR"):
                 result = worker.run_once(self.now)
             self.assertEqual(result["created"], 2)
@@ -192,12 +192,12 @@ class ReportingReliabilityTest(unittest.TestCase):
         def generate(_db, day):
             if day == self.day:
                 raise OSError("test failure for one day")
-        with patch.object(gate_exports, "generate_temporary_log", side_effect=generate) as output:
+        with patch.object(gate_exports, "refresh_temporary_log_pdf", side_effect=generate) as output:
             with self.assertLogs(gate_exports.__name__, level="ERROR"):
                 gate_exports.retry_gate_exports()
         self.assertEqual(output.call_count, 2)
         self.assertEqual(gate_exports._pending_days, {self.day})
-        with patch.object(gate_exports, "generate_temporary_log") as output:
+        with patch.object(gate_exports, "refresh_temporary_log_pdf") as output:
             gate_exports.retry_gate_exports()
         self.assertEqual(output.call_count, 1)
         self.assertFalse(gate_exports._pending_days)
@@ -213,7 +213,7 @@ class ReportingReliabilityTest(unittest.TestCase):
         observed = []
         def export(db, day):
             observed.append((day, len(db.scalars(select(AttendanceEvent)).all())))
-        with patch.object(scheduler, "close_due_attendance", side_effect=close), patch.object(gate_exports, "generate_temporary_log", side_effect=export):
+        with patch.object(scheduler, "close_due_attendance", side_effect=close), patch.object(gate_exports, "refresh_temporary_log_pdf", side_effect=export):
             with self.assertRaisesRegex(RuntimeError, "first committed row"):
                 worker.run_once(self.now)
         self.assertEqual(observed, [(self.day, 1)])
@@ -225,7 +225,7 @@ class ReportingReliabilityTest(unittest.TestCase):
         worker = scheduler.AttendanceScheduler()
         worker._stop = Mock(); worker._stop.wait.side_effect = [False, True]
         original_run = worker.run_once
-        with patch.object(gate_exports, "generate_temporary_log") as output, \
+        with patch.object(gate_exports, "refresh_temporary_log_pdf") as output, \
              patch.object(worker, "run_once", side_effect=lambda: original_run(self.now)), \
              patch.object(worker, "run_scheduled_backup"):
             worker._run()

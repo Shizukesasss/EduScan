@@ -88,12 +88,12 @@ export default function Attendance() {
   const newest = filtered[0];
   const pageKey = `${date}|${sectionKey}|${roleFilter}|${search}|${newest?.person_id || ''}|${newest?.last_gate_time || newest?.time_out || newest?.time_in || ''}`;
   const counts = filtered.reduce((result, row) => ({ ...result, [row.status]: (result[row.status] || 0) + 1 }), {});
-  const downloadLog = () => {
+  const downloadLog = (format) => {
     if (auth.role() === 'teacher' && !selectedSection) return showError('Ask the administrator to assign your adviser account to a section first.');
-    const query = new URLSearchParams({ date });
+    const query = new URLSearchParams({ date, format });
     if (selectedSection) { query.set('grade', selectedSection.grade); query.set('section', selectedSection.section); }
     const scope = selectedSection ? `Grade-${selectedSection.grade}-${selectedSection.section}` : 'All-School';
-    api.download(`/attendance/temporary-log?${query}`, `attendance-${date}-${scope}.xlsx`).catch((err) => showError(err.message));
+    api.download(`/attendance/temporary-log?${query}`, `attendance-${date}-${scope}.${format}`).catch((err) => showError(err.message));
   };
   const handleClose = async () => {
     if (auth.role() === 'teacher' && !selectedSection) return showError('Select your assigned section before closing attendance.');
@@ -108,7 +108,10 @@ export default function Attendance() {
       <div><h1>Attendance</h1><p>Review daily records and manage documented attendance updates.</p></div>
       <div className="attendance-heading__actions">
         <button type="button" className="btn-secondary" onClick={load}> Refresh attendance</button>
-        {auth.role() === 'admin' && <button className="btn-primary" onClick={downloadLog}> Download current log</button>}
+        {auth.role() === 'admin' && <>
+          <button className="btn-primary" onClick={() => downloadLog('pdf')}>Download log PDF</button>
+          <button className="btn-secondary" onClick={() => downloadLog('xlsx')}>Download log Excel (.xlsx)</button>
+        </>}
       </div>
     </header>
 

@@ -9,6 +9,7 @@ from io import BytesIO
 from pathlib import Path
 
 from openpyxl import load_workbook
+from pypdf import PdfReader
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
@@ -81,84 +82,37 @@ class GradingApiTest(unittest.TestCase):
 
     def assert_exports_match_gradebook(self, gb_id):
         snapshot = self.client.get(f'/api/gradebooks/{gb_id}', headers=self.teacher_headers).json()
+        excel = self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx', headers=self.teacher_headers,
+                                params={'region': 'V', 'division': 'V', 'school_id': '301874'})
+        self.assertEqual(excel.status_code, 200)
+        self.assertEqual(excel.headers['content-type'], 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        self.assertIn('.xlsx', excel.headers['content-disposition'])
+        workbook = load_workbook(BytesIO(excel.content), read_only=True, data_only=True)
+        try:
+            self.assertTrue(workbook.sheetnames)
+        finally:
+            workbook.close()
+        self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx', headers=self.other_teacher_headers).status_code, 403)
         for headers in (self.other_teacher_headers, self.admin_headers):
-            self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx?all_terms=true', headers=headers).status_code, 403)
+            self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.pdf?all_terms=true', headers=headers).status_code, 403)
         self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}', headers=self.admin_headers).json(), snapshot)
         for role, headers in (('teacher', self.teacher_headers), ('records officer', self.records_headers)):
             with self.subTest(export_role=role):
-                exported = self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx', headers=headers,
+                exported = self.client.get(f'/api/gradebooks/{gb_id}/report.pdf', headers=headers,
                                            params={'region': 'V', 'division': 'V', 'school_id': '301874'})
                 self.assertEqual(exported.status_code, 200, exported.text if exported.status_code != 200 else '')
-                formulas = load_workbook(BytesIO(exported.content))
-                values = load_workbook(BytesIO(exported.content), data_only=True)
-                try:
-                    wanted_term = f"Term {snapshot['gradebook']['term_order']}"
-                    term_sheets = [name for name in values.sheetnames if name.strip().casefold() == wanted_term.casefold()]
-                    self.assertEqual(len(term_sheets), 1, values.sheetnames)
-                    term_name = term_sheets[0]
-                    sheet = values[term_name]
-                    headings = {cell.value: cell.column for cell in sheet[10]}
-                    metadata = snapshot['gradebook']
-                    for cell, key in (('E15', 'school_year_name'), ('E23', 'teacher_name'), ('E24', 'subject_name'), ('E26', 'section_name')):
-                        self.assertEqual(values['INPUT DATA'][cell].value, metadata[key])
-                    self.assertEqual(str(values['INPUT DATA']['E25'].value), str(metadata['grade_name']))
-                    self.assertEqual(values['INPUT DATA']['E13'].value, '301874')
-                    self.assertEqual(values['INPUT DATA']['E10'].value, 'V')
-                    self.assertEqual(values['INPUT DATA']['E11'].value, 'V')
-                    self.assertEqual(values['INPUT DATA']['E16'].value or '', metadata['school_head'] or '')
-                    if 'INITIAL GRADE' in headings and 'TERM GRADE' in headings:
-                        for heading in ('INITIAL GRADE', 'TERM GRADE'):
-                            self.assertEqual(formulas[term_name].cell(12, headings[heading]).data_type, 'f')
-                        by_identifier = {student['lrn'] or student['external_id']: student for student in snapshot['students']}
-                        for row in range(12, 12 + len(by_identifier)):
-                            student = by_identifier[sheet.cell(row, 3).value]
-                            self.assertEqual(sheet.cell(row, headings['INITIAL GRADE']).value, student['initial_grade'])
-                            self.assertEqual(sheet.cell(row, headings['TERM GRADE']).value, student['reported_grade'])
-                            column = 5
-                            for component, detail, result in zip(snapshot['components'], student['component_details'], student['component_grades']):
-                                self.assertEqual(formulas[term_name].cell(9, column).value, component['name'])
-                                items = [item for item in component['items'] if item['active']]
-                                for item in items:
-                                    self.assertEqual(sheet.cell(11, column).value, item['max_score'])
-                                    self.assertEqual(sheet.cell(row, column).value, student['scores'][str(item['id'])])
-                                    column += 1
-                                self.assertEqual(sheet.cell(11, column + 2).value, component['weight'] / 100)
-                                for offset, expected in enumerate((detail['total_earned'], result['percentage'], result['weighted_score'])):
-                                    self.assertAlmostEqual(sheet.cell(row, column + offset).value, expected, places=10)
-                                column += 3
-                    else:
-                        self.assertEqual(str(formulas[term_name]['AB12'].value).upper(), 'INITIAL GRADE')
-                        self.assertEqual(str(formulas[term_name]['AC12'].value).upper(), 'TERM GRADE')
-                        layout = (
-                            (6, 11, 12, 13, 'WRITTEN / ORAL WORKS (WWs)'),
-                            (14, 17, 18, 19, 'PRODUCT / PERFORMANCE TASKS (PTs)'),
-                            (20, None, 26, 27, 'EXAMINATIONS (EXs)'),
-                        )
-                        for sex, first_row, input_column in (('MALE', 18, 'K'), ('FEMALE', 69, 'N')):
-                            students = sorted((student for student in snapshot['students'] if student['sex'].strip().upper() == sex),
-                                              key=lambda student: (student['full_name'].casefold(), student['lrn'] or student['external_id']))
-                            for index, student in enumerate(students):
-                                row = first_row + index
-                                self.assertEqual(values['INPUT DATA'][f'{input_column}{11 + index}'].value, student['full_name'])
-                                self.assertEqual(sheet[f'AB{row}'].value, student['initial_grade'])
-                                self.assertEqual(sheet[f'AC{row}'].value, student['reported_grade'])
-                                self.assertEqual(formulas[term_name][f'AB{row}'].data_type, 'f')
-                                self.assertEqual(formulas[term_name][f'AC{row}'].data_type, 'f')
-                                for component, (first, total, percent, weighted, template_label) in zip(
-                                        snapshot['components'], layout):
-                                    self.assertEqual(formulas[term_name].cell(12, first).value, template_label)
-                                    self.assertEqual(sheet.cell(15, weighted).value, component['weight'] / 100)
-                                    for offset, item in enumerate(item for item in component['items'] if item['active']):
-                                        self.assertEqual(sheet.cell(15, first + offset).value, item['max_score'])
-                                        self.assertEqual(sheet.cell(row, first + offset).value, student['scores'][str(item['id'])])
-                                    for formula_column in (total, percent, weighted):
-                                        if formula_column is not None:
-                                            self.assertEqual(formulas[term_name].cell(row, formula_column).data_type, 'f')
-                finally:
-                    formulas.close()
-                    values.close()
-        self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx', headers=self.other_teacher_headers).status_code, 403)
-        self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx', headers=self.admin_headers).status_code, 403)
+                self.assertEqual(exported.headers['content-type'], 'application/pdf')
+                self.assertIn('.pdf', exported.headers['content-disposition'])
+                pdf = PdfReader(BytesIO(exported.content))
+                self.assertTrue(pdf.is_encrypted)
+                self.assertFalse(int(pdf.trailer['/Encrypt']['/P']) & 8)
+                content = ' '.join(' '.join(page.extract_text().split()) for page in pdf.pages)
+                self.assertIn(f"Term {snapshot['gradebook']['term_order']}".upper(), content.upper())
+                for student in snapshot['students']:
+                    self.assertIn(student['full_name'].upper(), content.upper())
+                    self.assertIn(str(student['reported_grade']), content)
+        self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.pdf', headers=self.other_teacher_headers).status_code, 403)
+        self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.pdf', headers=self.admin_headers).status_code, 403)
         self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}', headers=self.teacher_headers).json(), snapshot)
 
 
@@ -378,7 +332,7 @@ class GradingApiTest(unittest.TestCase):
         self.assertIn('Quiz 2', blocked.json()['detail']['message'])
         self.assertIn('SANTOS, MARIA', blocked.json()['detail']['message'])
         self.assertIn('Periodical Exam', blocked.json()['detail']['message'])
-        draft_export = self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx', headers=self.teacher_headers)
+        draft_export = self.client.get(f'/api/gradebooks/{gb_id}/report.pdf', headers=self.teacher_headers)
         self.assertEqual(draft_export.status_code, 409, draft_export.text)
         restored = self.client.put(f'/api/gradebooks/{gb_id}/scores', headers=self.teacher_headers, json=scores_payload)
         self.assertEqual(restored.status_code, 200, restored.text)
@@ -404,14 +358,7 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(len(calc_data["components"]), 3)
         self.assertEqual(calc_data["reported_grade"], 100)
 
-        # 8. Workflow: Submit
-        sub_resp = self.client.post(f"/api/gradebooks/{gb_id}/submit", headers=self.teacher_headers, json={
-            "reason": "Ready for quarterly review",
-        })
-        self.assertEqual(sub_resp.status_code, 200)
-        self.assertEqual(sub_resp.json()["status"], "Submitted")
-
-        # 9. Finalize should fail because student 2 is incomplete
+        # Finalize directly from Draft. It should fail because student 2 is incomplete
         fin_fail = self.client.post(f"/api/gradebooks/{gb_id}/finalize", headers=self.teacher_headers, json={
             "reason": "Finalizing Q1 gradebook",
         })
@@ -478,222 +425,21 @@ class GradingApiTest(unittest.TestCase):
         self.assertGreaterEqual(len(audit_list), 5)
         actions = [a["action"] for a in audit_list]
         self.assertIn("Create", actions)
-        self.assertIn("Submit", actions)
+        self.assertNotIn("Submit", actions)
         self.assertIn("Finalize", actions)
         self.assertIn("Lock", actions)
         self.assertIn("Reopen", actions)
 
-    def test_04_grade_adjustment_request_flow(self) -> None:
-        struct = self.client.get("/api/admin/academic-structure", headers=self.admin_headers).json()
-        sy = struct["school_years"][0]
-        gp = struct["grading_periods"][1] if len(struct["grading_periods"]) > 1 else struct["grading_periods"][0]
-        gl = struct["grade_levels"][0]
-        sec = [s for s in struct["sections"] if s["grade_level_id"] == gl["id"]][0]
-        subj = struct["subjects"][1] if len(struct["subjects"]) > 1 else struct["subjects"][0]
-
-        # Create gradebook
-        gb_create = self.client.post("/api/gradebooks", headers=self.teacher_headers, json={
-            "school_year_id": sy["id"], "grading_period_id": gp["id"],
-            "grade_level_id": gl["id"], "section_id": sec["id"], "subject_id": subj["id"],
-        })
-        gb_id = gb_create.json()["id"]
-        gb_data = self.client.get(f"/api/gradebooks/{gb_id}", headers=self.admin_headers).json()
-        item_id = gb_data["components"][0]["items"][0]["id"]
-        student_id = gb_data["students"][0]["person_id"]
-
-        # Enter score
-        self.client.put(f"/api/gradebooks/{gb_id}/scores", headers=self.teacher_headers, json={
-            "scores": {str(student_id): [{"assessment_item_id": item_id, "score": 15.0, "status": "Scored"}]},
-            "change_reason": "Initial score entry",
-        })
-
-        # The reference's correction workflow applies after finalization.
-        complete_scores = {str(student['person_id']): [
-            {'assessment_item_id': item['id'], 'score': 15.0 if item['id'] == item_id else item['max_score'], 'status': 'Scored'}
-            for component in gb_data['components'] for item in component['items']
-        ] for student in gb_data['students']}
-        complete = self.client.put(f'/api/gradebooks/{gb_id}/scores', headers=self.teacher_headers,
-                                  json={'scores': complete_scores, 'change_reason': 'Complete scores before finalization'})
-        self.assertEqual(complete.status_code, 200, complete.text)
-        finalized = self.client.post(f'/api/gradebooks/{gb_id}/finalize', headers=self.teacher_headers,
-                                     json={'reason': 'All scores verified before requesting correction'})
-        self.assertEqual(finalized.status_code, 200, finalized.text)
-
-        # Request adjustment
-        adj_resp = self.client.post(f"/api/gradebooks/{gb_id}/adjustments", headers=self.teacher_headers, json={
-            "person_id": student_id,
-            "assessment_item_id": item_id,
-            "new_score": 18.0,
-            "new_status": "Scored",
-            "reason": "Teacher re-checked essay rubric and awarded +3 points",
-        })
-        self.assertEqual(adj_resp.status_code, 200)
-        adj_id = adj_resp.json()["id"]
-
-        # List adjustments
-        list_adj = self.client.get(f"/api/gradebooks/{gb_id}/adjustments", headers=self.admin_headers)
-        self.assertEqual(list_adj.status_code, 200)
-        self.assertEqual(len(list_adj.json()), 1)
-        self.assertEqual(list_adj.json()[0]["status"], "Pending")
-
-        # Approve adjustment
-        app_resp = self.client.put(f"/api/adjustment-requests/{adj_id}", headers=self.records_headers, json={
-            "status": "Approved",
-            "note": "Approved per submitted revised rubric",
-        })
-        self.assertEqual(app_resp.status_code, 200)
-        self.assertEqual(app_resp.json()["status"], "Approved")
-
-        # Verify score is now 18.0
-        gb_after = self.client.get(f"/api/gradebooks/{gb_id}", headers=self.admin_headers).json()
-        student_after = next(s for s in gb_after["students"] if s["person_id"] == student_id)
-        self.assertEqual(student_after["scores"][str(item_id)], 18.0)
-
-
-    def test_05_records_officer_only_reviews_teacher_adjustments(self):
-        structure = self.client.get('/api/admin/academic-structure', headers=self.admin_headers).json()
-        teacher_structure = self.client.get('/api/admin/academic-structure?context=grading', headers=self.teacher_headers).json()
-        other_teacher_structure = self.client.get('/api/admin/academic-structure?context=grading', headers=self.other_teacher_headers).json()
-        self.assertTrue(teacher_structure['sections'])
-        self.assertEqual(other_teacher_structure['sections'], [])
-        self.assertEqual(other_teacher_structure['grade_levels'], [])
-        section = structure['sections'][0]
-        period = next(row for row in structure['grading_periods'] if row['term_order'] == 3)
-        context = {'school_year_id': period['school_year_id'], 'grading_period_id': period['id'],
-                   'grade_level_id': section['grade_level_id'], 'section_id': section['id'], 'subject_id': structure['subjects'][0]['id']}
-        books_before = self.client.get('/api/gradebooks', headers=self.admin_headers).json()
-        empty = self.client.get('/api/gradebooks/lookup', headers=self.admin_headers, params=context)
-        self.assertEqual(empty.status_code, 200, empty.text)
-        self.assertIsNone(empty.json()['id'])
-        self.assertEqual(len(self.client.get('/api/gradebooks', headers=self.admin_headers).json()), len(books_before))
-        denied = self.client.post('/api/gradebooks', headers=self.admin_headers, json=context)
-        self.assertEqual(denied.status_code, 403, denied.text)
-        created = self.client.post('/api/gradebooks', headers=self.teacher_headers, json=context)
-        self.assertEqual(created.status_code, 200, created.text)
-        book_id = created.json()['id']
-        admin_records = self.client.get('/api/gradebooks', headers=self.admin_headers)
-        self.assertEqual(admin_records.status_code, 200, admin_records.text)
-        self.assertIn(book_id, {book['id'] for book in admin_records.json()})
-        lookup = self.client.get('/api/gradebooks/lookup', headers=self.admin_headers, params=context)
-        self.assertEqual(lookup.status_code, 200, lookup.text)
-        self.assertEqual(lookup.json()['id'], book_id)
-        data = self.client.get(f'/api/gradebooks/{book_id}', headers=self.teacher_headers).json()
-        self.assertEqual(data['gradebook']['grading_period_name'], period['name'])
-        admin_view = self.client.get(f'/api/gradebooks/{book_id}', headers=self.admin_headers)
-        self.assertEqual(admin_view.status_code, 200, admin_view.text)
-        self.assertEqual(admin_view.json()['students'], data['students'])
-        self.assertEqual(admin_view.json()['statistics'], data['statistics'])
-        self.assertEqual(data['gradebook']['teacher_name'], self.teacher['full_name'])
-        components = [{**component, 'weight': weight,
-                       'items': component['items'] if component['component_type'] == 'Term Examinations' else component['items'][:1]}
-                      for component, weight in zip(data['components'], (25, 45, 30))]
-        scores = {str(student['person_id']): [{'assessment_item_id': activity['id'], 'score': activity['max_score'], 'status': 'Scored'}
-                  for component in components for activity in component['items']] for student in data['students']}
-        for path, payload in [('components', {'components': components, 'change_reason': 'Unauthorized admin assessment setup'}),
-                              ('scores', {'scores': scores, 'change_reason': 'Unauthorized admin score modification'})]:
-            denied = self.client.put(f'/api/gradebooks/{book_id}/{path}', headers=self.admin_headers, json=payload)
-            self.assertEqual(denied.status_code, 403, denied.text)
-        for action in ('submit', 'finalize', 'lock', 'reopen'):
-            denied = self.client.post(f'/api/gradebooks/{book_id}/{action}', headers=self.admin_headers,
-                                      json={'reason': 'Unauthorized admin class record action'})
-            self.assertEqual(denied.status_code, 403, denied.text)
-        for action in ('finalize', 'reopen'):
-            denied = self.client.post(f'/api/gradebook/legacy-record/{action}', headers=self.admin_headers,
-                                      json={'reason': 'Unauthorized legacy class record action'})
-            self.assertEqual(denied.status_code, 403, denied.text)
-        setup = self.client.put(f'/api/gradebooks/{book_id}/components', headers=self.teacher_headers,
-                               json={'components': components, 'change_reason': 'Teacher configured quarterly activities'})
-        self.assertEqual(setup.status_code, 200, setup.text)
-        saved = self.client.put(f'/api/gradebooks/{book_id}/scores', headers=self.teacher_headers,
-                               json={'scores': scores, 'change_reason': 'Teacher completed quarterly scores'})
-        self.assertEqual(saved.status_code, 200, saved.text)
-        for action in ('submit', 'finalize'):
-            result = self.client.post(f'/api/gradebooks/{book_id}/{action}', headers=self.teacher_headers,
-                                     json={'reason': 'Teacher verified complete term results'})
-            self.assertEqual(result.status_code, 200, result.text)
-        item = components[0]['items'][0]
-        learner_id = data['students'][0]['person_id']
-        proposal = {'person_id': learner_id, 'assessment_item_id': item['id'], 'new_score': item['max_score'] - 1,
-                    'new_status': 'Scored', 'reason': 'Teacher reviewed the quiz rubric'}
-        self.assertEqual(self.client.post(f'/api/gradebooks/{book_id}/adjustments', headers=self.admin_headers, json=proposal).status_code, 403)
-        request = self.client.post(f'/api/gradebooks/{book_id}/adjustments', headers=self.teacher_headers, json=proposal)
-        self.assertEqual(request.status_code, 200, request.text)
-        request_id = request.json()['id']
-        before = self.client.get(f'/api/gradebooks/{book_id}', headers=self.teacher_headers).json()
-        self.assertEqual(before['students'][0]['scores'][str(item['id'])], item['max_score'])
-        review_payload = {'status': 'Approved', 'note': 'Approved after reviewing the teacher rubric'}
-        self.assertEqual(self.client.put(f'/api/adjustment-requests/{request_id}', headers=self.teacher_headers, json=review_payload).status_code, 403)
-        self.assertEqual(self.client.put(f'/api/adjustment-requests/{request_id}', headers=self.admin_headers, json=review_payload).status_code, 403)
-        self.assertEqual(self.client.delete(f'/api/adjustment-requests/{request_id}', headers=self.admin_headers).status_code, 403)
-        listed = self.client.get('/api/admin/grade-adjustments', headers=self.admin_headers)
-        self.assertEqual(listed.status_code, 200, listed.text)
-        self.assertIn(request_id, {row['id'] for row in listed.json()})
-        reviewed = self.client.put(f'/api/adjustment-requests/{request_id}', headers=self.records_headers, json=review_payload)
-        self.assertEqual(reviewed.status_code, 200, reviewed.text)
-        notifications = self.client.get('/api/teacher/grade-adjustment-notifications', headers=self.teacher_headers)
-        self.assertEqual(notifications.status_code, 200, notifications.text)
-        notification = next(item for item in notifications.json() if item['id'] == request_id)
-        self.assertEqual(notification['status'], 'Approved')
-        self.assertEqual(notification['grading_period_name'], period['name'])
-        self.assertEqual(self.client.get('/api/teacher/grade-adjustment-notifications', headers=self.other_teacher_headers).json(), [])
-        ignored = self.client.post('/api/teacher/grade-adjustment-notifications/read', headers=self.other_teacher_headers,
-                                   json={'request_ids': [request_id]})
-        self.assertEqual(ignored.status_code, 200, ignored.text)
-        self.assertEqual(ignored.json()['read'], 0)
-        self.assertIn(request_id, {item['id'] for item in self.client.get('/api/teacher/grade-adjustment-notifications', headers=self.teacher_headers).json()})
-        self.assertEqual(self.client.post('/api/teacher/grade-adjustment-notifications/read', headers=self.teacher_headers,
-                                          json={'request_ids': [request_id]}).status_code, 200)
-        remaining = self.client.get('/api/teacher/grade-adjustment-notifications', headers=self.teacher_headers).json()
-        self.assertEqual({item['id'] for item in remaining}, {item['id'] for item in notifications.json()} - {request_id})
-        after = self.client.get(f'/api/gradebooks/{book_id}', headers=self.teacher_headers).json()
-        self.assertEqual(after['students'][0]['scores'][str(item['id'])], proposal['new_score'])
-        self.assertEqual(after['gradebook']['status'], 'Finalized')
-        self.assertEqual(self.client.put(f'/api/gradebooks/{book_id}/scores', headers=self.teacher_headers,
-                         json={'scores': scores, 'change_reason': 'Attempt direct edit after finalization'}).status_code, 422)
-        locked = self.client.post(f'/api/gradebooks/{book_id}/lock', headers=self.records_headers,
-                                 json={'reason': 'Approved term archived by records officer'})
-        self.assertEqual(locked.status_code, 200, locked.text)
-        locked_request = self.client.post(f'/api/gradebooks/{book_id}/adjustments', headers=self.teacher_headers, json={**proposal, 'new_score': item['max_score'] - 2})
-        self.assertEqual(locked_request.status_code, 200, locked_request.text)
-        reviewed = self.client.put(f"/api/adjustment-requests/{locked_request.json()['id']}", headers=self.records_headers, json=review_payload)
-        self.assertEqual(reviewed.status_code, 200, reviewed.text)
-        after = self.client.get(f'/api/gradebooks/{book_id}', headers=self.teacher_headers).json()
-        self.assertEqual(after['gradebook']['status'], 'Locked')
-        self.assertEqual(after['students'][0]['scores'][str(item['id'])], item['max_score'] - 2)
-        rejected_request = self.client.post(f'/api/gradebooks/{book_id}/adjustments', headers=self.teacher_headers, json=proposal)
-        self.assertEqual(rejected_request.status_code, 200, rejected_request.text)
-        rejected = self.client.put(f"/api/adjustment-requests/{rejected_request.json()['id']}", headers=self.records_headers,
-                                   json={'status': 'Rejected', 'note': 'Rubric does not support the requested change'})
-        self.assertEqual(rejected.status_code, 200, rejected.text)
-        rejection_notice = self.client.get('/api/teacher/grade-adjustment-notifications', headers=self.teacher_headers).json()
-        self.assertIn('Rejected', {item['status'] for item in rejection_notice})
-        final = self.client.get(f'/api/gradebooks/{book_id}', headers=self.teacher_headers).json()
-        self.assertEqual(final['students'][0]['scores'][str(item['id'])], item['max_score'] - 2)
-        score_before_criteria = final['students'][0]['scores'][str(item['id'])]
-        criteria = [{'component_id': component['id'], 'weight': weight}
-                    for component, weight in zip(final['components'], (20, 50, 30))]
-        criteria_request = self.client.post(f'/api/gradebooks/{book_id}/criteria-adjustments', headers=self.teacher_headers,
-                                            json={'components': criteria, 'reason': 'Teacher requests revised assessment criteria'})
-        self.assertEqual(criteria_request.status_code, 200, criteria_request.text)
-        criteria_id = criteria_request.json()['id']
-        self.assertLess(criteria_id, 0)
-        self.assertIn(criteria_id, {row['id'] for row in self.client.get('/api/admin/grade-adjustments', headers=self.admin_headers).json()})
-        self.assertEqual(self.client.put(f'/api/adjustment-requests/{criteria_id}', headers=self.admin_headers,
-                                         json={'status': 'Approved', 'note': 'Admin cannot approve criteria changes'}).status_code, 403)
-        approved_criteria = self.client.put(f'/api/adjustment-requests/{criteria_id}', headers=self.records_headers,
-                                            json={'status': 'Approved', 'note': 'Approved revised assessment criteria'})
-        self.assertEqual(approved_criteria.status_code, 200, approved_criteria.text)
-        after_criteria = self.client.get(f'/api/gradebooks/{book_id}', headers=self.teacher_headers).json()
-        self.assertEqual([component['weight'] for component in after_criteria['components']], [20, 50, 30])
-        self.assertEqual(after_criteria['students'][0]['scores'][str(item['id'])], score_before_criteria)
-        self.assert_exports_match_gradebook(book_id)
-        self.assertIn(criteria_id, {row['id'] for row in self.client.get('/api/teacher/grade-adjustment-notifications', headers=self.teacher_headers).json()})
-        self.assertEqual(self.client.get(f'/api/gradebooks/{book_id}', headers=self.other_teacher_headers).status_code, 403)
-        self.assertEqual(self.client.get('/api/gradebooks/lookup', headers=self.other_teacher_headers, params=context).status_code, 403)
-        denied_creation = self.client.post('/api/gradebooks', headers=self.other_teacher_headers, json=context)
-        self.assertEqual(denied_creation.status_code, 422, denied_creation.text)
-        self.assertIn('not assigned', denied_creation.json()['detail'])
-        self.assertEqual(self.client.get('/api/admin/grade-adjustments', headers=self.teacher_headers).status_code, 403)
+    def test_04_grade_change_request_routes_are_retired(self):
+        for method, path, headers in (
+            ('POST', '/api/gradebooks/1/adjustments', self.teacher_headers),
+            ('POST', '/api/gradebooks/1/criteria-adjustments', self.teacher_headers),
+            ('GET', '/api/teacher/grade-adjustment-notifications', self.teacher_headers),
+            ('GET', '/api/admin/grade-adjustments', self.admin_headers),
+            ('PUT', '/api/adjustment-requests/1', self.admin_headers),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.request(method, path, headers=headers, json={}).status_code, 404)
 
     def test_06_admin_cannot_change_grading_policies(self):
         policy = self.client.get('/api/grading-policies', headers=self.admin_headers).json()[0]

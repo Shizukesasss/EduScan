@@ -88,7 +88,7 @@ Camera frame
 - `src/pages/Dashboard/Dashboard.jsx` — administrator summary of daily attendance, gate events, SMS status, and reporting shortcuts.
 - `src/pages/Scanner/Scanner.jsx` — controls camera access, liveness-aware multi-face recognition, service health indicators, controlled recognition restart, recent events, enrollment access, and normal/full-screen presentation.
 - `src/pages/Attendance/Attendance.jsx` — displays all-school or adviser-scoped attendance, groups secondary actions, downloads deduplicated alphabetical logs, runs daily closing or audited clean-slate reset, and records attributable corrections.
-- `src/pages/Grading/Grading.jsx` — shared class-record workspace. Teachers enter scores for authorized classes; administrators can view records and review teacher adjustment requests, without directly editing scores or grading policies.
+- `src/pages/Grading/Grading.jsx` — shared class-record workspace. Assigned teachers enter scores and finalize class records. Reviewers can view authorized records.
 - `src/pages/Reports/Reports.jsx` — date-range student/personnel summaries, official SF2 generation, and hashed report review/approval history.
 - `src/pages/Oversight/Oversight.jsx` — unified audit, recognition review, SMS reconciliation, retention/legal-hold, service-health, and backup-schedule workspace filtered by role.
 - `src/pages/Setup/SystemSetup.jsx` — attendance rules, class and personnel duty schedules, special calendars, SMS gateway configuration and non-sending reachability diagnostics, privacy/legal evidence, access rules, and correction procedures.
@@ -108,7 +108,6 @@ Camera frame
 - `src/components/Grading/GradingSheet.jsx` — renders the class-record spreadsheet and respects the parent page's read-only permissions.
 - `src/components/Grading/AssessmentConfig.jsx` — teacher assessment configuration.
 - `src/components/Grading/GradebookActions.jsx` — permission-aware class-record actions and exports.
-- `src/components/Grading/AdjustmentRequestsModal.jsx` and `GlobalAdjustmentsTab.jsx` — teacher adjustment requests and authorized review.
 - `src/components/Grading/GradebookSummary.jsx`, `CalculationBreakdown.jsx`, `AuditHistory.jsx`, and `ValidationChecklist.jsx` — class totals, calculation details, history, and completion checks.
 - `src/services/gradingCalculations.js` and `gradingWorkflow.js` — grading previews and validated score-update payloads; the backend remains authoritative.
 - `src/components/Teacher/SF2ReportGenerator.jsx` — restricts advisers to assigned sections and provides official SF2 generation plus grouped template and temporary-log support actions.
@@ -139,7 +138,9 @@ Camera frame
 - `backend/app/services/backup.py` — backs up SQLite, MySQL, or PostgreSQL with matching secrets/artifacts, encrypts and hashes the package, records inventory/model/key metadata, and verifies/stages two-phase restoration. PostgreSQL recovery is documented in `docs/POSTGRES_RECOVERY.md`.
 - `backend/app/services/audit.py` — creates redacted before/after snapshots and unified attributable system-audit entries.
 - `backend/app/services/grading.py` — class-record persistence, ownership, score validation, workflow, adjustments, and calculated results. `grading_engine.py` contains the policy-driven calculations.
-- `backend/app/services/reports.py` — generates printable/XLSX attendance and grade summaries and registers immutable report metadata/hashes.
+- `backend/app/services/reports.py` — assembles attendance and grade reports and registers PDF snapshots with SHA-256 hashes.
+- `backend/app/services/excel_pdf.py` — exports the original workbook print layout and restricts editing in the resulting PDF.
+- `backend/app/services/report_pdf.py` — renders internal gate logs and SMS delivery logs.
 - `backend/app/services/export_files.py` — allocates separate output folders for concurrent report requests while preserving download filenames.
 - `backend/app/services/gate_exports.py` — coalesces daily-log updates and retains failed jobs for retry while the backend process runs.
 - `backend/app/services/retention.py` — previews approved retention eligibility, applies legal holds, performs bounded operational cleanup, and issues disposal certificates.

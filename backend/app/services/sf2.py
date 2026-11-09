@@ -392,3 +392,19 @@ def generate_temporary_log(db: Session, day: date, grade: str | None = None,
     finally:
         temporary.unlink(missing_ok=True)
     return output
+
+
+def refresh_temporary_log_pdf(db: Session, day: date) -> Path:
+    from .report_pdf import gate_log_pdf
+
+    source = generate_temporary_log(db, day, snapshot=True)
+    temporary = source.with_suffix('.pdf')
+    target = EXPORT_DIR / temporary.name
+    try:
+        temporary.write_bytes(gate_log_pdf(source))
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+        source.unlink(missing_ok=True)
+        source.parent.rmdir()
+    return target

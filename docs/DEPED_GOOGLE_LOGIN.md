@@ -42,13 +42,31 @@ After verifying the linked accounts, set:
 EDUSCAN_DEPED_ONLY=true
 ```
 
-Restart the API. The login page then shows only Google sign-in, `/api/auth/login` rejects passwords, and previously issued password sessions are rejected even if they have not expired. New verified DepEd users receive teacher access automatically. School administrators assign roles and classes in the existing Accounts and academic setup screens. No assignment is inferred from a Google display name.
+Restart the API. With EduScan password recovery disabled, the login page shows Google sign-in and password sessions are rejected. New verified DepEd users receive teacher access automatically. School administrators assign roles and classes in the existing Accounts and academic setup screens. No assignment is inferred from a Google display name.
 
-If the client ID is absent in strict mode, login fails closed with a setup message. Strict mode cannot fall back to password access when Google is unavailable. Keep the server configuration under school-operator control. Legacy mode defaults to `false` for `EDUSCAN_DEPED_ONLY` only to support the explicit migration described above; it is **not the completed DepEd-only rollout** until you set it to `true`.
+Keep the server configuration under school-operator control. Legacy mode defaults to `false` for `EDUSCAN_DEPED_ONLY` to support the migration described above.
+
+## Optional EduScan password recovery
+
+The school can enable password sign-in for already verified DepEd accounts. Set these values in `backend/.env` using the school’s SMTP relay, then restart the API.
+
+```dotenv
+EDUSCAN_DEPED_PASSWORD_RECOVERY=true
+SMTP_HOST=smtp.example.edu
+SMTP_PORT=587
+SMTP_USE_SSL=false
+SMTP_FROM=eduscan@example.edu
+SMTP_USERNAME=
+SMTP_PASSWORD=
+```
+
+Port 587 uses STARTTLS. For a relay that uses implicit TLS, set `SMTP_USE_SSL=true` and use its port, commonly 465. Fill in the username and password if the relay requires authentication. Keep SMTP credentials in the local environment file.
+
+An active user signs in with DepEd Google at least once, then selects **Set or reset your DepEd EduScan password** on the login page. EduScan sends an eight-digit, single-use code to the verified mailbox. After entering the code and choosing a password, the user can sign in to EduScan with their DepEd email and the new password. In DepEd-only mode, this setting enables the EduScan password option for verified DepEd accounts.
 
 ## Account security and verification
 
-Google-linked users manage their password through their DepEd Google account. EduScan rejects local password login/reset for those accounts. Administrators can still deactivate users and change their EduScan roles; Google sign-in does not override an inactive account.
+Google manages the DepEd Google account password. The optional SMTP flow manages a separate EduScan password. Administrators can deactivate accounts and change their EduScan roles.
 
 The backend uses Google's official `google-auth` library to validate signatures, audience, issuer, timestamps, and the login nonce, then checks verified email and the exact hosted/email domain. It links accounts by stable Google subject, with explicit email reservation only for the setup operation above. The popup callback submits JSON from an authorized origin rather than Google's redirect-form flow.
 

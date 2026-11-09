@@ -41,15 +41,13 @@ export function getExportReviewCopy(isDraftPreview) {
       title: 'Preview Draft class record',
       description: 'This Draft preview uses saved scores and will not change the gradebook status or scores.',
       label: 'DRAFT PREVIEW — NOT FINAL',
-      buttonLabel: 'Generate Draft Preview',
     };
   }
 
   return {
     title: 'Review class record export',
-    description: 'Confirm these saved details before generating the Excel file.',
+    description: 'Review these saved details, then choose a file format.',
     label: '',
-    buttonLabel: 'Generate XLSX',
   };
 }
 

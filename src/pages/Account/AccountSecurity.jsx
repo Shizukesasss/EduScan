@@ -23,6 +23,11 @@ export default function AccountSecurity() {
     setBusy(true);
     try {
       await api.post('/auth/change-password', { current_password: currentPassword, new_password: newPassword });
+      if (auth.provider() === 'deped_password') {
+        auth.clear();
+        window.location.replace('/login');
+        return;
+      }
       auth.passwordChanged();
       window.location.replace(destination());
     } catch (err) {

@@ -19,6 +19,8 @@ from .models import User
 
 
 bearer = HTTPBearer(auto_error=False)
+DEPED_PASSWORD_PREFIX = "deped:"
+DEPED_PASSWORD_PROVIDER = "deped_password"
 
 
 def hash_password(password: str) -> str:
@@ -46,11 +48,22 @@ def _unb64(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
+def has_deped_password(user: User) -> bool:
+    return bool(user.google_sub and user.google_email and user.google_email.endswith("@deped.gov.ph")
+                and user.password_hash.startswith(DEPED_PASSWORD_PREFIX))
+
+
+def _deped_password_stamp(user: User) -> str:
+    return hashlib.sha256(f"{user.google_email}:{user.password_hash}".encode()).hexdigest()
+
+
 def create_token(user: User, lifetime: timedelta = timedelta(hours=8), *, auth_provider: str = "password") -> str:
     payload = {"sub": user.id, "role": user.role, "name": user.full_name, "exp": int(time.time() + lifetime.total_seconds())}
     payload["auth_provider"] = auth_provider
-    if auth_provider == "google":
+    if auth_provider in {"google", DEPED_PASSWORD_PROVIDER}:
         payload["google_sub"] = user.google_sub
+    if auth_provider == DEPED_PASSWORD_PROVIDER:
+        payload["password_stamp"] = _deped_password_stamp(user)
     body = _b64(json.dumps(payload, separators=(",", ":")).encode())
     signature = _b64(hmac.new(settings.secret_key.encode(), body.encode(), hashlib.sha256).digest())
     return f"{body}.{signature}"
@@ -77,7 +90,12 @@ def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bear
     user = db.get(User, int(payload["sub"]))
     if not user or not user.active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is inactive")
-    if settings.deped_only or user.google_email:
+    if payload.get("auth_provider") == DEPED_PASSWORD_PROVIDER:
+        if (not settings.deped_password_recovery or not has_deped_password(user)
+                or payload.get("google_sub") != user.google_sub
+                or payload.get("password_stamp") != _deped_password_stamp(user)):
+            raise HTTPException(status_code=401, detail="Please sign in again")
+    elif settings.deped_only or user.google_email:
         if (payload.get("auth_provider") != "google" or not user.google_sub
                 or payload.get("google_sub") != user.google_sub
                 or not user.google_email or user.google_email.split("@")[-1] != "deped.gov.ph"):

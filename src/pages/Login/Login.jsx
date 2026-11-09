@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, auth } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 import { loadGoogleIdentity, renderGoogleSignIn, workspaceFor } from '../../services/googleIdentity';
+import DepedPasswordRecovery from './DepedPasswordRecovery';
 
 function formatTeacherGreeting(rawName) {
   const trimmed = String(rawName || '').trim();
@@ -120,7 +121,9 @@ export default function Login() {
         <div className="login-form-panel">
           <div className="login-form-inner">
             <h2>Welcome back</h2>
-            <p className="login-intro">{config?.deped_only ? 'Sign in with your DepEd Google account.' : 'Sign in with your existing school account.'}</p>
+            <p className="login-intro">{config?.deped_only && !config.deped_password_recovery
+              ? 'Sign in with your DepEd Google account.'
+              : 'Sign in with your school account.'}</p>
 
             {error && (
               <div className="login-error" role="alert">
@@ -128,14 +131,16 @@ export default function Login() {
               </div>
             )}
 
-            {config && !config.deped_only && <details className="login-legacy" open>
-              <summary>Existing school account</summary>
-              <p className="section-copy">Password access is available during the school’s transition to DepEd Google sign-in.</p>
+            {config && (!config.deped_only || config.deped_password_recovery) && <details className="login-legacy" open>
+              <summary>{config.deped_only ? 'Use an EduScan password' : 'Existing school account'}</summary>
+              <p className="section-copy">{config.deped_password_recovery
+                ? 'Use the EduScan password set for your account.'
+                : 'Password access is available during the school’s transition to DepEd Google sign-in.'}</p>
               <form onSubmit={handleLogin} className="login-form">
                 <div>
-                  <label htmlFor="login-username">Username</label>
+                  <label htmlFor="login-username">{config.deped_only ? 'DepEd email' : config.deped_password_recovery ? 'Username or DepEd email' : 'Username'}</label>
                   <div className="login-input-wrap">
-                    <input id="login-username" autoComplete="username" type="text" placeholder="Enter your username" className="input-field" value={username} onChange={(e) => setUsername(e.target.value)} required />
+                    <input id="login-username" autoComplete="username" type={config.deped_only ? 'email' : 'text'} className="input-field" value={username} onChange={(e) => setUsername(e.target.value)} required />
                   </div>
                 </div>
 
@@ -154,6 +159,12 @@ export default function Login() {
                 </button>
               </form>
             </details>}
+
+            {config?.deped_password_recovery && <DepedPasswordRecovery onReset={(email) => {
+              setUsername(email);
+              setPassword('');
+              setError('');
+            }} />}
 
             <div className="login-google">
               <div className="login-access-note">

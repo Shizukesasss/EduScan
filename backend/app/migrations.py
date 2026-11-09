@@ -43,6 +43,7 @@ MIGRATIONS = (
     ("0030_subject_names_unique_by_category", "Scope subject-name uniqueness to category while retaining globally unique codes"),
     ("0031_subject_names_group_shs_categories", "Treat legacy SHS category labels as one level for subject-name uniqueness"),
     ("0032_google_identity", "Link verified DepEd Google subjects and reserve school-approved account emails"),
+    ("0033_deped_password_recovery", "Store time-limited password recovery challenges for verified DepEd accounts"),
 )
 
 
@@ -410,6 +411,8 @@ def run_migrations(engine: Engine) -> list[str]:
                 _add_column_if_missing(connection, "subjects", "is_elective", "BOOLEAN NOT NULL DEFAULT FALSE")
                 _add_column_if_missing(connection, "subjects", "elective_track", "VARCHAR(40) NULL")
                 Base.metadata.create_all(bind=connection)
+            elif version == "0033_deped_password_recovery":
+                _models.DepedPasswordReset.__table__.create(bind=connection, checkfirst=True)
             elif version == "0018_grade_criteria_adjustment_requests":
                 from .models_grading import GradeCriteriaAdjustmentRequest
                 GradeCriteriaAdjustmentRequest.__table__.create(bind=connection, checkfirst=True)

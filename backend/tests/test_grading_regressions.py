@@ -32,7 +32,7 @@ from app.services.grading_engine import calculate_weighted_grade  # noqa: E402
 from app.schemas import SchedulePayload, SectionPayload, SubjectPayload, SubjectTeachingAssignmentPayload  # noqa: E402
 from app.main import academic_structure, ensure_report_access, report_parameters_allowed, report_sections, schedules, save_schedule, save_section, save_subject, save_subject_teaching_assignments  # noqa: E402
 from app.main import finalize_gradebook_new_endpoint, validate_gradebook_endpoint  # noqa: E402
-from app.main import finalize_gradebook as finalize_legacy_gradebook, gradebook_report_xlsx_new  # noqa: E402
+from app.main import finalize_gradebook as finalize_legacy_gradebook, gradebook_report_pdf_new  # noqa: E402
 from app.schemas import GradebookActionPayload  # noqa: E402
 from app.schemas_grading import GradebookWorkflowPayload  # noqa: E402
 from app.services.academic import change_deleted_reference  # noqa: E402
@@ -141,7 +141,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.db.commit()
         readable = [('GET', '/api/gradebooks'), ('GET', '/api/gradebooks/{gradebook_id}'),
                     ('GET', '/api/reports/history'), ('GET', '/api/reports/history/{report_id}/download'),
-                    ('GET', '/api/gradebooks/{gradebook_id}/report.xlsx'),
+                    ('GET', '/api/gradebooks/{gradebook_id}/report.pdf'),
                     ('GET', '/api/gradebooks/{gradebook_id}/audit')]
         blocked = [('PUT', '/api/gradebooks/{gradebook_id}/scores'),
                    ('PUT', '/api/gradebooks/{gradebook_id}/components'),
@@ -149,10 +149,6 @@ class ClassRecordRegressionTest(unittest.TestCase):
                    ('POST', '/api/gradebooks/{gradebook_id}/finalize'),
                    ('POST', '/api/gradebooks/{gradebook_id}/reopen'),
                    ('POST', '/api/gradebooks/{gradebook_id}/lock'),
-                   ('PUT', '/api/adjustment-requests/{request_id}'),
-                   ('DELETE', '/api/adjustment-requests/{request_id}'),
-                   ('POST', '/api/gradebooks/{gradebook_id}/adjustments'),
-                   ('POST', '/api/gradebooks/{gradebook_id}/criteria-adjustments'),
                    ('POST', '/api/reports/history/{report_id}/review'),
                    ('PUT', '/api/admin/school-heads')]
         for method, path in readable + blocked:
@@ -357,14 +353,14 @@ class ClassRecordRegressionTest(unittest.TestCase):
         book = self.create()
         self.score_student(book, 80)
         with self.assertRaises(HTTPException) as draft:
-            gradebook_report_xlsx_new(book.id, region='V', division='V', school_id='301874', db=self.db, user=self.admin)
+            gradebook_report_pdf_new(book.id, region='V', division='V', school_id='301874', db=self.db, user=self.admin)
         self.assertEqual(draft.exception.status_code, 409)
         self.assertIn('GRADEBOOK_NOT_FINALIZED', {issue['code'] for issue in draft.exception.detail['issues']})
         for status in ('Finalized', 'Locked'):
             book.status = status
             self.db.commit()
             with self.assertRaises(HTTPException) as incomplete:
-                gradebook_report_xlsx_new(book.id, region='V', division='V', school_id='301874', db=self.db, user=self.admin)
+                gradebook_report_pdf_new(book.id, region='V', division='V', school_id='301874', db=self.db, user=self.admin)
             self.assertEqual(incomplete.exception.status_code, 409)
             self.assertIn('SCORE_MISSING', {issue['code'] for issue in incomplete.exception.detail['issues']})
 
@@ -1459,11 +1455,20 @@ class ClassRecordRegressionTest(unittest.TestCase):
             books.append(book)
         snapshots = {book.id: grading.get_gradebook_full(self.db, book.id) for book in books}
         with patch.object(reports, 'EXPORT_DIR', Path(TEST_DIR.name)):
-            response = gradebook_report_xlsx_new(books[0].id, region='V', division='V', school_id='301874',
+            response = gradebook_report_pdf_new(books[0].id, region='V', division='V', school_id='301874',
                                                 all_terms=True, db=self.db, user=officer)
             self.assertIn('AllTerms', response.filename)
-            formulas = openpyxl.load_workbook(response.path)
-            values = openpyxl.load_workbook(response.path, data_only=True)
+            self.assertEqual(response.media_type, 'application/pdf')
+            from pypdf import PdfReader
+            pdf = PdfReader(response.path)
+            content = ' '.join(page.extract_text() for page in pdf.pages)
+            for book in books:
+                self.assertIn(f'Term {book.term_order}', content)
+            workbook_path = reports.generate_gradebook_report_xlsx(
+                self.db, books[0].id, 'V', 'V', '301874', all_terms=True,
+            )
+            formulas = openpyxl.load_workbook(workbook_path)
+            values = openpyxl.load_workbook(workbook_path, data_only=True)
             try:
                 self.assertEqual(values.sheetnames, ['INPUT DATA', 'Term 1', 'Term 2', 'Term 3'])
                 for book in books:
@@ -1491,14 +1496,14 @@ class ClassRecordRegressionTest(unittest.TestCase):
             finally:
                 formulas.close()
                 values.close()
-            single = gradebook_report_xlsx_new(books[0].id, region='V', division='V', school_id='301874',
+            single = gradebook_report_pdf_new(books[0].id, region='V', division='V', school_id='301874',
                                               all_terms=False, db=self.db, user=officer)
             self.assertIn('Term1', single.filename)
             self.assertEqual(snapshots, {book.id: grading.get_gradebook_full(self.db, book.id) for book in books})
             books[1].status = 'Draft'
             self.db.commit()
             with self.assertRaises(HTTPException) as blocked:
-                gradebook_report_xlsx_new(books[0].id, region='V', division='V', school_id='301874',
+                gradebook_report_pdf_new(books[0].id, region='V', division='V', school_id='301874',
                                          all_terms=True, db=self.db, user=officer)
             self.assertEqual(blocked.exception.status_code, 409)
 

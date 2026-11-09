@@ -19,12 +19,8 @@ export default function GradebookActions({
   onLock,
   onReopen,
   onOpenAudit,
-  onOpenAdjustments,
-  adjustmentCount = 0,
   onToggleValidation,
-  onExportXlsx,
-  onExportAllTerms,
-  onExportDraftPreview,
+  onExport,
   disabled = false,
   onValidateFinalize,
   onValidateExport,
@@ -49,7 +45,7 @@ export default function GradebookActions({
   const [finalizationIssue, setFinalizationIssue] = useState(null);
   const [exportRequest, setExportRequest] = useState(null);
   const [exportValidation, setExportValidation] = useState({ issues: [], loading: false, error: '', checked: false });
-  const [generatingExport, setGeneratingExport] = useState(false);
+  const [generatingExport, setGeneratingExport] = useState(null);
   const finalizeButtonRef = useRef(null);
   const exportDialogRef = useRef(null);
   const exportTriggerRef = useRef(null);
@@ -90,17 +86,15 @@ export default function GradebookActions({
 
   const closeExportReview = () => setExportRequest(null);
 
-  const confirmExport = async () => {
-    if (generatingExport || exportValidation.loading || exportValidation.error || !exportValidation.checked || exportValidation.issues.length) return;
-    const request = exportRequest;
-    setGeneratingExport(true);
+  const exportDisabled = disabled || isSaving || Boolean(generatingExport) || exportValidation.loading
+    || Boolean(exportValidation.error) || !exportValidation.checked || exportValidation.issues.length > 0;
+
+  const confirmExport = async (format) => {
+    if (exportDisabled) return;
+    setGeneratingExport(format);
     setExportValidation((current) => ({ ...current, error: '' }));
     try {
-      const result = request === 'draft_preview'
-        ? await onExportDraftPreview?.()
-        : request === 'all_terms'
-          ? await onExportAllTerms?.()
-          : await onExportXlsx?.();
+      const result = await onExport?.(exportRequest, format);
       if (result?.issues) {
         setExportValidation({ issues: result.issues, loading: false, error: '', checked: true });
         return;
@@ -109,7 +103,7 @@ export default function GradebookActions({
     } catch (error) {
       setExportValidation((current) => ({ ...current, error: error.message || 'The export could not be generated.', checked: false }));
     } finally {
-      setGeneratingExport(false);
+      setGeneratingExport(null);
     }
   };
 
@@ -281,18 +275,6 @@ export default function GradebookActions({
             </button>
           )}
 
-          {(isFinalized || isLocked) && canEdit && (
-            <button
-              type="button"
-              className="btn btn-secondary text-primary"
-              onClick={onOpenAdjustments}
-              disabled={disabled || isSaving}
-              title="Request post-finalization grade adjustments"
-            >
-              <span>Grade Adjustments</span>
-              {adjustmentCount > 0 && <span className="notification-badge">{adjustmentCount}</span>}
-            </button>
-          )}
         </div>
 
         <div className="flex flex-wrap gap-2 items-center secondary-action-group">
@@ -306,25 +288,25 @@ export default function GradebookActions({
             disabled={disabled || isSaving}
             title="Preview this term using saved scores. The clearly marked Draft file will not change the saved record."
           >
-            <span>Preview Draft XLSX</span>
+            <span>Export Draft Preview</span>
           </button>}
           {userRole !== 'admin' && <button
             type="button" 
             className="btn btn-secondary" 
             onClick={(event) => openExportReview('term', event)}
             disabled={disabled || isSaving || (!isFinalized && !isLocked)}
-            title={(!isFinalized && !isLocked) ? "Gradebook must be Finalized before exporting" : "Download Excel spreadsheet (XLSX)"}
+            title={(!isFinalized && !isLocked) ? "Gradebook must be Finalized before exporting" : "Export this term"}
           >
-            <span>Export Term {gradebook?.term_order} XLSX</span>
+            <span>Export Term {gradebook?.term_order}</span>
           </button>}
           {(isRecordsOfficer || userRole === 'teacher') && !gradebook?.is_legacy_readonly && [2, 3].includes(Number(gradebook?.term_order)) && <button
             type="button"
             className="btn btn-secondary"
             onClick={(event) => openExportReview('all_terms', event)}
             disabled={disabled || isSaving || (!isFinalized && !isLocked)}
-            title={`Export Terms 1 through ${gradebook.term_order} in one workbook. All included terms must be complete and finalized or locked.`}
+            title={`Export Terms 1 through ${gradebook.term_order} in one file. All included terms must be complete and finalized or locked.`}
           >
-            <span>{Number(gradebook.term_order) === 2 ? 'Export 2 Terms XLSX' : 'Export All 3 Terms XLSX'}</span>
+            <span>{Number(gradebook.term_order) === 2 ? 'Export 2 Terms' : 'Export All 3 Terms'}</span>
           </button>}
 
           <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onOpenAudit} title="View full audit log of all changes">
@@ -376,13 +358,19 @@ export default function GradebookActions({
               />
             </div>
             <div className="modal-footer">
-              <button type="button" className="btn btn-secondary" onClick={closeExportReview} disabled={generatingExport}>Cancel</button>
+              <button type="button" className="btn btn-secondary" onClick={closeExportReview} disabled={Boolean(generatingExport)}>Cancel</button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => confirmExport('xlsx')}
+                disabled={exportDisabled}
+              >{generatingExport === 'xlsx' ? 'Generating Excel…' : 'Download Excel (.xlsx)'}</button>
               <button
                 type="button"
                 className="btn btn-primary"
-                onClick={confirmExport}
-                disabled={disabled || isSaving || generatingExport || exportValidation.loading || Boolean(exportValidation.error) || !exportValidation.checked || exportValidation.issues.some((issue) => issue.blocks?.includes('export'))}
-              >{generatingExport ? 'Generating…' : exportReviewCopy.buttonLabel}</button>
+                onClick={() => confirmExport('pdf')}
+                disabled={exportDisabled}
+              >{generatingExport === 'pdf' ? 'Generating PDF…' : 'Download PDF'}</button>
             </div>
           </section>
         </div>
@@ -405,7 +393,7 @@ export default function GradebookActions({
                 {activeDialog === 'finalize' &&
                   'Finalizing permanently calculates official term ratings. Direct score edits will be locked. All learners must have complete scores.'}
                 {activeDialog === 'lock' &&
-                  'Locking archives this gradebook. Further corrections require a teacher adjustment request and approval.'}
+                  'Locking archives this gradebook. A records officer can reopen the class record with an audit reason.'}
                 {activeDialog === 'reopen' &&
                   'Reopening reverts the gradebook to Draft status. An explicit, auditable reason is required.'}
               </p>

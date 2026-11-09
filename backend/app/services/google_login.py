@@ -14,6 +14,7 @@ from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..auth import DEPED_PASSWORD_PREFIX
 from ..config import settings
 from ..models import User
 
@@ -78,6 +79,8 @@ def _bind_user(db: Session, claims: dict) -> User:
                     full_name=(str(claims.get("name") or email).strip() or email)[:160],
                     role="teacher", active=True, must_change_password=False)
         db.add(user)
+    if user.google_email != email and (user.password_hash or "").startswith(DEPED_PASSWORD_PREFIX):
+        user.password_hash = "!google-only"
     user.google_sub = subject
     user.google_email = email
     user.must_change_password = False

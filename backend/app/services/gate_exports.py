@@ -1,10 +1,10 @@
-"""Coalesce gate Excel updates outside the attendance response path."""
+"""Coalesce gate attendance PDF updates outside the attendance response path."""
 import logging
 import threading
 from datetime import date
 
 from ..database import SessionLocal
-from .sf2 import generate_temporary_log
+from .sf2 import refresh_temporary_log_pdf
 
 logger = logging.getLogger(__name__)
 _state_lock = threading.Lock()
@@ -36,7 +36,7 @@ def retry_gate_exports():
         try:
             # A response's session has already ended; the worker owns its session.
             with SessionLocal() as db:
-                generate_temporary_log(db, target)
+                refresh_temporary_log_pdf(db, target)
         except Exception:
             # shortcut: retries are process-local; persist them if they must survive server restarts.
             with _state_lock:

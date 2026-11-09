@@ -224,7 +224,7 @@ class GatePerformanceTest(unittest.TestCase):
         def generate(_db, _day):
             if output.call_count == 1:
                 gate_exports.update_gate_export(day)
-        with patch.object(gate_exports, 'SessionLocal') as sessions, patch.object(gate_exports, 'generate_temporary_log', side_effect=generate) as output:
+        with patch.object(gate_exports, 'SessionLocal') as sessions, patch.object(gate_exports, 'refresh_temporary_log_pdf', side_effect=generate) as output:
             sessions.return_value.__enter__.return_value = object()
             gate_exports.update_gate_export(day)
         self.assertEqual(output.call_count, 2)

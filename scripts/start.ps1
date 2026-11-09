@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
-  [switch]$Wait
+  [switch]$Wait,
+  [switch]$OpenBrowser,
+  [ValidateRange(1, 65535)]
+  [int]$WebPort = 5175
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,7 +30,7 @@ function Assert-LocalPortAvailable {
   }
   # Restricted shells can miss a listener even while its HTTP endpoint is
   # reachable. Refuse to launch another process that could reserve more DB slots.
-  $uri = if ($Port -eq 8000) { 'http://127.0.0.1:8000/api/health' } else { 'http://127.0.0.1:5175/' }
+  $uri = if ($Port -eq 8000) { 'http://127.0.0.1:8000/api/health' } else { "http://127.0.0.1:$Port/" }
   $reachable = $false
   try { Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 2 | Out-Null; $reachable = $true }
   catch { $reachable = $null -ne $_.Exception.Response }
@@ -37,7 +40,7 @@ function Assert-LocalPortAvailable {
 }
 
 Assert-LocalPortAvailable -Port 8000 -ServiceName "EduScan API"
-Assert-LocalPortAvailable -Port 5175 -ServiceName "EduScan web app"
+Assert-LocalPortAvailable -Port $WebPort -ServiceName "EduScan web app"
 
 $logDirectory = Join-Path $projectRoot "logs"
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
@@ -57,7 +60,7 @@ if ($null -eq $allowedOrigins) {
   }
 }
 if ($null -eq $allowedOrigins) { $allowedOrigins = 'http://127.0.0.1:5173,http://127.0.0.1:5174' }
-$webOrigin = 'http://127.0.0.1:5175'
+$webOrigin = "http://127.0.0.1:$WebPort"
 if (@($allowedOrigins -split ',' | ForEach-Object { $_.Trim() }) -notcontains $webOrigin) {
   if ([string]::IsNullOrWhiteSpace($allowedOrigins)) { $allowedOrigins = $webOrigin }
   else { $allowedOrigins = "$allowedOrigins,$webOrigin" }
@@ -74,7 +77,8 @@ function Wait-EduScanEndpoint {
     [string]$ServiceName,
     [string]$ErrorLog
   )
-  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+  $startupTime = [System.Diagnostics.Stopwatch]::StartNew()
+  while ($startupTime.Elapsed.TotalSeconds -lt 60) {
     if ($Process.HasExited) {
       throw "$ServiceName stopped during startup. Read $ErrorLog for the error."
     }
@@ -88,36 +92,54 @@ function Wait-EduScanEndpoint {
     }
     Start-Sleep -Milliseconds 500
   }
-  throw "$ServiceName did not become ready within 15 seconds. Read $ErrorLog for the error."
+  throw "$ServiceName did not become ready within 60 seconds. Read $ErrorLog for the error."
 }
 
+function Stop-EduScanProcess {
+  param([System.Diagnostics.Process]$Process)
+  if ($Process -and -not $Process.HasExited) {
+    # The Windows virtual environment can launch Python as a child process.
+    $ErrorActionPreference = 'SilentlyContinue'
+    taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
+  }
+}
+
+$ready = $false
+# Keep dev services attached to the invoking console so they receive Ctrl+C.
+$processWindow = if ($Wait) { @{ NoNewWindow = $true } } else { @{ WindowStyle = 'Hidden' } }
 try {
   $node = (Get-Command node.exe -ErrorAction Stop).Source
   $viteScript = Join-Path $projectRoot 'node_modules\vite\bin\vite.js'
-  $api = Start-Process -FilePath $python -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000" -WorkingDirectory $backendRoot -RedirectStandardOutput (Join-Path $logDirectory "api.stdout.log") -RedirectStandardError (Join-Path $logDirectory "api.stderr.log") -WindowStyle Hidden -PassThru
-  $web = Start-Process -FilePath $node -ArgumentList ('"' + $viteScript + '" --host 127.0.0.1 --port 5175') -WorkingDirectory $projectRoot -RedirectStandardOutput (Join-Path $logDirectory "web.stdout.log") -RedirectStandardError (Join-Path $logDirectory "web.stderr.log") -WindowStyle Hidden -PassThru
+  Write-Host "Starting the EduScan API on port 8000..."
+  $api = Start-Process -FilePath $python -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000" -WorkingDirectory $backendRoot -RedirectStandardOutput (Join-Path $logDirectory "api.stdout.log") -RedirectStandardError (Join-Path $logDirectory "api.stderr.log") @processWindow -PassThru
+  $web = Start-Process -FilePath $node -ArgumentList ('"' + $viteScript + '" --host 127.0.0.1 --strictPort --port ' + $WebPort) -WorkingDirectory $projectRoot -RedirectStandardOutput (Join-Path $logDirectory "web.stdout.log") -RedirectStandardError (Join-Path $logDirectory "web.stderr.log") @processWindow -PassThru
+  Wait-EduScanEndpoint -Uri $webOrigin -Process $web -ServiceName "EduScan web app" -ErrorLog "logs\web.stderr.log"
+  Write-Host "EduScan web app ready (PID $($web.Id)): $webOrigin"
   Wait-EduScanEndpoint -Uri "http://127.0.0.1:8000/api/health" -Process $api -ServiceName "EduScan API" -ErrorLog "logs\api.stderr.log"
-  Wait-EduScanEndpoint -Uri "http://127.0.0.1:5175" -Process $web -ServiceName "EduScan web app" -ErrorLog "logs\web.stderr.log"
   Write-Host "EduScan API ready (PID $($api.Id)): http://127.0.0.1:8000/api/health"
-  Write-Host "EduScan web app ready (PID $($web.Id)): http://127.0.0.1:5175"
   Write-Host "Logs: $logDirectory"
-} catch {
-  if ($api) { Stop-Process -Id $api.Id -Force -ErrorAction SilentlyContinue }
-  if ($web) { Stop-Process -Id $web.Id -Force -ErrorAction SilentlyContinue }
-  throw 'EduScan startup failed. Check logs\api.stderr.log and logs\web.stderr.log.'
-}
-
-
-
-
-
-if ($Wait) {
-  try {
+  $ready = $true
+  if ($OpenBrowser) {
+    try {
+      Start-Process -FilePath $webOrigin
+    } catch {
+      Write-Warning "Could not open the browser automatically. Open $webOrigin to use EduScan."
+    }
+  }
+  if ($Wait) {
     Write-Host "EduScan is running in foreground. Press Ctrl+C to stop."
-    Wait-Process -Id $api.Id, $web.Id
-  } finally {
-    if ($api) { Stop-Process -Id $api.Id -Force -ErrorAction SilentlyContinue }
-    if ($web) { Stop-Process -Id $web.Id -Force -ErrorAction SilentlyContinue }
+    while (-not $api.HasExited -and -not $web.HasExited) {
+      Start-Sleep -Milliseconds 500
+    }
+    if ($api.HasExited) {
+      throw "EduScan API stopped. Check logs\api.stderr.log."
+    }
+    throw "EduScan web app stopped. Check logs\web.stderr.log."
+  }
+} finally {
+  if ($Wait -or -not $ready) {
+    Stop-EduScanProcess $web
+    Stop-EduScanProcess $api
   }
 }
 

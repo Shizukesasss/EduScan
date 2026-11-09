@@ -494,7 +494,6 @@ class EduScanSmokeTest(unittest.TestCase):
                                       "authorization_reference": "TEST-CLEANUP-002", "confirmation": external_id, "confirmed": True})
 
     def test_reporting_scope_transfer_deduplication_and_clean_slate(self) -> None:
-        from openpyxl import load_workbook
         from app.database import SessionLocal
         from app.models import (
             GradeLevel, Person, SchoolSection, SchoolYear, Subject,
@@ -566,12 +565,12 @@ class EduScanSmokeTest(unittest.TestCase):
 
         all_school = self.client.get("/api/attendance/temporary-log?date=2026-08-24", headers=self.headers)
         self.assertEqual(all_school.status_code, 200, all_school.text)
-        all_book = load_workbook(io.BytesIO(all_school.content), read_only=True, data_only=True)
-        all_rows = list(all_book["All-School Attendance"].iter_rows(min_row=2, values_only=True))
-        all_book.close()
-        scope_rows = [row for row in all_rows if row[6:8] == ("11-T", "Advisory")]
-        self.assertEqual([row[3] for row in scope_rows], ["ALPHA, LEARNER", "BETA, LEARNER", "CRUZ, TRANSFEREE"])
-        self.assertEqual(len({row[1] for row in scope_rows}), 3)
+        from pypdf import PdfReader
+        self.assertEqual(all_school.headers['content-type'], 'application/pdf')
+        pdf = PdfReader(io.BytesIO(all_school.content))
+        text = ' '.join(' '.join(page.extract_text().split()) for page in pdf.pages)
+        for name in ("ALPHA, LEARNER", "BETA, LEARNER", "CRUZ, TRANSFEREE"):
+            self.assertIn(name, text)
 
         teacher_login = self.client.post("/api/auth/login", json={
             "username": "adviser.scope", "password": "Scoped-Teacher-2026!",
@@ -648,13 +647,11 @@ class EduScanSmokeTest(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(sf2.status_code, 200, sf2.text)
-        sf2_book = load_workbook(io.BytesIO(sf2.content), read_only=True, data_only=True)
-        sf2_sheet = sf2_book["School Form 2 (SF2)"]
-        self.assertEqual(sf2_sheet["B14"].value, "ALPHA, LEARNER")
-        self.assertEqual(sf2_sheet["B15"].value, "BETA, LEARNER")
-        self.assertEqual(sf2_sheet["B36"].value, "CRUZ, TRANSFEREE")
-        self.assertIn("TRANSFERRED IN", sf2_sheet["AE36"].value)
-        sf2_book.close()
+        self.assertEqual(sf2.headers['content-type'], 'application/pdf')
+        pdf = PdfReader(io.BytesIO(sf2.content))
+        text = ' '.join(' '.join(page.extract_text().split()) for page in pdf.pages)
+        for name in ("ALPHA, LEARNER", "BETA, LEARNER", "CRUZ, TRANSFEREE", "TRANSFERRED IN"):
+            self.assertIn(name, text)
 
     def test_z_secure_backup_and_restore_staging(self) -> None:
         passphrase = "Capstone-Recovery-2026!"

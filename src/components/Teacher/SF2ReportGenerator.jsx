@@ -60,20 +60,25 @@ function AdminSF2ReportGenerator() {
     try { await api.post('/sf2/template', form); setTemplate({ configured: true, filename: file.name }); showSuccess('Official SF2 template uploaded and validated.'); }
     catch (err) { showError(err.message); }
   };
-  const downloadTemporaryLog = () => {
-    const query = new URLSearchParams({ date: localDate(), grade, section });
-    api.download(`/attendance/temporary-log?${query}`, `attendance-${localDate()}-Grade-${grade}-${section}.xlsx`).catch((err) => showError(err.message));
+  const downloadTemporaryLog = (format) => {
+    const date = localDate();
+    const query = new URLSearchParams({ date, grade, section, format });
+    api.download(`/attendance/temporary-log?${query}`, `attendance-${date}-Grade-${grade}-${section}.${format}`).catch((err) => showError(err.message));
   };
-  const exportFile = async () => {
+  const exportFile = async (format) => {
     const [year, monthNumber] = month.split('-').map(Number);
-    const query = new URLSearchParams({ year, month: monthNumber, grade, section, school_id: schoolId, school_year: schoolYear, school_name: 'SAN JOSE NATIONAL HIGH SCHOOL' });
-    try { await api.download(`/sf2/export?${query}`, `SF2-${month}-${grade}-${section}.xlsx`); showSuccess('SF2 workbook generated. The records officer must verify it before submission.'); }
+    const query = new URLSearchParams({ year, month: monthNumber, grade, section, school_id: schoolId, school_year: schoolYear, school_name: 'SAN JOSE NATIONAL HIGH SCHOOL', format });
+    try {
+      await api.download(`/sf2/export?${query}`, `SF2-${month}-${grade}-${section}.${format}`);
+      showSuccess('SF2 report generated. The records officer must verify it before submission.');
+    }
     catch (err) { showError(err.message); }
   };
+  const exportDisabled = loading || unresolved > 0 || overflow || !template.configured || !month || !grade || !section || !schoolYear;
 
   return <div className="page-stack">
     <section className="card-static">
-      <div className="section-heading"><div><p className="eyebrow">Official XLSX generation</p><h2>SF2 monthly attendance report</h2><p className="section-copy">Select an active section. An assigned adviser is optional. Learners are deduplicated by ID/LRN, alphabetized within the male/female blocks, and transfer/departure remarks are written into the official remarks field.</p></div></div>
+      <div className="section-heading"><div><p className="eyebrow">Official report generation</p><h2>SF2 monthly attendance report</h2><p className="section-copy">Select an active section. An assigned adviser is optional. Learners are deduplicated by ID/LRN, alphabetized within the male/female blocks, and transfer/departure remarks are written into the official remarks field.</p></div></div>
       {availableSections.length === 0 && <div className="notice notice-warning">No active section is available. Create a grade and section in Administration before generating an SF2.</div>}
       <div className="form-grid three-columns">
         <label><span className="field-label">Reporting month</span><input title="Choose the reporting month and year" className="input-field" type="month" value={month} onChange={event => { const value = event.target.value; setMonth(value); const selected = schoolYears.find(item => item.starts_on.slice(0,7) <= value && item.ends_on.slice(0,7) >= value); setSchoolYear(selected?.name || ''); }} /></label>
@@ -81,7 +86,21 @@ function AdminSF2ReportGenerator() {
         <label><span className="field-label">School year</span><select className="input-field" value={schoolYear} onChange={event => setSchoolYear(event.target.value)}><option value="">Choose a school year</option>{schoolYears.map(item => <option key={item.id}>{item.name}</option>)}</select></label>
         <label><span className="field-label">School ID</span><input placeholder="Enter school id" className="input-field" value={schoolId} readOnly /></label>
       </div>
-      <div className="report-action-bar"><div><strong>{loading ? 'Loading monthly roster...' : `${students.length} learner(s)`}</strong><span>{male} male · {female} female · {template.configured ? template.filename : 'Template missing'}</span></div><div className="action-row"><details className="action-menu"><summary> Supporting files</summary><div className="action-menu-panel">{auth.role() === 'admin' && <label> {template.configured ? 'Replace official template' : 'Upload official template'}<input title="Choose a file in the format shown by this field" type="file" accept=".xlsx" onChange={upload} hidden /></label>}<button onClick={downloadTemporaryLog}> Download section log</button></div></details><button className="btn-primary" disabled={loading || unresolved > 0 || overflow || !template.configured || !month || !grade || !section || !schoolYear} onClick={exportFile}> Generate official SF2</button></div></div>
+      <div className="report-action-bar">
+        <div><strong>{loading ? 'Loading monthly roster...' : `${students.length} learner(s)`}</strong><span>{male} male · {female} female · {template.configured ? template.filename : 'Template missing'}</span></div>
+        <div className="action-row">
+          <details className="action-menu">
+            <summary>Supporting files</summary>
+            <div className="action-menu-panel">
+              {auth.role() === 'admin' && <label> {template.configured ? 'Replace official template' : 'Upload official template'}<input title="Choose a file in the format shown by this field" type="file" accept=".xlsx" onChange={upload} hidden /></label>}
+              <button onClick={() => downloadTemporaryLog('pdf')}>Download section log PDF</button>
+              <button onClick={() => downloadTemporaryLog('xlsx')}>Download section log Excel (.xlsx)</button>
+            </div>
+          </details>
+          <button className="btn-primary" disabled={exportDisabled} onClick={() => exportFile('pdf')}>Download SF2 PDF</button>
+          <button className="btn-secondary" disabled={exportDisabled} onClick={() => exportFile('xlsx')}>Download SF2 Excel (.xlsx)</button>
+        </div>
+      </div>
       {!loading && unresolved > 0 && <div className="notice notice-warning" role="status">{unresolved} learner-day(s) still have No scan on past school days. Review or close those days in Attendance before generating official SF2. This screen does not create absences.</div>}
       {overflow && <div className="notice notice-danger"> Template capacity exceeded: {male}/21 male and {female}/25 female learners. Resolve the roster before export.</div>}
     </section>

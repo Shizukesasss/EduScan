@@ -49,7 +49,6 @@ test('provides clear review copy for a Draft preview without implying a saved ch
     title: 'Preview Draft class record',
     description: 'This Draft preview uses saved scores and will not change the gradebook status or scores.',
     label: 'DRAFT PREVIEW — NOT FINAL',
-    buttonLabel: 'Generate Draft Preview',
   });
 });
 

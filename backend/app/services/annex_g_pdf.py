@@ -15,6 +15,8 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import Paragraph
 
+from .export_files import report_encryption
+
 TEMPLATE_VERSION = 'annex-g-a5-landscape-v2'
 ASSETS = Path(__file__).resolve().parents[2] / 'resources' / 'annex_g'
 LAYOUT_WIDTH, LAYOUT_HEIGHT = A4
@@ -116,7 +118,7 @@ def render_annex_g_pdf(report: dict, enrollment_id: int, *, draft: bool) -> byte
         raise ValueError('The learner is not part of this report.')
     _fonts()
     buffer = io.BytesIO()
-    canvas = Canvas(buffer, pagesize=landscape(A5), pageCompression=1)
+    canvas = Canvas(buffer, pagesize=landscape(A5), pageCompression=1, encrypt=report_encryption())
     # Reflow coordinates into landscape; keep text and emblems undistorted.
     canvas.scale(PAGE_SCALE, PAGE_SCALE)
     canvas.setTitle("Annex G - Learner's Performance Report")

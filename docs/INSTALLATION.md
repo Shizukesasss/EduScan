@@ -1,12 +1,13 @@
 # EduScan installation and update guide
 
-This guide is for a Windows laptop used as an EduScan server or gate station. Dependency installation needs internet access once. After installation, the web app, MySQL/SQLite, LBPH recognition, XLSX reports, and the Android SMS Gateway Local Server can operate on the local laptop/LAN without internet access.
+This guide is for a Windows laptop used as an EduScan server or gate station. Dependency installation needs internet access once. After installation, the web app, MySQL/SQLite, LBPH recognition, PDF reports, and the Android SMS Gateway Local Server can operate on the local laptop/LAN without internet access.
 
 ## Prerequisites
 
 - Git for Windows
 - Python 3.12 (the `py -3.12` command is recommended)
 - Node.js 22.12+ (or 20.19+) with npm
+- Microsoft Excel with PDF export on the Windows host for downloads that use an Excel report template
 - A webcam
 - Optional: MySQL Community Server 8.x and its command-line client tools
 - Optional: an Android phone with a SIM and SMS Gateway for Android in Local Server mode

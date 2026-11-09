@@ -102,6 +102,13 @@ class Settings:
     google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "").strip()
     # Enable after explicitly linking existing privileged accounts; see the rollout guide.
     deped_only: bool = os.getenv("EDUSCAN_DEPED_ONLY", "false").lower() == "true"
+    deped_password_recovery: bool = os.getenv("EDUSCAN_DEPED_PASSWORD_RECOVERY", "false").lower() == "true"
+    smtp_host: str = os.getenv("SMTP_HOST", "").strip()
+    smtp_port: int = int(os.getenv("SMTP_PORT") or "587")
+    smtp_use_ssl: bool = os.getenv("SMTP_USE_SSL", "false").lower() == "true"
+    smtp_username: str = os.getenv("SMTP_USERNAME", "")
+    smtp_password: str = os.getenv("SMTP_PASSWORD", "")
+    smtp_from: str = os.getenv("SMTP_FROM", "").strip()
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./data/eduscan.db")
     secret_key: str = _application_secret()
     encryption_key: bytes = _encryption_key()

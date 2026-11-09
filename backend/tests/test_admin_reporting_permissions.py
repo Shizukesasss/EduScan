@@ -6,6 +6,9 @@ import unittest
 from datetime import date, time, datetime
 from pathlib import Path
 from unittest.mock import patch
+from io import BytesIO
+
+from pypdf import PdfReader
 
 import test_attendance_sync as fixtures
 from sqlalchemy import select
@@ -59,7 +62,7 @@ class AdminReportingPermissionsTest(unittest.TestCase):
             ('DELETE','/api/schedules/1',{}),
             ('GET','/api/sf2/export?year=2026&month=10&grade=10&section=Rizal',{}),
             ('GET','/api/sf2/preview?year=2026&month=10&grade=10&section=Rizal',{}),
-            ('GET','/api/attendance/report.xlsx?starts_on=2026-10-01&ends_on=2026-10-01',{}),
+            ('GET','/api/attendance/report.pdf?starts_on=2026-10-01&ends_on=2026-10-01',{}),
             ('GET','/api/attendance/report/print?starts_on=2026-10-01&ends_on=2026-10-01',{}),
             ('GET','/api/attendance/temporary-log?date=2026-10-01',{}),
             ('GET','/api/gradebook/example/report/print',{}),
@@ -136,11 +139,69 @@ class AdminReportingPermissionsTest(unittest.TestCase):
         response=self.client.get('/api/sf2/export?year=2026&month=10&grade=10&section=Rizal&school_id=301874&school_year=2026-2027',headers=self.admin_headers)
         self.assertEqual(response.status_code,200,response.text)
         item=self.db.scalar(select(GeneratedReport))
+        self.assertEqual(response.headers['content-type'], 'application/pdf')
+        self.assertTrue(item.filename.endswith('.pdf'))
+        pdf = PdfReader(BytesIO(response.content))
+        self.assertTrue(pdf.is_encrypted)
+        self.assertTrue(pdf.decrypt(''))
+        self.assertEqual(int(pdf.trailer['/Encrypt']['/P']) & 8, 0)
+        self.assertIsNone(pdf.get_fields())
+        self.assertAlmostEqual(float(pdf.pages[0].mediabox.width), 842, delta=2)
+        self.assertAlmostEqual(float(pdf.pages[0].mediabox.height), 595, delta=2)
+        self.assertTrue(pdf.pages[0].images, 'The SF2 template logos must appear in the exported PDF')
+        self.assertIn('Rizal', ''.join(page.extract_text() for page in pdf.pages))
         self.assertEqual(item.generated_by_role,'admin')
         history=self.client.get('/api/reports/history',headers=self.teacher_headers).json()
         self.assertEqual(history[0]['id'],item.id)
         self.assertEqual(self.client.get(f'/api/reports/history/{item.id}/preview',headers=self.teacher_headers).status_code,200)
         self.assertEqual(self.db.query(GeneratedReport).count(),1)
+
+    def test_attendance_export_and_print_preview_are_restricted_pdfs(self):
+        filters = 'starts_on=2026-10-01&ends_on=2026-10-01&grade=10&section=Rizal'
+        for route, disposition in (
+            (f'/api/attendance/report.pdf?{filters}', 'attachment'),
+            (f'/api/attendance/report/print?{filters}', 'inline'),
+            ('/api/attendance/temporary-log?date=2026-10-01', 'attachment'),
+            ('/api/sms/outbox.pdf', 'attachment'),
+        ):
+            with self.subTest(route=route):
+                response = self.client.get(route, headers=self.admin_headers)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.headers['content-type'], 'application/pdf')
+                self.assertTrue(response.headers['content-disposition'].startswith(disposition))
+                pdf = PdfReader(BytesIO(response.content))
+                self.assertTrue(pdf.is_encrypted)
+                self.assertFalse(int(pdf.trailer['/Encrypt']['/P']) & 8)
+                self.assertTrue(pdf.pages[0].extract_text())
+
+    def test_excel_exports_are_registered_workbooks_and_keep_pdf_permissions(self):
+        from openpyxl import load_workbook
+
+        routes = (
+            ('/api/attendance/report.xlsx?starts_on=2026-10-01&ends_on=2026-10-01', 'Daily Attendance'),
+            ('/api/attendance/temporary-log?date=2026-10-01&format=xlsx', 'Temporary Attendance Log'),
+            ('/api/sf2/export?year=2026&month=10&grade=10&section=Rizal&school_year=2026-2027&format=xlsx', 'Official SF2'),
+        )
+        with patch.object(reports, 'excel_report_pdf', side_effect=AssertionError('Excel download called the PDF converter')):
+            for route, report_type in routes:
+                with self.subTest(report_type=report_type):
+                    denied = self.client.get(route, headers=self.teacher_headers)
+                    self.assertEqual(denied.status_code, 403, denied.text)
+                    response = self.client.get(route, headers=self.admin_headers)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.headers['content-type'],
+                                     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+                    workbook = load_workbook(BytesIO(response.content), read_only=True)
+                    try:
+                        self.assertTrue(workbook.sheetnames)
+                    finally:
+                        workbook.close()
+                    item = self.db.scalar(select(GeneratedReport).where(GeneratedReport.report_type == report_type))
+                    self.assertTrue(item.filename.endswith('.xlsx'))
+                    self.assertEqual(item.file_sha256, hashlib.sha256(response.content).hexdigest())
+                    if report_type == 'Official SF2':
+                        preview = self.client.get(f'/api/reports/history/{item.id}/preview', headers=self.teacher_headers)
+                        self.assertEqual(preview.status_code, 200, preview.text)
 
     def test_sf2_section_without_adviser_remains_available_for_admin_export(self):
         self.db.query(SectionAdviserAssignment).delete()

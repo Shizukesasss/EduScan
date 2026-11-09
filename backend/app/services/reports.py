@@ -27,6 +27,7 @@ from .grading import gradebook_summary
 from .academic_context import is_senior_high
 from .grading_engine import round_value
 from .export_files import new_report_path
+from .excel_pdf import excel_report_pdf
 from .settings_store import get_json
 
 
@@ -78,8 +79,28 @@ def register_report(db: Session, source: Path, report_type: str, parameters: dic
         raise
 
 
-def official_sf2_preview(path: Path) -> dict:
-    from .sf2 import SHEET_NAME, MALE_ROWS, FEMALE_ROWS, DAY_COLUMNS, NS_XDR
+def register_workbook_report(db: Session, source: Path, report_type: str, parameters: dict, actor: User,
+                             *, file_format: str = "pdf", terms: tuple[int, ...] = (),
+                             draft: bool = False) -> GeneratedReport:
+    """Register the requested report format and remove the intermediate files."""
+    pdf = source.with_suffix('.pdf')
+    try:
+        tardy = set()
+        if report_type == 'Official SF2':
+            tardy = sf2_tardy_cells(source)
+            parameters = {**parameters, '_sf2_preview': official_sf2_preview(source, tardy=tardy)}
+        if file_format == "xlsx":
+            return register_report(db, source, report_type, parameters, actor)
+        pdf.write_bytes(excel_report_pdf(source, terms=terms, draft=draft))
+        return register_report(db, pdf, report_type, parameters, actor)
+    finally:
+        pdf.unlink(missing_ok=True)
+        source.unlink(missing_ok=True)
+        source.parent.rmdir()
+
+
+def sf2_tardy_cells(path: Path) -> set[tuple[int, int]]:
+    from .sf2 import NS_XDR
     tardy = set()
     with ZipFile(path) as archive:
         if "xl/drawings/drawing1.xml" in archive.namelist():
@@ -88,6 +109,14 @@ def official_sf2_preview(path: Path) -> dict:
                 match = re.fullmatch(r"EduScan Tardy (\d+)-(\d+)", node.get("name", ""))
                 if match:
                     tardy.add(tuple(map(int, match.groups())))
+    return tardy
+
+
+def official_sf2_preview(path: Path, *, tardy: set[tuple[int, int]] | None = None) -> dict:
+    from .sf2 import SHEET_NAME, MALE_ROWS, FEMALE_ROWS, DAY_COLUMNS
+
+    if tardy is None:
+        tardy = sf2_tardy_cells(path)
     with path.open('rb') as source:
         book = load_workbook(source, read_only=True, data_only=True)
         try:
@@ -129,6 +158,26 @@ def _headers(sheet, row: int, labels: list[str]) -> None:
 def generate_grade_report_xlsx(db: Session, class_key: str) -> Path:
     summary = gradebook_summary(db, class_key)
     metadata, rows, statistics = summary["metadata"], summary["rows"], summary["statistics"]
+    return _grade_summary_workbook(metadata, rows, statistics)
+
+
+def generate_gradebook_summary_workbook(db: Session, gradebook_id: int) -> Path:
+    from .grading import get_gradebook_full
+
+    full = get_gradebook_full(db, gradebook_id)
+    book = full['gradebook']
+    metadata = {
+        'grade': book['grade_name'], 'section': book['section_name'],
+        'school_year': book['school_year_name'], 'term_order': book['term_order'],
+        'subject': book['subject_name'],
+    }
+    rows = [{**row, 'transmuted_grade': row['reported_grade']} for row in full['students']]
+    return _grade_summary_workbook(metadata, rows, {
+        **full['statistics'], 'below_rule': full['statistics']['below_passing'],
+    })
+
+
+def _grade_summary_workbook(metadata: dict, rows: list[dict], statistics: dict) -> Path:
     if not metadata["grade"] or not metadata["section"]:
         raise HTTPException(status_code=409, detail="Save the gradebook before generating its report")
     book = Workbook()
