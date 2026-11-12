@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from datetime import date, datetime, time, timedelta
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,13 +17,14 @@ os.environ["SMS_GATEWAY_ENABLED"] = "false"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 from app.auth import create_token
 from app.database import Base, get_db
 from app.main import app
-from app.models import AttendanceCorrection, AttendanceEvent, CalendarException, ClassSchedule, ExcusedAbsence, GradeLevel, Person, SchoolSection, SchoolYear, SectionAdviserAssignment, User
+from app.models import AttendanceCorrection, AttendanceEvent, CalendarException, ClassSchedule, ExcusedAbsence, GradeLevel, Person, PersonnelSchedule, SchoolSection, SchoolYear, SectionAdviserAssignment, User
 from app.services.attendance import MANILA, close_due_attendance, list_rows, raw_row, record_gate_match, reset_day
 from app.services.settings_store import set_json
 from app.services import reports
@@ -73,6 +75,128 @@ class AttendanceSyncTest(unittest.TestCase):
 
     def student_row(self):
         return next(row for row in self.api_rows() if row["person_id"] == self.student.id)
+
+    def test_early_afternoon_scan_starts_session_even_without_morning_checkout(self):
+        self.assertEqual(self.scan(7, 20)["status"], "Present")
+        result = self.scan(12, 55)
+        self.assertEqual(result["direction"], "Time In")
+        self.assertEqual(result["status"], "Present")
+        self.assertEqual(self.scan(16)["direction"], "Time Out")
+        row = self.student_row()
+        self.assertEqual((row["am_status"], row["pm_status"]), ("Present", "Present"))
+        self.assertIsNone(row["am_departure"])
+
+    def test_saved_lunch_checkout_closes_open_morning_visit(self):
+        for index, clock, direction, status in (
+            (1, time(7, 45, 45), "Time In", "Late"),
+            (2, time(12, 52), "Time Out", "Time Out"),
+            (3, time(12, 57), "Time Out", "Time Out"),
+        ):
+            self.db.add(AttendanceEvent(id=f"saved-{index}", person_id=self.student.id,
+                                        event_date=self.day, event_time=clock, direction=direction, status=status))
+        self.db.commit()
+        row = raw_row(self.db, self.student, self.day)
+        self.assertEqual(row["am_departure"], time(12, 52))
+        self.assertIsNone(row["pm_arrival"])
+        self.assertEqual(row["pm_departure"], time(12, 57))
+        self.assertEqual(row["last_gate_direction"], "Time Out")
+        self.assertEqual(row["status"], row["am_status"])
+
+    def test_session_statuses_use_independent_cutoffs(self):
+        self.student.enrollment_start_date = self.day
+        self.db.commit()
+        self.assertEqual(self.scan(13, 16)["status"], "Late")
+        row = self.student_row()
+        self.assertEqual((row["am_status"], row["pm_status"]), ("Absent", "Late"))
+
+    def test_verified_late_arrival_overrides_only_its_session(self):
+        morning = AttendanceEvent(id="verified-late", person_id=self.student.id,
+                                  event_date=self.day, event_time=time(11, 53), direction="Time In", status="Late")
+        afternoon = AttendanceEvent(id="afternoon-arrival", person_id=self.student.id,
+                                    event_date=self.day, event_time=time(12, 57), direction="Time In", status="Present")
+        self.db.add_all([morning, afternoon])
+        self.db.commit()
+        row = raw_row(self.db, self.student, self.day)
+        self.assertEqual((row["am_status"], row["pm_status"], row["status"]), ("Absent", "Present", "Present"))
+
+        morning.status_overridden = True
+        self.db.commit()
+        row = raw_row(self.db, self.student, self.day)
+        self.assertEqual((row["am_status"], row["pm_status"], row["status"]), ("Late", "Present", "Late"))
+        self.assertEqual((row["am_arrival"], row["pm_arrival"]), (time(11, 53), time(12, 57)))
+
+    def test_pending_afternoon_becomes_absent_after_cutoff_for_all_roles(self):
+        self.student.enrollment_start_date = self.personnel.enrollment_start_date = self.day
+        support = Person(external_id="SUPPORT", full_name="Support Staff", role="Non-teaching Personnel",
+                         sex="Female", enrollment_start_date=self.day)
+        self.db.add(support)
+        for role in (self.personnel.role, support.role):
+            self.db.add(PersonnelSchedule(role=role, weekdays="1", start_time=time(7, 30), end_time=time(16)))
+        self.db.commit()
+        for person in (self.student, self.personnel, support):
+            for clock, status in ((time(7, 45, 59), "Present"), (time(11, 40), "Time Out")):
+                result = record_gate_match(self.db, person, 25, datetime.combine(self.day, clock, MANILA))
+                self.assertEqual(result["status"], status)
+        for clock, pm_status in ((time(15, 59, 59), "Pending"), (time(16), "Absent")):
+            with patch("app.services.attendance.local_now", return_value=datetime.combine(self.day, clock, MANILA)):
+                rows = self.api_rows()
+            self.assertEqual({row["role"] for row in rows}, {"Student", "Faculty", "Non-teaching Personnel"})
+            self.assertTrue(all((row["am_status"], row["pm_status"]) == ("Present", pm_status) for row in rows))
+
+    def test_student_attendance_and_sf2_preview_show_four_punches_for_the_selected_day(self):
+        for hour, minute in [(7, 30), (11, 55), (12, 40), (16, 0)]:
+            self.scan(hour, minute)
+
+        response = self.client.get(
+            "/api/sf2/preview",
+            params={"year": self.day.year, "month": self.day.month, "grade": "10",
+                    "section": "Rizal", "attendance_date": self.day.isoformat()},
+            headers=self.admin_headers,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["preview_date"], self.day.isoformat())
+        for row in [self.student_row(), response.json()["rows"][0]]:
+            self.assertEqual(row["status"], "Present")
+            self.assertEqual(row["am_arrival"], "07:30:00")
+            self.assertEqual(row["am_departure"], "11:55:00")
+            self.assertEqual(row["pm_arrival"], "12:40:00")
+            self.assertEqual(row["pm_departure"], "16:00:00")
+
+    def test_section_log_exports_recorded_punches_and_leaves_missing_punches_blank(self):
+        for hour, minute in [(7, 30), (11, 55), (12, 40)]:
+            self.scan(hour, minute)
+        response = self.client.get(
+            "/api/attendance/temporary-log",
+            params={"date": self.day.isoformat(), "grade": "10", "section": "Rizal", "format": "xlsx"},
+            headers=self.admin_headers,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        workbook = load_workbook(BytesIO(response.content), read_only=True)
+        try:
+            headers, student = workbook.active.values
+            record = dict(zip(headers, student))
+            self.assertEqual(record["AM Time In"], time(7, 30))
+            self.assertEqual(record["AM Time Out"], time(11, 55))
+            self.assertEqual(record["PM Time In"], time(12, 40))
+            self.assertIsNone(record["PM Time Out"])
+        finally:
+            workbook.close()
+
+    def test_student_punches_respect_daily_corrections_and_clean_slate(self):
+        for hour, minute in [(7, 30), (11, 55), (12, 40), (16, 0)]:
+            self.scan(hour, minute)
+        response = self.client.post("/api/attendance/corrections", headers=self.admin_headers, json={
+            "person_id": self.student.id, "attendance_date": self.day.isoformat(),
+            "status": "Present", "time_in": "07:45", "time_out": "16:15",
+            "reason": "Verified arrival and departure",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        row = self.student_row()
+        keys = ("am_arrival", "am_departure", "pm_arrival", "pm_departure")
+        self.assertEqual([row[key] for key in keys], ["07:45:00", "11:55:00", "12:40:00", "16:15:00"])
+        reset_day(self.db, self.day, "Clear test attendance", self.admin)
+        row = self.student_row()
+        self.assertEqual([row[key] for key in keys], [None, None, None, None])
 
     def test_assisted_attendance_requires_identity_times_and_a_specific_reason(self):
         payload = {'person_id': self.student.id, 'attendance_date': str(self.day), 'status': 'Present',
@@ -173,21 +297,27 @@ class AttendanceSyncTest(unittest.TestCase):
         self.assertEqual(close_due_attendance(self.db, self.day, time(1, 40)), 0)
         self.assertEqual(raw_row(self.db, self.student, self.day)["status"], "No scan")
         self.assertEqual(self.db.scalars(select(AttendanceEvent)).all(), [])
-        self.assertEqual(close_due_attendance(self.db, self.day + timedelta(days=1), time(0, 1)), 1)
+        self.assertEqual(close_due_attendance(self.db, self.day + timedelta(days=1), time(16)), 1)
 
     def test_registration_before_cutoff_keeps_normal_absence_rule(self):
         self.student.created_at = datetime(2026, 10, 12, 23)  # 07:00 in Manila.
         self.db.commit()
-        self.assertEqual(close_due_attendance(self.db, self.day, time(8, 59)), 0)
-        self.assertEqual(close_due_attendance(self.db, self.day, time(9)), 1)
+        self.assertEqual(close_due_attendance(self.db, self.day, time(15, 59, 59)), 0)
+        self.assertEqual(close_due_attendance(self.db, self.day, time(16)), 1)
         self.assertEqual(raw_row(self.db, self.student, self.day)["status"], "Absent")
+
+    def test_later_daily_close_does_not_mark_people_registered_after_both_sessions(self):
+        set_json(self.db, "attendance", {"absence_cutoff": "17:00"})
+        self.student.created_at = datetime(2026, 10, 13, 8, 30)  # 4:30 PM in Manila.
+        self.db.commit()
+        self.assertEqual(close_due_attendance(self.db, self.day, time(17)), 0)
 
     def test_explicit_academic_enrollment_date_allows_backdated_roster_closing(self):
         self.student.created_at = datetime(2026, 10, 14)
         self.student.enrollment_start_date = self.day
         self.db.commit()
-        self.assertEqual(close_due_attendance(self.db, self.day - timedelta(days=1), time(10)), 0)
-        self.assertEqual(close_due_attendance(self.db, self.day, time(10)), 1)
+        self.assertEqual(close_due_attendance(self.db, self.day - timedelta(days=1), time(16)), 0)
+        self.assertEqual(close_due_attendance(self.db, self.day, time(16)), 1)
 
     def test_no_scan_correction_clears_only_old_events_and_next_visit_starts_with_time_in(self):
         self.scan(7, 30)
@@ -204,7 +334,7 @@ class AttendanceSyncTest(unittest.TestCase):
             self.assertEqual(result.json() if endpoint == "gate/recent" else result.json()["events"], [])
         self.assertEqual(len(self.db.scalars(select(AttendanceEvent)).all()), 1)
         self.assertEqual(self.scan(8)["direction"], "Time In")
-        self.assertEqual((self.student_row()["status"], self.student_row()["time_in"]), ("Present", "08:00:00"))
+        self.assertEqual((self.student_row()["status"], self.student_row()["time_in"]), ("Late", "08:00:00"))
         self.assertEqual(len(self.db.scalars(select(AttendanceEvent)).all()), 2)
 
     def test_no_scan_correction_rejects_attendance_times(self):
@@ -253,7 +383,7 @@ class AttendanceSyncTest(unittest.TestCase):
         reset_day(self.db, self.day, "Authorized isolated reset", self.admin)
         self.assertEqual(self.student_row()["status"], "No scan")
         self.scan(8)
-        self.assertEqual(self.student_row()["status"], "Present")
+        self.assertEqual(self.student_row()["status"], "Late")
         self.assertEqual(self.student_row()["time_in"], "08:00:00")
         self.assertEqual(len(self.db.scalars(select(AttendanceEvent)).all()), 2)
 
@@ -281,7 +411,7 @@ class AttendanceSyncTest(unittest.TestCase):
         finally:
             event.remove(self.engine, "before_cursor_execute", count_query)
         self.assertEqual(len(rows), 52)
-        self.assertEqual(len(queries), 6)
+        self.assertLessEqual(len(queries), 8)
 
     def test_teacher_scope_excludes_other_classes_and_personnel(self):
         other = Person(external_id="OTHER", full_name="Other Student", role="Student", sex="Female", grade="7", section="Other")

@@ -1,11 +1,12 @@
 param(
-    [string]$Action = 'start'
+    [string]$Action = 'start',
+    [switch]$ShowDatabasePrompt
 )
 
 $ErrorActionPreference = 'Stop'
 
-if ($Action -notin @('start', 'restart')) {
-    Write-Host 'Usage: eduscan.cmd [start|restart]' -ForegroundColor Yellow
+if ($Action -notin @('start', 'restart', 'start-api', 'restart-api')) {
+    Write-Host 'Supported actions: start, restart, start-api, restart-api.' -ForegroundColor Yellow
     exit 2
 }
 
@@ -14,7 +15,8 @@ $backendRoot = Join-Path $projectRoot 'backend'
 $environmentFile = Join-Path $backendRoot '.env'
 $startScript = Join-Path $PSScriptRoot 'start.ps1'
 $apiPython = Join-Path $backendRoot '.venv\Scripts\python.exe'
-$ports = @(8000, 5175)
+$apiOnly = $Action -in @('start-api', 'restart-api')
+$ports = if ($apiOnly) { @(8000) } else { @(8000, 5175) }
 
 function Test-RemoteDatabaseConfigured {
     $value = [System.Environment]::GetEnvironmentVariable('DATABASE_URL', 'Process')
@@ -54,7 +56,17 @@ function Confirm-RemoteDatabaseStartup {
     }
 
     Write-Host ''
-    Write-Host 'EduScan API startup applies database migrations and seeds users/reference data in the configured remote database.' -ForegroundColor Yellow
+    $message = 'EduScan API startup applies database migrations and seeds users/reference data in the configured remote database.'
+    if ($ShowDatabasePrompt) {
+        Add-Type -AssemblyName System.Windows.Forms
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            $message + "`n`nContinue?", 'EduScan remote database',
+            'YesNo', 'Warning', 'Button2', 'DefaultDesktopOnly'
+        )
+        return $answer -eq 'Yes'
+    }
+
+    Write-Host $message -ForegroundColor Yellow
     $answer = Read-Host 'Continue? [y/N]'
     return $answer -match '^(?i:y|yes)$'
 }
@@ -170,7 +182,7 @@ if (-not (Confirm-RemoteDatabaseStartup)) {
     exit 0
 }
 
-if ($Action -eq 'restart') {
+if ($Action -in @('restart', 'restart-api')) {
     try {
         Stop-EduScanListeners
     } catch {
@@ -180,10 +192,10 @@ if ($Action -eq 'restart') {
 }
 
 try {
-    & $startScript
+    & $startScript -ApiOnly:$apiOnly
     exit 0
 } catch {
     Write-Host 'EduScan did not start.' -ForegroundColor Red
-    Write-Host 'Check logs\api.stderr.log and logs\web.stderr.log for details.'
+    Write-Host $_.Exception.Message -ForegroundColor Red
     exit 1
 }

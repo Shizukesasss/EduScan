@@ -15,7 +15,8 @@ from pypdf.constants import UserAccessPermissions
 _excel_lock = Lock()
 
 
-def excel_report_pdf(source: Path, *, terms: tuple[int, ...] = (), draft: bool = False) -> bytes:
+def excel_report_pdf(source: Path, *, terms: tuple[int, ...] = (), draft: bool = False,
+                     landscape: bool = False) -> bytes:
     if os.name != 'nt':
         raise HTTPException(503, 'Template PDF export requires Microsoft Excel on the Windows EduScan host.')
 
@@ -29,6 +30,8 @@ def excel_report_pdf(source: Path, *, terms: tuple[int, ...] = (), draft: bool =
             command.extend(('-Terms', ','.join(map(str, terms))))
         if draft:
             command.append('-Draft')
+        if landscape:
+            command.append('-Landscape')
         try:
             with _excel_lock:
                 subprocess.run(command, check=True, capture_output=True, timeout=90,

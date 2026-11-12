@@ -59,6 +59,7 @@ from .services.gate_presence import gate_presence
 from .services.gate_exports import update_gate_export
 from .services.gate_defaults import configure_fast_gate
 from .services.disposal import dispose_person_records
+from .services.dtr import DTR_REPORT_TYPE, router as dtr_router
 from .services.annex_g_pdf import AnnexGLayoutError, TEMPLATE_VERSION, render_annex_g_pdf
 from .services.annex_g import (import_annex_g_enrollments, backfill_annex_g_dobs,
                                build_annex_g_section, annex_g_school_profile_data, annex_g_class_record_people)
@@ -93,6 +94,7 @@ from .services.sms import (
 
 
 app = FastAPI(title="EduScan API", version="1.0.0")
+app.include_router(dtr_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.allowed_origins),
@@ -2840,14 +2842,17 @@ async def upload_sf2(file: UploadFile = File(...), _: User = Depends(require_rol
 
 
 @app.get("/api/sf2/preview")
-def sf2_preview(year: int, month: int, grade: str, section: str, db: Session = Depends(get_db),
+def sf2_preview(year: int, month: int, grade: str, section: str, attendance_date: date | None = None,
+                db: Session = Depends(get_db),
                 user: User = Depends(require_roles("admin"))) -> dict:
     import calendar
     from .services.attendance import rows_for_people, local_now
     people = sf2_students(db, year, month, grade, section)
     first_day = date(year, month, 1)
     last_day = date(year, month, calendar.monthrange(year, month)[1])
-    preview_day = max(first_day, min(local_now().date(), last_day))
+    if attendance_date and not first_day <= attendance_date <= last_day:
+        raise HTTPException(status_code=422, detail="Choose an attendance date within the reporting month")
+    preview_day = attendance_date or max(first_day, min(local_now().date(), last_day))
     return {"preview_date": preview_day, "rows": rows_for_people(db, people, preview_day), **sf2_pending_attendance(db, people, year, month)}
 
 
@@ -2922,6 +2927,8 @@ def preview_generated_report(report_id: str, db: Session = Depends(get_db),
 def report_history(db: Session = Depends(get_db),
                    user: User = Depends(require_roles("admin", "teacher", "records_officer", "privacy_officer", "school_head"))) -> list[dict]:
     query = select(GeneratedReport)
+    if user.role != "admin":
+        query = query.where(GeneratedReport.report_type != DTR_REPORT_TYPE)
     if user.role == "teacher":
         query = query.where(GeneratedReport.report_type == "Official SF2", GeneratedReport.generated_by_role == "admin",
                             GeneratedReport.status.not_in(["Rejected", "Superseded"]))
@@ -2935,7 +2942,7 @@ def report_history(db: Session = Depends(get_db),
 def download_generated_report(report_id: str, db: Session = Depends(get_db),
                               user: User = Depends(require_roles("admin", "records_officer", "school_head"))) -> FileResponse:
     item = db.get(GeneratedReport, report_id)
-    if not item or not Path(item.file_path).is_file():
+    if not item or (item.report_type == DTR_REPORT_TYPE and user.role != "admin") or not Path(item.file_path).is_file():
         raise HTTPException(
             status_code=404, detail="Generated report file was not found")
     if hashlib.sha256(Path(item.file_path).read_bytes()).hexdigest() != item.file_sha256:
@@ -2947,7 +2954,7 @@ def download_generated_report(report_id: str, db: Session = Depends(get_db),
 def review_generated_report(report_id: str, payload: ReportReviewPayload, db: Session = Depends(get_db),
                             user: User = Depends(require_roles("admin", "records_officer"))) -> dict:
     item = db.get(GeneratedReport, report_id)
-    if not item:
+    if not item or (item.report_type == DTR_REPORT_TYPE and user.role != "admin"):
         raise HTTPException(
             status_code=404, detail="Generated report was not found")
     before = model_snapshot(item)

@@ -107,6 +107,13 @@ class PersonnelSchedule(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
 
+class DtrDutySchedule(Base):
+    __tablename__ = "dtr_duty_schedules"
+
+    person_id: Mapped[int] = mapped_column(ForeignKey("persons.id", ondelete="CASCADE"), primary_key=True)
+    hours_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class SchoolYear(Base):
     __tablename__ = "school_years"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -276,6 +283,7 @@ class AttendanceEvent(Base):
     event_time: Mapped[time] = mapped_column(Time)
     direction: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(30))
+    status_overridden: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     recognition_distance: Mapped[float |
                                  None] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String(80), default="Gate camera")

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import SF2ReportGenerator from '../../components/Teacher/SF2ReportGenerator';
 import ReleasedSF2Reports from '../../components/Teacher/ReleasedSF2Reports';
 import AnnexGWorkspace from '../../components/Reports/AnnexGWorkspace';
+import MonthlyDtr from '../../components/Reports/MonthlyDtr';
 import { api, auth, localDate } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 import './Reports.css';
@@ -43,7 +44,7 @@ function ReportNavigation({ teacher = false, canGenerate = false }) {
     ['learner-reports', 'Annex G learner reports'],
     ['released-sf2', 'Official SF2 reports'],
   ] : [
-    ...(canGenerate ? [['daily-reports', 'Daily attendance'], ['monthly-sf2', 'Monthly SF2']] : []),
+    ...(canGenerate ? [['daily-reports', 'Daily attendance'], ['monthly-dtr', 'Monthly DTR'], ['monthly-sf2', 'Monthly SF2']] : []),
     ['report-history', 'Generated history'],
     ['learner-reports', 'Annex G learner reports'],
   ];
@@ -64,6 +65,7 @@ function AdminReports() {
   const [dailyContext, setDailyContext] = useState('');
   const [dailyError, setDailyError] = useState({ context: '', message: '' });
   const [role, setRole] = useState('Student');
+  const [dtrRole, setDtrRole] = useState('Faculty');
   const [{ grade, section }, setSelection] = useState({ grade: '', section: '' });
   const [sections, setSections] = useState([]);
   const [history, setHistory] = useState([]);
@@ -71,6 +73,7 @@ function AdminReports() {
   const [review, setReview] = useState({});
   const { showSuccess, showError } = useToast();
   const canGenerate = auth.role() === 'admin';
+  const personnel = role === 'Faculty' || role === 'Non-teaching Personnel';
 
   const load = useCallback(() => {
     setHistoryState({ loading: true, error: '' });
@@ -143,13 +146,24 @@ function AdminReports() {
         {(role === 'Student') && <label><span className="field-label">Section</span><select className="input-field" value={`${grade}|${section}`} onChange={(event) => chooseSection(event.target.value)}><option value="|">All authorized sections</option>{sections.map((item) => <option key={item.id} value={`${item.grade}|${item.section}`}>Grade {item.grade} — {item.section}</option>)}</select></label>}
       </div>
       <p className="section-copy">Daily output uses the selected attendance date. No scan remains pending until daily close. Departures show their recorded reason. Use the separate SF2 below for the monthly learner report. Every registered file includes generation metadata and a SHA-256 integrity hash.</p>
-      {daily && <><div className="reports-preview-heading"><h3>Attendance preview</h3><p className="muted-small" role="status">{previewError ? `Preview unavailable: ${previewError}` : previewReady ? `${dailyRows.length} record(s) on ${startsOn}. This preview does not create or close attendance.` : 'Loading attendance preview…'}</p></div><div className="table-scroll"><table className="interactive-table reports-preview-table" aria-label="Daily attendance report preview"><thead><tr><th>Name</th><th>Role / class</th><th>Daily attendance</th><th>Enrollment / employment</th></tr></thead><PaginatedBody pageSize={5} resetKey={dailyContext}>{(!previewReady || dailyRows.length === 0) && <tr><td colSpan="4" className="empty-cell">{previewError ? 'The preview could not be loaded for this selection.' : !previewReady ? 'Loading attendance records…' : 'No attendance records for this selection.'}</td></tr>}{(dailyContext === `${startsOn}|${role}|${grade}|${section}` ? dailyRows : []).map(row => <tr key={row.person_id}><td>{row.full_name}</td><td>{row.role}{row.grade ? ` - Grade ${row.grade}, ${row.section}` : ''}</td><td>{row.status}</td><td>{row.enrollment_status}</td></tr>)}</PaginatedBody></table></div></>}
+      {daily && <><div className="reports-preview-heading"><h3>Attendance preview</h3><p className="muted-small" role="status">{previewError ? `Preview unavailable: ${previewError}` : previewReady ? `${dailyRows.length} record(s) on ${startsOn}. This preview does not create or close attendance.` : 'Loading attendance preview…'}</p></div><div className="table-scroll"><table className="interactive-table reports-preview-table" aria-label="Daily attendance report preview"><thead><tr><th>Name</th><th>Role / class</th><th>Daily attendance</th><th>Enrollment / employment</th></tr></thead><PaginatedBody pageSize={5} resetKey={dailyContext} columnCount={4}>{(!previewReady || dailyRows.length === 0) && <tr><td colSpan="4" className="empty-cell">{previewError ? 'The preview could not be loaded for this selection.' : !previewReady ? 'Loading attendance records…' : 'No attendance records for this selection.'}</td></tr>}{(dailyContext === `${startsOn}|${role}|${grade}|${section}` ? dailyRows : []).map(row => <tr key={row.person_id}><td>{row.full_name}</td><td>{row.role}{row.grade ? ` - Grade ${row.grade}, ${row.section}` : ''}</td><td>{row.status}</td><td>{row.enrollment_status}</td></tr>)}</PaginatedBody></table></div></>}
       <div className="action-row">
+        {personnel ? <a className="btn-primary" href="#monthly-dtr" onClick={() => setDtrRole(role)}>Open Monthly DTR</a> : <>
         <button className="btn-primary" disabled={exportDisabled} onClick={() => downloadAttendanceReport('pdf')}>Download PDF</button>
         <button className="btn-secondary" disabled={exportDisabled} onClick={() => downloadAttendanceReport('xlsx')}>Download Excel (.xlsx)</button>
         <button className="btn-secondary" disabled={exportDisabled} onClick={() => api.openDocument(`/attendance/report/print?${query()}`).catch((err) => showError(err.message))}>Open printable PDF</button>
+        </>}
       </div>
     </section>
+    <DeferredReport id="monthly-dtr" title="Monthly DTR">
+      <section className="card-static">
+        <div className="section-heading"><div><h2>Monthly DTR (Form 48)</h2></div></div>
+        <div className="form-grid three-columns">
+          <label><span className="field-label">Personnel role</span><select className="input-field" value={dtrRole} onChange={event => setDtrRole(event.target.value)}><option>Faculty</option><option>Non-teaching Personnel</option></select></label>
+        </div>
+        <MonthlyDtr key={dtrRole} role={dtrRole} onDownload={load} />
+      </section>
+    </DeferredReport>
     <DeferredReport id="monthly-sf2" title="Monthly SF2"><div className="reports-sf2"><SF2ReportGenerator /></div></DeferredReport></>}
     <section id="report-history" className="card-static reports-workspace reports-history">
       <div className="section-heading"><div><h2>Generated-report history</h2><p className="reports-section-description">Download saved files and review their reporting period, scope, and status.</p></div></div>

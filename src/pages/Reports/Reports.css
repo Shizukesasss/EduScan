@@ -81,3 +81,12 @@
 .reports-technical-details dt { font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; }
 .reports-technical-details dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .reports-history-table .table-subline strong { font-weight: 500; color: var(--text-primary); }
+.dtr-workspace, .dtr-downloads { margin-top: 20px; }
+.dtr-duty-hours { margin-top: 20px; border-block: 1px solid var(--border-color); padding-block: 14px; }
+.dtr-duty-hours summary { cursor: pointer; font-weight: 600; }
+.dtr-schedule-grid { border: 0; padding: 0; margin: 0 0 16px; min-width: 0; max-width: 440px; }
+.dtr-weekday { display: grid; grid-template-columns: minmax(68px, 1fr) repeat(2, minmax(0, 1fr)); align-items: center; gap: 8px; margin-bottom: 6px; }
+.dtr-weekday span { font-size: 13px; }
+.dtr-schedule-labels { font-weight: 600; }
+.dtr-preview { min-width: 660px; }
+.dtr-downloads { justify-content: flex-start; flex-wrap: wrap; gap: 12px; }

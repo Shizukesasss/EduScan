@@ -274,11 +274,19 @@ def _combined_arts_health(workbook, terms, sheets, students, cached):
 
 def validate_adaptive_class_record_export(
     db, book, full, region, division, school_id, allowed_teacher_id=None,
-    all_terms=False, through_term=None,
+    all_terms=False, through_term=None, *, draft_preview=False,
 ):
     """Collect common and requested-term blockers without saving a workbook."""
-    issues = collect_common_export_issues(full, region, division, school_id)
+    issues = collect_common_export_issues(full, region, division, school_id, draft_preview=draft_preview)
     term = full.get('gradebook', {}).get('term_order')
+    if draft_preview and (all_terms or through_term or book.is_legacy_readonly):
+        issues.append(create_validation_issue(
+            'DRAFT_PREVIEW_SCOPE_INVALID', 'export_requirements',
+            {'type': 'gradebook', 'field': 'Export term', 'term': term},
+            'Draft preview requires an editable current-term class record.',
+            'Choose the current term of a non-legacy Draft gradebook.', ['export'],
+        ))
+        return issues
     if term not in (1, 2, 3) or through_term not in (None, 2) or (through_term and all_terms) or (through_term == 2 and term != 2):
         issues.append(create_validation_issue(
             'EXPORT_TERM_SCOPE_INVALID', 'export_requirements',
@@ -333,22 +341,29 @@ def validate_adaptive_class_record_export(
     return issues
 
 
-def export_adaptive(db, book, full, region, division, school_id, allowed_teacher_id=None, all_terms=False, through_term=None):
-    from .reports import _complete_finalized_record, _write_class_record_workbook, new_report_path, EXPORT_DIR, _safe_name
+def export_adaptive(db, book, full, region, division, school_id, allowed_teacher_id=None, all_terms=False,
+                    through_term=None, *, draft_preview=False):
+    from .reports import (_complete_draft_preview_record, _complete_finalized_record, _write_class_record_workbook,
+                          new_report_path, EXPORT_DIR, _safe_name)
     from .gradebook_validation import raise_export_validation
     raise_export_validation(validate_adaptive_class_record_export(
         db, book, full, region, division, school_id, allowed_teacher_id,
-        all_terms=all_terms, through_term=through_term,
+        all_terms=all_terms, through_term=through_term, draft_preview=draft_preview,
     ))
     if allowed_teacher_id is not None and book.teacher_user_id != allowed_teacher_id:
         raise HTTPException(403, 'This saved class record belongs to another teacher.')
-    if not _complete_finalized_record(full):
-        raise HTTPException(409, 'Finalize the complete class record before exporting.')
+    complete_record = _complete_draft_preview_record if draft_preview else _complete_finalized_record
+    if not complete_record(full):
+        message = ('Complete the saved Draft class record before previewing.' if draft_preview
+                   else 'Finalize the complete class record before exporting.')
+        raise HTTPException(409, message)
     if not region.strip() or not division.strip() or not school_id.strip().isdigit():
         raise HTTPException(422, 'Enter the region, division, and numeric school ID before exporting.')
     workbook = Workbook()
     inputs = workbook.active
     inputs.title = 'INPUT DATA'
+    if draft_preview:
+        _text(inputs, 5, 2, 'DRAFT PREVIEW - NOT FINAL').font = Font(bold=True)
     gb = full['gradebook']
     for row, label, value in ((10, 'REGION', region), (11, 'DIVISION', division), (13, 'SCHOOL ID', school_id),
                               (14, 'SCHOOL NAME', 'San Jose National High School'), (15, 'SCHOOL YEAR', gb['school_year_name']),
@@ -364,12 +379,14 @@ def export_adaptive(db, book, full, region, division, school_id, allowed_teacher
         except HTTPException:
             return None
         return ('PE and H' if 'HEALTH' in subject.upper() else 'M and A') if kind == 'mapeh' else None
-    combined = not (all_terms or through_term) and area(gb['subject_name']) is not None
+    combined = not (draft_preview or all_terms or through_term) and area(gb['subject_name']) is not None
     query = select(Gradebook).where(Gradebook.school_year_id == book.school_year_id, Gradebook.grade_level_id == book.grade_level_id,
                                    Gradebook.section_id == book.section_id,
                                    Gradebook.grading_period.has(GradingPeriod.deleted_at.is_(None)), Gradebook.subject.has(Subject.deleted_at.is_(None)))
     if not combined:
         query = query.where(Gradebook.subject_id == book.subject_id)
+    if draft_preview:
+        query = query.where(Gradebook.id == book.id)
     if allowed_teacher_id is not None:
         query = query.where(Gradebook.teacher_user_id == allowed_teacher_id)
     periods = tuple(range(1, (through_term or 3) + 1)) if all_terms or through_term else (book.term_order,)
@@ -382,7 +399,7 @@ def export_adaptive(db, book, full, region, division, school_id, allowed_teacher
         if combined and learning_area is None:
             continue
         term = full if sibling.id == book.id else get_gradebook_full(db, sibling.id)
-        if not _complete_finalized_record(term):
+        if not complete_record(term):
             continue
         key = (sibling.term_order, learning_area)
         if key in terms:
@@ -396,6 +413,8 @@ def export_adaptive(db, book, full, region, division, school_id, allowed_teacher
     for key, term in terms.items():
         sheet_name = f'Term {key[0]} {key[1]}' if combined else None
         sheets[key] = _term_sheet(workbook, term, cached, sheet_name)
+        if draft_preview:
+            sheets[key]['A1'] = 'DRAFT PREVIEW - NOT FINAL'
     if combined:
         _combined_arts_health(workbook, terms, sheets, full['students'], cached)
     for sheet in workbook:
@@ -403,7 +422,8 @@ def export_adaptive(db, book, full, region, division, school_id, allowed_teacher
             if any(cell.data_type == 'f' and len(cell.value) > 8192 for cell in row):
                 raise HTTPException(409, 'This assessment setup exceeds the Excel formula length limit.')
     period_name = 'Terms1-2' if through_term == 2 else 'AllTerms' if all_terms else f"Term{gb['term_order']}"
-    target = new_report_path(EXPORT_DIR, f"ClassRecord-{_safe_name(gb['school_year_name'])}-{period_name}-Grade{_safe_name(gb['grade_name'])}-{_safe_name(gb['section_name'])}-{_safe_name(gb['subject_name'])}.xlsx")
+    prefix = 'DRAFT-PREVIEW-NOT-FINAL-' if draft_preview else ''
+    target = new_report_path(EXPORT_DIR, f"{prefix}ClassRecord-{_safe_name(gb['school_year_name'])}-{period_name}-Grade{_safe_name(gb['grade_name'])}-{_safe_name(gb['section_name'])}-{_safe_name(gb['subject_name'])}.xlsx")
     with TemporaryDirectory(dir=target.parent) as directory:
         source = Path(directory) / 'gradebook.xlsx'
         workbook.save(source)

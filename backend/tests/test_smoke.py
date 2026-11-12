@@ -650,7 +650,7 @@ class EduScanSmokeTest(unittest.TestCase):
         self.assertEqual(sf2.headers['content-type'], 'application/pdf')
         pdf = PdfReader(io.BytesIO(sf2.content))
         text = ' '.join(' '.join(page.extract_text().split()) for page in pdf.pages)
-        for name in ("ALPHA, LEARNER", "BETA, LEARNER", "CRUZ, TRANSFEREE", "TRANSFERRED IN"):
+        for name in ("ALPHA, LEARNER", "BETA, LEARNER", "CRUZ, TRANSFEREE", "TRANSFERRED IN", "AM Status", "PM Status"):
             self.assertIn(name, text)
 
     def test_z_secure_backup_and_restore_staging(self) -> None:

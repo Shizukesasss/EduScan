@@ -84,7 +84,7 @@ class EnrollmentStatusesTest(unittest.TestCase):
         self.db.commit()
         result = record_gate_match(self.db, self.student, 20, datetime.combine(self.day, time(8), MANILA))
         self.assertTrue(result['recorded'])
-        self.assertEqual(raw_row(self.db, self.student, self.day)['status'], 'Present')
+        self.assertEqual(raw_row(self.db, self.student, self.day)['status'], 'Late')
 
     def test_departed_inactive_people_remain_in_historical_reports(self):
         self.student.enrollment_status = 'Dropped Out'

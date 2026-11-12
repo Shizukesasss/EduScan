@@ -81,13 +81,13 @@ function AdminSystemSetup() {
           <div>
             <p className="eyebrow">Automated classification defaults</p>
             <h2>Attendance rules</h2>
-            <p className="section-copy">Accepted matches alternate automatically between time-in and time-out, supporting multiple exits and re-entries. The duplicate-scan cooldown reduces accidental repeated records while a person remains in front of the camera, and schedule-specific grace periods determine the first arrival’s tardiness.</p>
+            <p className="section-copy">The gate tracks morning and afternoon visits separately. Early arrivals count as present. Arrivals from 7:46 to 11:40 AM or 1:16 to 3:59 PM count as late. Automatic daily close waits until the last scheduled session and the daily cutoff have both passed.</p>
           </div>
         </div>
         <div className="setup-form-panel">
           <div className="form-grid two-columns">
             <label>
-              <span className="field-label">Authorized absence cutoff</span>
+              <span className="field-label">Earliest automatic daily close</span>
               <input title="Choose a time using the time picker" className="input-field" type="time" value={settings.attendance.absence_cutoff} onChange={(e) => patchArea('attendance', 'absence_cutoff', e.target.value)} />
             </label>
             <label>

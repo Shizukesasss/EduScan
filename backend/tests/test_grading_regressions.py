@@ -364,6 +364,78 @@ class ClassRecordRegressionTest(unittest.TestCase):
             self.assertEqual(incomplete.exception.status_code, 409)
             self.assertIn('SCORE_MISSING', {issue['code'] for issue in incomplete.exception.detail['issues']})
 
+    def assert_gradebook_pdf_orientations(self, book):
+        from pypdf import PdfReader
+        from app.services import reports
+
+        self.score_student(book, 80)
+        self.score_second_student(book, 80)
+        with patch.object(reports, 'EXPORT_DIR', Path(TEST_DIR.name)), patch.object(reports, 'REPORT_DIR', Path(TEST_DIR.name)):
+            for draft in (True, False):
+                with self.subTest(draft=draft):
+                    if not draft:
+                        book.status = 'Finalized'
+                        self.db.commit()
+                    response = gradebook_report_pdf_new(
+                        book.id, region='V', division='Test Division', school_id='301874',
+                        draft_preview=draft, db=self.db, user=self.admin,
+                    )
+                    pdf = PdfReader(response.path)
+                    self.assertEqual(len(pdf.pages), 1)
+                    self.assertTrue(all(page.mediabox.width > page.mediabox.height for page in pdf.pages))
+                    content = ' '.join(pdf.pages[0].extract_text().split())
+                    self.assertIn('First Student', content)
+                    self.assertIn('Second Student', content)
+                    self.assertEqual('DRAFT PREVIEW' in content, draft)
+                    self.assertEqual(book.status, 'Draft' if draft else 'Finalized')
+
+    def test_jhs_draft_and_finalized_pdfs_are_landscape(self):
+        self.configure_subject_export()
+        self.assert_gradebook_pdf_orientations(self.create(self.general))
+
+    def test_shs_draft_and_finalized_pdfs_are_landscape(self):
+        self.subject.code, self.subject.name = 'SHS-CORE-GM', 'GENERAL MATHEMATICS'
+        self.section.track = 'Academic Track'
+        self.section.track_cluster = 'Business and Entrepreneurship'
+        self.db.commit()
+        self.assert_gradebook_pdf_orientations(self.create())
+
+    def test_long_class_record_pdfs_repeat_headers_and_keep_all_learners(self):
+        from io import BytesIO
+        import re
+
+        from pypdf import PdfReader
+        from app.services import reports
+        from app.services.excel_pdf import excel_report_pdf
+
+        templates = Path(__file__).resolve().parents[1] / 'templates' / 'SUBJECT CLASS RECORDS'
+        cases = (
+            ('MATHEMATICS - Grade 7-10 Class Record.xlsx', 'TERM 1', 18, 'DESCRIPTOR'),
+            ('ECR_3Term - SSHS - SY2026-2027.xlsx', 'Term 1', 17, 'TERM GRADE'),
+        )
+        learners = [f'Learner {number:03d}' for number in range(1, 101)]
+        for filename, term, first_row, rightmost_header in cases:
+            with self.subTest(template=filename), tempfile.TemporaryDirectory(dir=TEST_DIR.name) as directory:
+                roster_rows = [*range(first_row, first_row + 50), *range(first_row + 51, first_row + 101)]
+                source = Path(directory) / 'long-roster.xlsx'
+                reports._write_class_record_workbook(
+                    templates / filename, source,
+                    {term: {f'C{row}': learner for row, learner in zip(roster_rows, learners)}},
+                )
+
+                pdf = PdfReader(BytesIO(excel_report_pdf(source, terms=(1,), landscape=True)))
+                self.assertGreater(len(pdf.pages), 1)
+                printed_learners = []
+                for page in pdf.pages:
+                    self.assertGreater(page.mediabox.width, page.mediabox.height)
+                    content = ' '.join(page.extract_text().split())
+                    self.assertIn('HIGHEST POSSIBLE SCORE', content.upper())
+                    self.assertIn(rightmost_header, content.upper())
+                    page_learners = re.findall(r'Learner \d{3}\b', content)
+                    self.assertTrue(page_learners)
+                    printed_learners.extend(page_learners)
+                self.assertEqual(printed_learners, learners)
+
     def test_shs_core_export_displays_header_weights_and_exam_split(self):
         self.subject.code, self.subject.name = 'SHS-CORE-GM', 'GENERAL MATHEMATICS'
         self.section.track = 'Academic Track'
@@ -1461,6 +1533,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
             self.assertEqual(response.media_type, 'application/pdf')
             from pypdf import PdfReader
             pdf = PdfReader(response.path)
+            self.assertEqual(len(pdf.pages), 3)
             content = ' '.join(page.extract_text() for page in pdf.pages)
             for book in books:
                 self.assertIn(f'Term {book.term_order}', content)

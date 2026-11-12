@@ -1,4 +1,4 @@
-import { isSeniorHighGrade } from './academicContext.js';
+import { isJuniorHighGrade, isSeniorHighGrade } from './academicContext.js';
 
 export function isDraftPreviewAvailable(gradebook, role) {
   const schoolYear = String(gradebook?.school_year_name || '')
@@ -9,8 +9,8 @@ export function isDraftPreviewAvailable(gradebook, role) {
     && Boolean(gradebook)
     && !gradebook.is_legacy_readonly
     && gradebook.status === 'Draft'
-    && schoolYear === '2026-2027'
-    && isSeniorHighGrade(gradebook.grade_name);
+    && (isJuniorHighGrade(gradebook.grade_name)
+      || (schoolYear === '2026-2027' && isSeniorHighGrade(gradebook.grade_name)));
 }
 
 export function buildGradebookExportQuery({

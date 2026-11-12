@@ -18,9 +18,10 @@ from sqlalchemy.orm import Session
 
 from ..config import EXPORT_DIR, TEMPLATE_DIR, settings
 from ..models import CalendarException, Person
-from .attendance import active_people, rows_for_people, rows_for_people_on_days, local_now, MANILA
+from .attendance import PUNCH_FIELDS, active_people, rows_for_people, rows_for_people_on_days, local_now, MANILA
 from .export_files import new_report_path
 from .enrollment import enrollment_remark
+from .session_report import SESSION_REPORT_TITLE, fill_session_report
 
 
 DEFAULT_TEMPLATE = TEMPLATE_DIR / "School Form 2 (SF2) Daily Attendance Report of Learners.xlsx"
@@ -241,6 +242,54 @@ def sf2_pending_attendance(db: Session, people: list[Person], year: int, month: 
     return {'unresolved_count': unresolved, 'unresolved_examples': examples}
 
 
+def _append_session_sheet(members: dict[str, bytes], rows_by_day: dict[date, list[dict]]) -> None:
+    detail = Workbook()
+    fill_session_report(detail.active, (
+        {"date": day, **row} for day, rows in rows_by_day.items() for row in rows
+    ), include_learner=True)
+    buffer = io.BytesIO()
+    detail.save(buffer)
+    detail.close()
+    sheet_path = "xl/worksheets/eduscan-sessions.xml"
+    with zipfile.ZipFile(buffer) as archive:
+        members[sheet_path] = archive.read("xl/worksheets/sheet1.xml")
+
+    workbook_path = "xl/workbook.xml"
+    rels_path = "xl/_rels/workbook.xml.rels"
+    types_path = "[Content_Types].xml"
+    workbook = ET.fromstring(members[workbook_path])
+    rels = ET.fromstring(members[rels_path])
+    types = ET.fromstring(members[types_path])
+    sheets = workbook.find(f"{{{NS_SHEET}}}sheets")
+    index = len(sheets)
+    sheet_id = max(int(sheet.get("sheetId")) for sheet in sheets) + 1
+    existing_names = {sheet.get("name").casefold() for sheet in sheets}
+    title = SESSION_REPORT_TITLE
+    if title.casefold() in existing_names:
+        title = f"{title} ({sheet_id})"
+    used_ids = {relation.get("Id") for relation in rels}
+    relation_id = next(f"rId{value}" for value in range(1, len(used_ids) + 2) if f"rId{value}" not in used_ids)
+    ET.SubElement(sheets, f"{{{NS_SHEET}}}sheet", {
+        "name": title, "sheetId": str(sheet_id), f"{{{NS_R}}}id": relation_id,
+    })
+    names = workbook.find(f"{{{NS_SHEET}}}definedNames")
+    if names is None:
+        names = ET.Element(f"{{{NS_SHEET}}}definedNames")
+        preceding = workbook.find(f"{{{NS_SHEET}}}externalReferences")
+        workbook.insert(list(workbook).index(preceding if preceding is not None else sheets) + 1, names)
+    ET.SubElement(names, f"{{{NS_SHEET}}}definedName", {
+        "name": "_xlnm.Print_Titles", "localSheetId": str(index),
+    }).text = f"'{title}'!$1:$1"
+    ET.SubElement(rels, f"{{{NS_REL}}}Relationship", {
+        "Id": relation_id, "Type": f"{NS_R}/worksheet", "Target": "worksheets/eduscan-sessions.xml",
+    })
+    ET.SubElement(types, f"{{{NS_CT}}}Override", {
+        "PartName": f"/{sheet_path}", "ContentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml",
+    })
+    for path, root in ((workbook_path, workbook), (rels_path, rels), (types_path, types)):
+        members[path] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
 def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
                  school_id: str, school_year: str, school_name: str) -> Path:
     days = _school_days(db, year, month)
@@ -295,10 +344,8 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
     tardy_positions: list[tuple[int, int]] = []
     male_present = [0] * len(days)
     female_present = [0] * len(days)
-    daily_status = {
-        day: {row["person_id"]: row["status"] for row in rows_for_people(db, students, day)}
-        for day in days
-    }
+    rows_by_day = rows_for_people_on_days(db, students, days)
+    daily_status = {day: {row["person_id"]: row["status"] for row in rows} for day, rows in rows_by_day.items()}
     for group, row_numbers in ((males, MALE_ROWS), (females, FEMALE_ROWS)):
         for person, row_number in zip(group, row_numbers):
             _set_text(_cell(worksheet, row_number, 2), person.full_name.upper())
@@ -341,6 +388,9 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
         members["xl/media/eduscan-tardy.png"] = _triangle_png()
         members["[Content_Types].xml"] = _ensure_png_content_type(members["[Content_Types].xml"])
 
+    today = local_now().date()
+    _append_session_sheet(members, {day: rows for day, rows in rows_by_day.items() if day <= today})
+
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     output = new_report_path(EXPORT_DIR, f"SF2-{year}-{month:02d}-Grade-{grade}-{section}.xlsx")
     temporary = output.with_suffix(".tmp.xlsx")
@@ -359,19 +409,21 @@ def generate_temporary_log(db: Session, day: date, grade: str | None = None,
     sheet.title = "Section Attendance" if grade and section else "All-School Attendance"
     sheet.append(["Date", "Student / Employee ID", "LRN", "Name", "Sex", "Role", "Grade", "Section",
                   "Enrollment Status", "Enrollment Start", "Enrollment End", "Transfer School",
-                  "Time In", "Time Out", "Status", "Source"])
+                  "AM Time In", "AM Time Out", "PM Time In", "PM Time Out", "Status", "Source",
+                  "AM Status", "PM Status"])
     people = active_people(db, grade, section, students_only=bool(grade or section), include_departed=True)
     for row in rows_for_people(db, people, day):
         sheet.append([day, row["external_id"], row["lrn"], row["full_name"], row["sex"], row["role"],
                       row["grade"], row["section"], row["enrollment_status"], row["enrollment_start_date"],
-                      row["enrollment_end_date"], row["transfer_school"], row["time_in"], row["time_out"],
-                      row["status"], row["source"]])
+                      row["enrollment_end_date"], row["transfer_school"], *(row[key] for key in PUNCH_FIELDS),
+                      row["status"], row["source"], row["am_status"], row["pm_status"]])
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
     for cell in sheet[1]:
         cell.font = Font(bold=True)
     widths = {"A": 13, "B": 22, "C": 18, "D": 30, "E": 10, "F": 24, "G": 10, "H": 18,
-              "I": 20, "J": 16, "K": 16, "L": 28, "M": 13, "N": 13, "O": 18, "P": 34}
+              "I": 20, "J": 16, "K": 16, "L": 28, "M": 14, "N": 14, "O": 14, "P": 14,
+              "Q": 18, "R": 34, "S": 18, "T": 18}
     for column, width in widths.items():
         sheet.column_dimensions[column].width = width
     for cell in sheet["A"][1:]:
@@ -379,7 +431,7 @@ def generate_temporary_log(db: Session, day: date, grade: str | None = None,
     for column in ("J", "K"):
         for cell in sheet[column][1:]:
             cell.number_format = "yyyy-mm-dd"
-    for column in ("M", "N"):
+    for column in ("M", "N", "O", "P"):
         for cell in sheet[column][1:]:
             cell.number_format = "hh:mm AM/PM"
     suffix = f"-Grade-{grade}-{section}" if grade and section else "-All-School"

@@ -9,7 +9,7 @@ import unittest
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -142,6 +142,7 @@ class ReportingReliabilityTest(unittest.TestCase):
                     id=f"{learner.external_id}-{day}", person_id=learner.id,
                     attendance_date=date(2026, 11, day),
                     status="Absent" if day == 4 else "Present",
+                    time_in={2: time(7, 30), 3: time(13)}.get(day),
                     reason="Test fixture", actor_user_id=self.teacher.id,
                     actor_name="Test", actor_role="teacher", before_json="{}"))
         self.db.commit()
@@ -150,8 +151,8 @@ class ReportingReliabilityTest(unittest.TestCase):
                                       "301874", "2026-2027", "SAN JOSE NATIONAL HIGH SCHOOL")
         template = sf2.template_path()
         with zipfile.ZipFile(template) as original, zipfile.ZipFile(output) as generated:
-            self.assertEqual(set(original.namelist()), set(generated.namelist()))
-            for member in ("xl/styles.xml", "xl/workbook.xml", "xl/drawings/drawing1.xml"):
+            self.assertEqual(set(original.namelist()) | {"xl/worksheets/eduscan-sessions.xml"}, set(generated.namelist()))
+            for member in ("xl/styles.xml", "xl/drawings/drawing1.xml"):
                 self.assertEqual(original.read(member), generated.read(member), member)
         workbook = load_workbook(output, read_only=True, data_only=True)
         try:
@@ -164,22 +165,27 @@ class ReportingReliabilityTest(unittest.TestCase):
                                  ["✓", "✓", "X"])
             self.assertEqual([sheet.cell(62, column).value for column in (4, 5, 6)], [4, 4, 0])
             self.assertIn("✓", sheet["Q65"].value)
+            sessions = list(workbook["AM-PM Attendance"].values)
+            self.assertEqual(sessions[0][5::3], ("AM Status", "PM Status"))
+            self.assertEqual({row[5::3] for row in sessions[1:] if row[0] == "2026-11-02"}, {("Present", "Absent")})
+            self.assertEqual({row[5::3] for row in sessions[1:] if row[0] == "2026-11-03"}, {("Absent", "Present")})
         finally:
             workbook.close()
 
     def test_failed_export_retries_on_next_tick_without_reclosing_attendance(self):
         set_json(self.db, "attendance", {"auto_close_enabled": True, "absence_cutoff": "09:00"})
         worker = scheduler.AttendanceScheduler()
+        after_cutoff = self.now.replace(hour=16)
         with patch.object(gate_exports, "refresh_temporary_log_pdf", side_effect=[OSError("test disk failure"), self.root / "retried.xlsx"]) as output:
             with self.assertLogs(gate_exports.__name__, level="ERROR"):
-                result = worker.run_once(self.now)
+                result = worker.run_once(after_cutoff)
             self.assertEqual(result["created"], 2)
             self.assertIn(self.day, gate_exports._pending_days)
             self.assertEqual(output.call_count, 1)
             original_run = worker.run_once
             worker._stop = Mock()
             worker._stop.wait.side_effect = [False, True]
-            with patch.object(worker, "run_once", side_effect=lambda: original_run(self.now)), patch.object(worker, "run_scheduled_backup"):
+            with patch.object(worker, "run_once", side_effect=lambda: original_run(after_cutoff)), patch.object(worker, "run_scheduled_backup"):
                 worker._run()
             self.assertEqual(output.call_count, 2)
         self.assertEqual(len(self.db.scalars(select(AttendanceEvent)).all()), 2)

@@ -24,7 +24,7 @@ from ..config import EXPORT_DIR
 from ..models import GeneratedReport, Person, User
 from .attendance import active_people, rows_for_people
 from .grading import gradebook_summary
-from .academic_context import is_senior_high
+from .academic_context import is_junior_high, is_senior_high
 from .grading_engine import round_value
 from .export_files import new_report_path
 from .excel_pdf import excel_report_pdf
@@ -91,7 +91,7 @@ def register_workbook_report(db: Session, source: Path, report_type: str, parame
             parameters = {**parameters, '_sf2_preview': official_sf2_preview(source, tardy=tardy)}
         if file_format == "xlsx":
             return register_report(db, source, report_type, parameters, actor)
-        pdf.write_bytes(excel_report_pdf(source, terms=terms, draft=draft))
+        pdf.write_bytes(excel_report_pdf(source, terms=terms, draft=draft, landscape=report_type == "Grading Summary"))
         return register_report(db, pdf, report_type, parameters, actor)
     finally:
         pdf.unlink(missing_ok=True)
@@ -536,6 +536,12 @@ def validate_gradebook_report_xlsx(
     if allowed_teacher_id is not None and book.teacher_user_id != allowed_teacher_id:
         raise HTTPException(status_code=403, detail='This saved class record belongs to another teacher.')
 
+    if draft_preview and is_junior_high(full['gradebook']['grade_name']):
+        return validate_adaptive_class_record_export(
+            db, book, full, region, division, school_id, allowed_teacher_id,
+            all_terms=all_terms, through_term=through_term, draft_preview=True,
+        )
+
     if is_senior_high(full['gradebook']['grade_name']):
         from .shs_class_record_export import is_supported_shs_ecr_school_year, validate_shs_ecr_export
         if is_supported_shs_ecr_school_year(full['gradebook']['school_year_name']):
@@ -570,8 +576,8 @@ def validate_gradebook_report_xlsx(
         return [create_validation_issue(
             'DRAFT_PREVIEW_UNSUPPORTED', 'export_requirements',
             {'type': 'gradebook', 'field': 'Status'},
-            'Draft previews are available only for Grade 11–12 SHS records in SY 2026–2027.',
-            'Use a supported SHS record or finalize the class record before exporting.', ['export'],
+            'Draft previews are available for JHS records and Grade 11–12 SHS records in SY 2026–2027.',
+            'Use a supported record or finalize the class record before exporting.', ['export'],
         )]
     return validate_adaptive_class_record_export(
         db, book, full, region, division, school_id, allowed_teacher_id,
@@ -592,7 +598,7 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
     # Fixed JHS templates require ST1/ST2/TE; older policies keep their own formulas.
     uses_term_exams = any(component.get('component_type') == 'Term Examinations' for component in full['components'])
     fixed_rounding = full['policy']['rounding_method'] == 'half_up' and full['policy']['rounding_decimal_places'] == 2
-    if not is_senior_high(full['gradebook']['grade_name']) and ((uses_term_exams and fixed_rounding) or full['gradebook']['subject_name'].strip().upper() in {'ARALING PANLIPUNAN', 'MAPEH'}):
+    if not draft_preview and not is_senior_high(full['gradebook']['grade_name']) and ((uses_term_exams and fixed_rounding) or full['gradebook']['subject_name'].strip().upper() in {'ARALING PANLIPUNAN', 'MAPEH'}):
         from .class_record_export import export_jhs, subject_template, validate_jhs_class_record_export
         try:
             kind, filename = subject_template(full['gradebook']['subject_name'] or '',
@@ -630,15 +636,16 @@ def generate_gradebook_report_xlsx(db: Session, gradebook_id: int, region: str =
                 if exc.status_code in {409, 422}:
                     raise_export_validation([export_rule_issue(exc.detail, full, template_name='official SHS ECR')])
                 raise
-    if draft_preview:
+    if draft_preview and not is_junior_high(full['gradebook']['grade_name']):
         raise_export_validation([create_validation_issue(
             'DRAFT_PREVIEW_UNSUPPORTED', 'export_requirements',
             {'type': 'gradebook', 'field': 'Status'},
-            'Draft previews are available only for Grade 11–12 SHS records in SY 2026–2027.',
-            'Use a supported SHS record or finalize the class record before exporting.', ['export'],
+            'Draft previews are available for JHS records and Grade 11–12 SHS records in SY 2026–2027.',
+            'Use a supported record or finalize the class record before exporting.', ['export'],
         )])
     try:
-        return export_adaptive(db, book, full, region, division, school_id, allowed_teacher_id, all_terms=all_terms, through_term=through_term)
+        return export_adaptive(db, book, full, region, division, school_id, allowed_teacher_id,
+                               all_terms=all_terms, through_term=through_term, draft_preview=draft_preview)
     except HTTPException as exc:
         if isinstance(exc.detail, dict) and exc.detail.get('code') == 'EXPORT_VALIDATION_FAILED':
             raise

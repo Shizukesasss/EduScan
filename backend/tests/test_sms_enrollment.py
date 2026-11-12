@@ -16,6 +16,7 @@ os.environ["SMS_GATEWAY_ENABLED"] = "false"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi import HTTPException
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -70,6 +71,22 @@ class SmsEnrollmentTest(unittest.TestCase):
         self.db.add(record)
         self.db.commit()
         return record
+
+    def test_personnel_sms_is_never_sent_or_requeued(self):
+        set_json(self.db, "sms", {**self.config, "enabled": True})
+        for role in ("Faculty", "Non-teaching Personnel"):
+            with self.subTest(role=role):
+                record = self.record()
+                self.person.role = role
+                self.db.commit()
+                self.assertIsNone(sms.queue_notice(self.db, self.person, "time_in", {}))
+                with patch("app.services.sms.validate_local_gateway_url"), patch("app.services.sms.httpx.post") as post:
+                    sms.send_record(self.db, record)
+                    post.assert_not_called()
+                self.assertEqual(record.status, "cancelled")
+                self.assertEqual(record.attempts, 0)
+                with self.assertRaisesRegex(HTTPException, "student guardians"):
+                    sms.requeue_record(self.db, record)
 
     def test_successful_enrollment_queues_once_and_dispatches_only_that_notice(self):
         set_json(self.db, "sms", {**self.config, "enabled": True})

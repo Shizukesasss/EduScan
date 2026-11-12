@@ -201,6 +201,11 @@ def hold_pending_before_activation(db: Session, activated_at: datetime) -> int:
     return len(records)
 
 
+def _is_ineligible_recipient(db: Session, record: SmsOutbox) -> bool:
+    # Standalone admin gateway tests do not have a person record.
+    return record.person_id is not None and db.scalar(select(Person.role).where(Person.id == record.person_id)) != "Student"
+
+
 def send_record(db: Session, record: SmsOutbox) -> SmsOutbox:
     if record.status not in {"queued", "failed"}:
         return record
@@ -210,6 +215,13 @@ def send_record(db: Session, record: SmsOutbox) -> SmsOutbox:
         return record
     record = locked
     if record.status not in {"queued", "failed"}:
+        db.commit()
+        return record
+    if _is_ineligible_recipient(db, record):
+        record.status = "cancelled"
+        record.cancelled_at = datetime.utcnow()
+        record.next_attempt_at = None
+        record.last_error = "SMS notifications are only available for student guardians."
         db.commit()
         return record
     config = sms_config(db)
@@ -343,6 +355,8 @@ def reconcile_outbox(db: Session, limit: int = 100) -> list[SmsOutbox]:
 def requeue_record(db: Session, record: SmsOutbox) -> SmsOutbox:
     if record.status not in {"failed", "exhausted", "cancelled", "held"}:
         raise HTTPException(status_code=409, detail="Only failed, exhausted, cancelled, or held messages can be requeued")
+    if _is_ineligible_recipient(db, record):
+        raise HTTPException(status_code=409, detail="SMS notifications are only available for student guardians.")
     record.status = "queued"
     record.attempts = 0
     record.gateway_message_id = None

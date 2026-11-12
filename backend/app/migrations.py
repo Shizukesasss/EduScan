@@ -44,6 +44,8 @@ MIGRATIONS = (
     ("0031_subject_names_group_shs_categories", "Treat legacy SHS category labels as one level for subject-name uniqueness"),
     ("0032_google_identity", "Link verified DepEd Google subjects and reserve school-approved account emails"),
     ("0033_deped_password_recovery", "Store time-limited password recovery challenges for verified DepEd accounts"),
+    ("0034_monthly_dtr_duty_hours", "Store per-employee recurring duty hours for Form 48"),
+    ("0035_attendance_status_override", "Preserve verified arrival status corrections"),
 )
 
 
@@ -413,6 +415,11 @@ def run_migrations(engine: Engine) -> list[str]:
                 Base.metadata.create_all(bind=connection)
             elif version == "0033_deped_password_recovery":
                 _models.DepedPasswordReset.__table__.create(bind=connection, checkfirst=True)
+            elif version == "0034_monthly_dtr_duty_hours":
+                _models.DtrDutySchedule.__table__.create(bind=connection, checkfirst=True)
+            elif version == "0035_attendance_status_override":
+                _add_column_if_missing(connection, "attendance_events", "status_overridden",
+                                       "BOOLEAN NOT NULL DEFAULT FALSE")
             elif version == "0018_grade_criteria_adjustment_requests":
                 from .models_grading import GradeCriteriaAdjustmentRequest
                 GradeCriteriaAdjustmentRequest.__table__.create(bind=connection, checkfirst=True)

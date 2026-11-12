@@ -2,6 +2,7 @@
 param(
   [switch]$Wait,
   [switch]$OpenBrowser,
+  [switch]$ApiOnly,
   [ValidateRange(1, 65535)]
   [int]$WebPort = 5175
 )
@@ -40,7 +41,9 @@ function Assert-LocalPortAvailable {
 }
 
 Assert-LocalPortAvailable -Port 8000 -ServiceName "EduScan API"
-Assert-LocalPortAvailable -Port $WebPort -ServiceName "EduScan web app"
+if (-not $ApiOnly) {
+  Assert-LocalPortAvailable -Port $WebPort -ServiceName "EduScan web app"
+}
 
 $logDirectory = Join-Path $projectRoot "logs"
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
@@ -108,18 +111,22 @@ $ready = $false
 # Keep dev services attached to the invoking console so they receive Ctrl+C.
 $processWindow = if ($Wait) { @{ NoNewWindow = $true } } else { @{ WindowStyle = 'Hidden' } }
 try {
-  $node = (Get-Command node.exe -ErrorAction Stop).Source
-  $viteScript = Join-Path $projectRoot 'node_modules\vite\bin\vite.js'
+  if (-not $ApiOnly) {
+    $node = (Get-Command node.exe -ErrorAction Stop).Source
+    $viteScript = Join-Path $projectRoot 'node_modules\vite\bin\vite.js'
+  }
   Write-Host "Starting the EduScan API on port 8000..."
   $api = Start-Process -FilePath $python -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000" -WorkingDirectory $backendRoot -RedirectStandardOutput (Join-Path $logDirectory "api.stdout.log") -RedirectStandardError (Join-Path $logDirectory "api.stderr.log") @processWindow -PassThru
-  $web = Start-Process -FilePath $node -ArgumentList ('"' + $viteScript + '" --host 127.0.0.1 --strictPort --port ' + $WebPort) -WorkingDirectory $projectRoot -RedirectStandardOutput (Join-Path $logDirectory "web.stdout.log") -RedirectStandardError (Join-Path $logDirectory "web.stderr.log") @processWindow -PassThru
-  Wait-EduScanEndpoint -Uri $webOrigin -Process $web -ServiceName "EduScan web app" -ErrorLog "logs\web.stderr.log"
-  Write-Host "EduScan web app ready (PID $($web.Id)): $webOrigin"
+  if (-not $ApiOnly) {
+    $web = Start-Process -FilePath $node -ArgumentList ('"' + $viteScript + '" --host 127.0.0.1 --strictPort --port ' + $WebPort) -WorkingDirectory $projectRoot -RedirectStandardOutput (Join-Path $logDirectory "web.stdout.log") -RedirectStandardError (Join-Path $logDirectory "web.stderr.log") @processWindow -PassThru
+    Wait-EduScanEndpoint -Uri $webOrigin -Process $web -ServiceName "EduScan web app" -ErrorLog "logs\web.stderr.log"
+    Write-Host "EduScan web app ready (PID $($web.Id)): $webOrigin"
+  }
   Wait-EduScanEndpoint -Uri "http://127.0.0.1:8000/api/health" -Process $api -ServiceName "EduScan API" -ErrorLog "logs\api.stderr.log"
   Write-Host "EduScan API ready (PID $($api.Id)): http://127.0.0.1:8000/api/health"
   Write-Host "Logs: $logDirectory"
   $ready = $true
-  if ($OpenBrowser) {
+  if ($OpenBrowser -and $web) {
     try {
       Start-Process -FilePath $webOrigin
     } catch {
@@ -128,7 +135,7 @@ try {
   }
   if ($Wait) {
     Write-Host "EduScan is running in foreground. Press Ctrl+C to stop."
-    while (-not $api.HasExited -and -not $web.HasExited) {
+    while (-not $api.HasExited -and (-not $web -or -not $web.HasExited)) {
       Start-Sleep -Milliseconds 500
     }
     if ($api.HasExited) {

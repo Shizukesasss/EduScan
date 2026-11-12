@@ -18,7 +18,7 @@ test('allows teachers to preview Grade 11 and Grade 12 SHS Drafts for the suppor
 
 test('does not allow previews for unsupported grades, years, statuses, legacy records, or roles', () => {
   const invalidDrafts = [
-    draft({ grade_name: 'Grade 10' }),
+    draft({ grade_name: 'Grade 6' }),
     draft({ school_year_name: '2027-2028' }),
     draft({ status: 'Finalized' }),
     draft({ status: 'Submitted' }),
@@ -29,6 +29,12 @@ test('does not allow previews for unsupported grades, years, statuses, legacy re
     assert.equal(isDraftPreviewAvailable(record, 'teacher'), false);
   }
   assert.equal(isDraftPreviewAvailable(draft(), 'records_officer'), false);
+});
+
+test('allows teachers to preview Grade 7 through Grade 10 Drafts', () => {
+  for (const grade_name of ['7', '8', 'Grade 9', 'Grade 10']) {
+    assert.equal(isDraftPreviewAvailable(draft({ grade_name }), 'teacher'), true);
+  }
 });
 
 test('builds a current-term preview query with the explicit preview flag', () => {
