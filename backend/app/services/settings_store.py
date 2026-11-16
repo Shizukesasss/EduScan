@@ -36,7 +36,10 @@ def get_secret(db: Session, key: str, default: str = "") -> str:
     record = db.get(SystemSetting, key)
     if not record or not record.encrypted_value:
         return default
-    return fernet.decrypt(record.encrypted_value).decode()
+    try:
+        return fernet.decrypt(record.encrypted_value).decode()
+    except Exception:
+        return default
 
 
 def set_secret(db: Session, key: str, value: str, commit: bool = True) -> None:
