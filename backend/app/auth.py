@@ -53,8 +53,18 @@ def _password_stamp(user: User) -> str:
 
 
 def require_app_request(request: Request) -> None:
+    if request.headers.get(SESSION_REQUEST_HEADER) != "1":
+        raise HTTPException(403, "Send this request from an authorized EduScan website")
     origin = request.headers.get("origin")
-    if request.headers.get(SESSION_REQUEST_HEADER) != "1" or (origin is not None and origin not in settings.allowed_origins):
+    if origin is not None:
+        if origin in settings.allowed_origins:
+            return
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+        if host and origin in (f"https://{host}", f"http://{host}"):
+            return
+        origin_host = (urlsplit(origin).hostname or "").lower()
+        if (os.getenv("VERCEL") or any("vercel.app" in o for o in settings.allowed_origins)) and origin_host.endswith(".vercel.app"):
+            return
         raise HTTPException(403, "Send this request from an authorized EduScan website")
 
 

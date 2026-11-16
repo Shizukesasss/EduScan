@@ -6,6 +6,7 @@ from .services.section_advisers import adviser_for_section, current_school_year_
 import hashlib
 import json
 import math
+import os
 import re
 import uuid
 import time as monotonic_time
@@ -127,14 +128,17 @@ app.state.request_limiter = RequestRateLimiter({
 })
 app.include_router(dtr_router)
 app.add_middleware(FormBodyLimitMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=list(settings.allowed_origins),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Content-Disposition", "Retry-After"],
-)
+cors_kwargs = {
+    "allow_origins": list(settings.allowed_origins),
+    "allow_credentials": True,
+    "allow_methods": ["*"],
+    "allow_headers": ["*"],
+    "expose_headers": ["Content-Disposition", "Retry-After"],
+}
+if os.getenv("VERCEL") or any("vercel.app" in o for o in settings.allowed_origins):
+    cors_kwargs["allow_origin_regex"] = r"https://.*\.vercel\.app"
+
+app.add_middleware(CORSMiddleware, **cors_kwargs)
 
 
 @app.middleware("http")
