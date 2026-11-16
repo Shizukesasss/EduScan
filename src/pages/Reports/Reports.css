@@ -62,6 +62,14 @@
 .reports-page .sf2-attendance-preview th { white-space: nowrap; }
 .reports-page .sf2-attendance-preview td:first-child:not([colspan]) { min-width: 160px; }
 .reports-page .sf2-attendance-preview td:last-child:not([colspan]) { max-width: 280px; }
+.reports-page .sf2-table-scroll { overflow-x: auto; width: 100%; border: 1px solid var(--border-color); border-radius: 8px; }
+.reports-page .sf2-preview-table { width: 100%; min-width: 1100px; table-layout: auto !important; border-collapse: collapse; }
+.reports-page .sf2-preview-table th,
+.reports-page .sf2-preview-table td { white-space: nowrap !important; overflow-wrap: normal !important; word-break: normal !important; padding: 10px 14px; }
+.reports-page .sf2-preview-table th:first-child,
+.reports-page .sf2-preview-table td:first-child { min-width: 70px; text-align: center; }
+.reports-page .sf2-preview-table th:nth-child(2),
+.reports-page .sf2-preview-table td:nth-child(2) { min-width: 180px; }
 .reports-page .reports-history-table { min-width: 720px; }
 .reports-page .interactive-table th { font-size: 12px; text-transform: none; letter-spacing: 0; padding: 12px; white-space: normal; overflow-wrap: anywhere; }
 .reports-page .interactive-table td { padding: 14px 12px; vertical-align: top; line-height: 1.6; font-size: 13px; white-space: normal; overflow-wrap: anywhere; }

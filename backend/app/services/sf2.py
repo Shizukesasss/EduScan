@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..archive_limits import MAX_WORKBOOK_EXPANDED_BYTES, check_archive_size, checked_workbook, expanded_chunks
-from ..config import EXPORT_DIR, TEMPLATE_DIR, settings
+from ..config import BASE_DIR, EXPORT_DIR, TEMPLATE_DIR, settings
 from ..models import CalendarException, Person
 from ..request_limits import MAX_SF2_TEMPLATE_BYTES
 from ..storage_quota import REPORT_WORK_DIR, require_capacity, storage_lock
@@ -29,6 +29,7 @@ from .enrollment import enrollment_remark
 from .session_report import SESSION_REPORT_TITLE, fill_session_report
 
 
+BUNDLED_TEMPLATE = BASE_DIR / "templates" / "School Form 2 (SF2) Daily Attendance Report of Learners.xlsx"
 DEFAULT_TEMPLATE = TEMPLATE_DIR / "School Form 2 (SF2) Daily Attendance Report of Learners.xlsx"
 SHEET_NAME = "School Form 2 (SF2)"
 SF2_WORKSHEET_PATH = "xl/worksheets/sheet1.xml"
@@ -51,10 +52,15 @@ ET.register_namespace("r", NS_R)
 
 
 def template_path() -> Path:
-    configured = Path(settings.sf2_template_path) if settings.sf2_template_path else DEFAULT_TEMPLATE
-    if not configured.exists():
-        raise HTTPException(status_code=409, detail="Upload the official SF2 workbook in System Setup before generating a report")
-    return configured
+    if settings.sf2_template_path:
+        configured = Path(settings.sf2_template_path)
+        if configured.exists():
+            return configured
+    if DEFAULT_TEMPLATE.exists():
+        return DEFAULT_TEMPLATE
+    if BUNDLED_TEMPLATE.exists():
+        return BUNDLED_TEMPLATE
+    raise HTTPException(status_code=409, detail="Upload the official SF2 workbook in System Setup before generating a report")
 
 
 def save_template(data: bytes) -> Path:

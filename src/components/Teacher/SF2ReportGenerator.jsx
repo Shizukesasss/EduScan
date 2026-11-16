@@ -118,15 +118,15 @@ function AdminSF2ReportGenerator() {
             }} />
         </label>}
       </div>
-      <div className="table-scroll">
-        <table className="interactive-table" aria-label="SF2 daily attendance preview">
+      <div className="table-scroll sf2-table-scroll">
+        <table className="interactive-table sf2-preview-table" aria-label="SF2 daily attendance preview">
           <thead><tr>
             <th>SF2 row</th><th>Learner</th><th>ID / LRN</th><th>Sex block</th><th>Movement</th>
             <th>AM Time In</th><th>AM Time Out</th><th>AM Status</th>
             <th>PM Time In</th><th>PM Time Out</th><th>PM Status</th>
             <th>Status</th><th>Template mark</th>
           </tr></thead>
-          <PaginatedBody pageSize={5} resetKey={context}>
+          <PaginatedBody pageSize={10} resetKey={context} columnCount={13}>
             {(!loading ? students : []).map((student) => {
               const mark = student.status === 'Absent' ? 'X' : student.status === 'Late' ? 'Upper-half shade'
                 : ['Present', 'Time Out'].includes(student.status) ? 'Blank (present)' : student.status;
