@@ -152,14 +152,15 @@ def render_annex_g_pdf(report: dict, enrollment_id: int, *, draft: bool) -> byte
     f.field('LRN:', learner.get('lrn'), left, identity_y, 150)
     f.field('Grade:', learner.get('grade'), left+153, identity_y, 44)
     f.field('Section:', learner.get('section'), left+199, identity_y, 56)
-    f.field('Track (SHS only):', '', left, 257 + name_wrap_shift, width)
+    f.field('Track (SHS only):', report.get('track'), left, 257 + name_wrap_shift, width)
     f.text('Dear Parents,', left, 292 + name_wrap_shift, width, 14, size=7.4)
     f.text('This Performance Report shows the ability and progress your child has made in the different learning areas as well as his/her core values.\nThe school welcomes you should you desire to know more about your child\'s progress.',
            left, 306 + name_wrap_shift, width, 51, size=7.2, region='Parent introduction')
     f.heading('LEARNING PROGRESS AND ACHIEVEMENT', left, 365 + name_wrap_shift, width)
     y = 389 + name_wrap_shift
     cols = [119, 22, 22, 22, 33, 37]
-    f.cell('Learning Areas', left, y, cols[0], 32, bold=True, center=True, size=7)
+    senior = report.get('grade') in ('11', '12')
+    f.cell('Subjects' if senior else 'Learning Areas', left, y, cols[0], 32, bold=True, center=True, size=7)
     f.cell('TERM', left+119, y, 66, 16, bold=True, center=True, size=7)
     for i in range(3):
         f.cell(str(i+1), left+119+i*22, y+16, 22, 16, bold=True, center=True, size=7)
@@ -167,7 +168,8 @@ def render_annex_g_pdf(report: dict, enrollment_id: int, *, draft: bool) -> byte
     f.cell('Remarks', left+218, y, 37, 32, bold=True, center=True, size=6.5)
     y += 32
     rows = []
-    for area in sorted(learner.get('learning_areas', []), key=_area_order):
+    areas = learner.get('learning_areas', [])
+    for area in areas if senior else sorted(areas, key=_area_order):
         rows.append((area, False))
         rows.extend((sub, True) for sub in area.get('subareas', []))
     if len(rows) > 15:
@@ -180,7 +182,7 @@ def render_annex_g_pdf(report: dict, enrollment_id: int, *, draft: bool) -> byte
         label = str(area.get('name', ''))
         row_height = 26 if len(label) > 28 else 19
         values = [label] + [(area.get('term_grades', {}).get(str(n)) if n <= term else '') for n in (1, 2, 3)]
-        values += [area.get('final_grade') if term == 3 else '', area.get('remarks', '') if term == 3 else '']
+        values += [area.get('final_grade'), area.get('remarks', '')]
         x = left
         for i, (value, cell_width) in enumerate(zip(values, cols)):
             f.cell(value, x, y, cell_width, row_height, italic=sub and i == 0,

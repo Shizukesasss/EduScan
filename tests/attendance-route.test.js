@@ -15,29 +15,31 @@ function findRoute(element, path) {
 }
 
 test('attendance reads the administrator role after login, not at app startup', async () => {
-  const previousStorage = globalThis.localStorage;
-  const values = new Map();
-  globalThis.localStorage = { getItem: (key) => values.get(key) ?? null };
+  const previousFetch = globalThis.fetch;
+  let currentRole;
+  globalThis.fetch = async () => Response.json({ role: currentRole });
   const server = await createServer({ server: { middlewareMode: true }, appType: 'custom' });
   try {
     const { default: App } = await server.ssrLoadModule('/src/App.jsx');
+    const { auth } = await server.ssrLoadModule('/src/api/client.js');
     const tree = App(); // The application starts before login.
-    values.set('userRole', 'admin');
-    values.set('eduscan.token', 'test-session');
+    currentRole = 'admin';
+    await auth.restore();
     const dashboard = findRoute(tree, '/dashboard');
     const route = findRoute(dashboard, 'attendance');
     const markup = renderToStaticMarkup(createElement(tree.type, null, route.props.element));
     assert.match(markup, /Daily attendance register/);
     assert.match(markup, /Attendance records/);
     for (const role of ['records_officer', 'privacy_officer']) {
-      values.set('userRole', role);
+      currentRole = role;
+      await auth.restore();
       const restricted = renderToStaticMarkup(createElement(tree.type, null, route.props.element));
-      assert.match(restricted, /Recognition review queue/);
+      // Server rendering does not fetch operational records in React effects.
+      assert.match(restricted, /Loading operational records/);
       assert.doesNotMatch(restricted, /Daily attendance register/);
     }
   } finally {
     await server.close();
-    if (previousStorage === undefined) delete globalThis.localStorage;
-    else globalThis.localStorage = previousStorage;
+    globalThis.fetch = previousFetch;
   }
 });

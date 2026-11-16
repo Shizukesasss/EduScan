@@ -37,9 +37,9 @@ export default function Login() {
       setBusy(true);
       setError('');
       try {
-        const result = await api.post('/auth/google', payload);
+        await api.post('/auth/google', payload);
+        const result = await auth.confirmSignIn();
         if (cancelled) return;
-        auth.save(result);
         if (result.role === 'teacher') {
           showSuccess(formatTeacherGreeting(result.full_name));
         }
@@ -77,17 +77,22 @@ export default function Login() {
 
   const handleLogin = async (e) => {
     e.preventDefault();
+    if (signingIn.current) return;
+    signingIn.current = true;
     setError(''); setBusy(true);
     try {
-      const result = await api.post('/auth/login', { username, password });
-      auth.save(result);
+      await api.post('/auth/login', { username, password });
+      const result = await auth.confirmSignIn();
       if (result.role === 'teacher') {
         showSuccess(formatTeacherGreeting(result.full_name));
       }
       const workspace = workspaceFor(result.role);
       navigate(result.must_change_password ? '/account/security' : workspace);
     } catch (err) { setError(err.message); }
-    finally { setBusy(false); }
+    finally {
+      signingIn.current = false;
+      setBusy(false);
+    }
   };
 
   return (

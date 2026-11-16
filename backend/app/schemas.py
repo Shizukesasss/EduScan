@@ -23,12 +23,14 @@ def strong_password(value: str) -> str:
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=254)
+    password: str = Field(min_length=1, max_length=200)
+    website: str | None = None
 
 
 class DepedRecoveryRequest(BaseModel):
     email: str = Field(min_length=1, max_length=254)
+    website: str | None = None
 
 
 class DepedRecoveryConfirm(DepedRecoveryRequest):
@@ -44,8 +46,6 @@ class GoogleLoginRequest(BaseModel):
 
 
 class LoginResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
     role: str
     full_name: str
     must_change_password: bool = False

@@ -14,11 +14,10 @@ os.environ["ATTENDANCE_SCHEDULER_ENABLED"] = "false"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi import HTTPException
-from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, inspect, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
-from app.auth import create_token
+from browser_test_client import BrowserTestClient, issued_session_headers
 from app.database import Base, get_db
 from app.main import academic_structure, app, save_grading_period, save_subject, seed_reference_data
 from app.migrations import MIGRATIONS, run_migrations
@@ -76,9 +75,9 @@ class AcademicDeletionTest(unittest.TestCase):
             with Session(self.engine) as db:
                 yield db
         app.dependency_overrides[get_db] = session_override
-        self.client = TestClient(app)  # No startup against the configured database.
-        self.headers = {"Authorization": f"Bearer {create_token(self.admin)}"}
-        self.teacher_headers = {"Authorization": f"Bearer {create_token(self.teacher)}"}
+        self.client = BrowserTestClient(app)  # No startup against the configured database.
+        self.headers = issued_session_headers(self.db, self.admin)
+        self.teacher_headers = issued_session_headers(self.db, self.teacher)
 
     def tearDown(self):
         self.client.close()
@@ -173,7 +172,7 @@ class AcademicDeletionTest(unittest.TestCase):
 
     def test_non_admin_roles_cannot_delete_restore_or_list_deleted(self):
         for user in (self.teacher, self.records):
-            headers = {"Authorization": f"Bearer {create_token(user)}"}
+            headers = issued_session_headers(self.db, user)
             for kind, item in (("school-years", self.year), ("grading-periods", self.period), ("grade-levels", self.grade), ("sections", self.section), ("subjects", self.subject)):
                 self.assertEqual(self.client.delete(f"/api/admin/reference/{kind}/{item.id}", headers=headers).status_code, 403)
                 self.assertEqual(self.client.post(f"/api/admin/reference/{kind}/{item.id}/restore", headers=headers).status_code, 403)

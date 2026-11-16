@@ -13,7 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..auth import DEPED_PASSWORD_PREFIX, hash_password
+from ..auth import DEPED_PASSWORD_PREFIX, hash_password, revoke_user_sessions
 from ..config import settings
 from ..models import DepedPasswordReset, User
 from .audit import add_audit
@@ -125,6 +125,7 @@ def reset_password(db: Session, address: str, code: str, new_password: str) -> s
     if changed.rowcount != 1:
         db.rollback()
         raise invalid
+    revoke_user_sessions(db, user.id)
     add_audit(db, user, "PasswordReset", "User", user.id, "EduScan password reset through a verified DepEd mailbox")
     db.commit()
     return user.google_email

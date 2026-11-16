@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.database import SessionLocal, engine
-from app.migrations import run_migrations
+from app.migrations import initialize_database
 from app.services.google_login import reserve_google_email
 
 
@@ -17,7 +17,7 @@ def main() -> int:
     parser.add_argument("--username", required=True, help="Existing EduScan username; its role and assignments are preserved")
     parser.add_argument("--email", required=True, help="Exact school-authorized @deped.gov.ph address")
     args = parser.parse_args()
-    run_migrations(engine)
+    initialize_database(engine)
     with SessionLocal() as db:
         try:
             user = reserve_google_email(db, args.username, args.email)

@@ -16,12 +16,11 @@ os.environ["ATTENDANCE_SCHEDULER_ENABLED"] = "false"
 os.environ["SMS_GATEWAY_ENABLED"] = "false"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
-from app.auth import create_token
+from browser_test_client import BrowserTestClient, issued_session_headers
 from app.database import Base, get_db
 from app.main import app
 from app.models import AttendanceCorrection, AttendanceEvent, CalendarException, ClassSchedule, ExcusedAbsence, GradeLevel, Person, PersonnelSchedule, SchoolSection, SchoolYear, SectionAdviserAssignment, User
@@ -55,9 +54,9 @@ class AttendanceSyncTest(unittest.TestCase):
             with Session(self.engine) as db:
                 yield db
         app.dependency_overrides[get_db] = session_override
-        self.client = TestClient(app)
-        self.admin_headers = {"Authorization": f"Bearer {create_token(self.admin)}"}
-        self.teacher_headers = {"Authorization": f"Bearer {create_token(self.teacher)}"}
+        self.client = BrowserTestClient(app)
+        self.admin_headers = issued_session_headers(self.db, self.admin)
+        self.teacher_headers = issued_session_headers(self.db, self.teacher)
 
     def tearDown(self):
         self.client.close()
@@ -232,7 +231,7 @@ class AttendanceSyncTest(unittest.TestCase):
         self.db.commit()
         payload = {'person_id': self.personnel.id, 'attendance_date': str(self.day), 'status': 'Present', 'time_in': '07:30',
                    'assisted': True, 'identity_verified': True, 'reason': 'School identity verified in person'}
-        for headers in (self.teacher_headers, {'Authorization': f'Bearer {create_token(scanner)}'}):
+        for headers in (self.teacher_headers, issued_session_headers(self.db, scanner)):
             response = self.client.post('/api/attendance/corrections', headers=headers, json=payload)
             self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(self.db.scalars(select(AttendanceCorrection)).all(), [])
@@ -417,10 +416,46 @@ class AttendanceSyncTest(unittest.TestCase):
         other = Person(external_id="OTHER", full_name="Other Student", role="Student", sex="Female", grade="7", section="Other")
         self.db.add(other)
         self.db.commit()
-        rows = self.api_rows(self.teacher_headers)
-        self.assertEqual([row["person_id"] for row in rows], [self.student.id])
+        loaded = []
+        def observe(_session, item):
+            if isinstance(item, Person):
+                loaded.append(item.id)
+
+        event.listen(Session, "loaded_as_persistent", observe)
+        try:
+            rows = self.api_rows(self.teacher_headers)
+            self.assertEqual([row["person_id"] for row in rows], [self.student.id])
+            roster = self.client.get("/api/persons", headers=self.teacher_headers)
+            self.assertEqual(roster.status_code, 200, roster.text)
+            self.assertEqual([row["id"] for row in roster.json()], [self.student.id])
+        finally:
+            event.remove(Session, "loaded_as_persistent", observe)
+        self.assertEqual(set(loaded), {self.student.id})
         forbidden = self.client.get(f"/api/attendance?date={self.day}&grade=7&section=Other", headers=self.teacher_headers)
         self.assertEqual(forbidden.status_code, 403)
+
+    def test_current_adviser_cannot_read_a_different_school_year(self):
+        previous_day = date(2025, 10, 13)
+        self.db.add(SchoolYear(name="2025-2026", starts_on=date(2025, 6, 1), ends_on=date(2026, 3, 31)))
+        actor = {"person_id": self.student.id, "reason": "Synthetic attendance history",
+                 "actor_user_id": self.admin.id, "actor_name": self.admin.full_name}
+        for key, day in (("previous", previous_day), ("current", self.day)):
+            self.db.add(AttendanceCorrection(id=key, attendance_date=day, status="Absent", before_json="{}",
+                                             actor_role=self.admin.role, **actor))
+            self.db.add(ExcusedAbsence(id=key, event_date=day, **actor))
+        self.db.commit()
+        for scope in ("advisory", "assigned"):
+            with self.subTest(scope=scope):
+                rows = self.client.get(f"/api/attendance?date={previous_day}&scope={scope}", headers=self.teacher_headers)
+                self.assertEqual(rows.status_code, 200, rows.text)
+                self.assertEqual(rows.json(), [])
+                rows = self.client.get(f"/api/attendance?date={self.day}&scope={scope}", headers=self.teacher_headers)
+                self.assertEqual([row["person_id"] for row in rows.json()], [self.student.id])
+
+        for collection in ("corrections", "excused"):
+            response = self.client.get(f"/api/attendance/{collection}", headers=self.teacher_headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual([row["id"] for row in response.json()], ["current"])
 
     def test_range_query_count_does_not_grow_with_the_roster(self):
         starts, ends = date(2026, 10, 1), date(2026, 10, 30)

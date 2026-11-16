@@ -6,12 +6,15 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 test('Reports initially mounts daily data and defers offscreen workspaces, with working deep links', async () => {
   const previousWindow = globalThis.window;
-  const previousStorage = globalThis.localStorage;
+  const previousFetch = globalThis.fetch;
+  let role = 'admin';
   globalThis.window = { location: { hash: '' } };
-  globalThis.localStorage = { getItem: key => key === 'userRole' ? 'admin' : 'test-token' };
+  globalThis.fetch = async () => Response.json({ role });
   const server = await createServer({ server: { middlewareMode: true }, appType: 'custom' });
   try {
     const { default: Reports } = await server.ssrLoadModule('/src/pages/Reports/Reports.jsx');
+    const { auth } = await server.ssrLoadModule('/src/api/client.js');
+    await auth.restore();
     const { default: PaginatedBody } = await server.ssrLoadModule('/src/components/Common/PaginatedBody.jsx');
     const { ToastProvider } = await server.ssrLoadModule('/src/contexts/ToastContext.jsx');
     const rows = Array.from({ length: 8 }, (_, index) => createElement('tr', { key: index },
@@ -34,11 +37,12 @@ test('Reports initially mounts daily data and defers offscreen workspaces, with 
     window.location.hash = '#monthly-dtr';
     assert.match(render(), /Monthly DTR \(Form 48\)/);
     assert.match(render(), /Name or Employee ID/);
-    globalThis.localStorage = { getItem: key => key === 'userRole' ? 'records_officer' : 'test-token' };
+    role = 'records_officer';
+    await auth.restore();
     assert.doesNotMatch(render(), /href="#monthly-dtr"/);
   } finally {
     await server.close();
     if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow;
-    if (previousStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = previousStorage;
+    globalThis.fetch = previousFetch;
   }
 });

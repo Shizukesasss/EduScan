@@ -1058,3 +1058,11 @@ def is_supported_shs_ecr_school_year(value: object) -> bool:
     year = re.sub(r"^\s*SY\s*", "", str(value or ""), flags=re.IGNORECASE)
     year = re.sub(r"\s*[-–—]\s*", "-", year.strip())
     return year == "2026-2027"
+
+
+def shs_ecr_subject_term_count(subject: Subject, grade_name: str) -> int:
+    from .reports import TEMPLATES_DIR
+
+    template = TEMPLATES_DIR / "SUBJECT CLASS RECORDS" / "ECR_3Term - SSHS - SY2026-2027.xlsx"
+    catalog, _ = _ecr_reference_data(template)
+    return _course_selection(subject, grade_name, catalog)[5]

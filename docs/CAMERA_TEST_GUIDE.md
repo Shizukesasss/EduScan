@@ -2,6 +2,8 @@
 
 Open `http://127.0.0.1:5174/scanner/test` while signed in as administrator. Confirm the heading is **EduScan Camera Test** and the banner says **TEST MODE — no attendance, SMS, review changes, or saved camera frames**. This page has no live-recognition or enrollment button.
 
+Camera uploads use JPEG or PNG. The server checks each image before loading its pixels and accepts up to 3840 × 2160 after orientation is applied, with a 32 MiB per-frame decoded budget. The scanner and enrollment screens capture frames at a maximum dimension of 960 pixels.
+
 Use willing participants and existing authorized enrollments. Do not enroll new people merely to complete a test. Unknown people can be detected and screened but cannot pass identity recognition.
 
 ## Today: baseline and photo

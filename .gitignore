@@ -20,9 +20,9 @@ dist-ssr/
 backend/.venv/
 
 # ─── EduScan secrets & environment ───────────────────────────────────────────
-backend/.env
-# allow the example file
-!backend/.env.example
+.env
+.env.*
+!.env.example
 
 # ─── EduScan runtime-generated data (NOT committed) ──────────────────────────
 # The database lives here — each developer/server has their own local copy.

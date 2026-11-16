@@ -322,11 +322,13 @@ def _identity_key(person: Person) -> str:
 
 
 def active_people(db: Session, grade: str | None = None, section: str | None = None,
-                  students_only: bool = False, include_departed: bool = False) -> list[Person]:
+                  students_only: bool = False, include_departed: bool = False, *, person_scope=None) -> list[Person]:
     eligible = Person.active.is_(True)
     if include_departed:
         eligible = or_(eligible, Person.enrollment_status.in_(DEPARTURE_STATUSES), Person.enrollment_end_date.is_not(None))
     query = select(Person).where(eligible)
+    if person_scope is not None:
+        query = query.where(person_scope)
     if students_only:
         query = query.where(Person.role == "Student")
     if grade:
@@ -346,8 +348,8 @@ def active_people(db: Session, grade: str | None = None, section: str | None = N
 
 
 def list_rows(db: Session, day: date, grade: str | None = None, section: str | None = None,
-              students_only: bool = False) -> list[dict]:
-    people = active_people(db, grade, section, students_only, include_departed=True)
+              students_only: bool = False, *, person_scope=None) -> list[dict]:
+    people = active_people(db, grade, section, students_only, include_departed=True, person_scope=person_scope)
     return rows_for_people(db, people, day)
 
 
@@ -491,11 +493,11 @@ def record_gate_match(db: Session, person: Person, distance: float, now: datetim
 
 
 def close_day(db: Session, day: date, grade: str | None = None, section: str | None = None,
-              due_at: time | None = None) -> int:
+              due_at: time | None = None, *, person_scope=None) -> int:
     if not is_instructional_day(db, day):
         return 0
     count = 0
-    people = active_people(db, grade, section, students_only=bool(grade or section))
+    people = active_people(db, grade, section, students_only=bool(grade or section), person_scope=person_scope)
     hours = _report_duty_hours(db, people, [day])
     exception = calendar_exception(db, day)
     for person in people:
@@ -538,8 +540,9 @@ def close_due_attendance(db: Session, day: date, current_time: time) -> int:
     return close_day(db, day, due_at=current_time)
 
 
-def save_correction(db: Session, payload, actor: User) -> AttendanceCorrection:
-    person = db.get(Person, payload.person_id)
+def save_correction(db: Session, payload, actor: User, *, person: Person | None = None) -> AttendanceCorrection:
+    if person is None:
+        person = db.get(Person, payload.person_id)
     if not person:
         raise HTTPException(status_code=404, detail="Person was not found")
     if enrollment_block(person, payload.attendance_date) and payload.status != "No scan":

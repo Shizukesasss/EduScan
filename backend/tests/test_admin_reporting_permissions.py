@@ -11,14 +11,35 @@ from io import BytesIO
 from pypdf import PdfReader
 
 import test_attendance_sync as fixtures
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.orm import Session
 from app import main
 from app.models import AttendanceEvent, ClassSchedule, GeneratedReport, SchoolYear, SectionAdviserAssignment, SchoolSection, Subject, User
 from app.services import reports, sf2
-from app.auth import create_token
+from browser_test_client import issued_session_headers
 
 
 class AdminReportingPermissionsTest(unittest.TestCase):
+    def test_teacher_report_queries_load_only_assigned_exports(self):
+        allowed = self.report()
+        excluded = self.report(section="Other")
+        loaded = []
+
+        def observe(_session, item):
+            if isinstance(item, GeneratedReport):
+                loaded.append(item.id)
+
+        event.listen(Session, "loaded_as_persistent", observe)
+        try:
+            history = self.client.get("/api/reports/history", headers=self.teacher_headers)
+            forbidden = self.client.get(f"/api/reports/history/{excluded.id}/download", headers=self.teacher_headers)
+        finally:
+            event.remove(Session, "loaded_as_persistent", observe)
+        self.assertEqual(history.status_code, 200, history.text)
+        self.assertEqual([item["id"] for item in history.json()], [allowed.id])
+        self.assertEqual(forbidden.status_code, 403, forbidden.text)
+        self.assertEqual(set(loaded), {allowed.id})
+
     def setUp(self):
         self.fixture = fixtures.AttendanceSyncTest()
         self.fixture.setUp()
@@ -87,7 +108,7 @@ class AdminReportingPermissionsTest(unittest.TestCase):
         self.assertEqual([row['id'] for row in own.json()],[schedule_id])
         other=User(username='other-teacher',full_name=self.teacher.full_name,role='teacher',active=True,password_hash='unused',must_change_password=False)
         self.db.add(other);self.db.commit()
-        other_headers={'Authorization':f'Bearer {create_token(other)}'}
+        other_headers=issued_session_headers(self.db, other)
         self.assertEqual(self.client.get('/api/schedules',headers=other_headers).json(),[])
         self.teacher.full_name='Renamed Teacher';self.db.commit()
         self.assertEqual(len(self.client.get('/api/schedules',headers=self.teacher_headers).json()),1)
@@ -100,8 +121,26 @@ class AdminReportingPermissionsTest(unittest.TestCase):
         self.assertEqual([item['id'] for item in result.json()],[allowed.id])
         for item in excluded:
             self.assertEqual(self.client.get(f'/api/reports/history/{item.id}/preview',headers=self.teacher_headers).status_code,403)
-        self.assertEqual(self.client.get(f'/api/reports/history/{allowed.id}/download',headers=self.teacher_headers).status_code,403)
+        self.assertTrue(result.json()[0]['can_download'])
+        download = self.client.get(f'/api/reports/history/{allowed.id}/download', headers=self.teacher_headers)
+        self.assertEqual(download.status_code, 200, download.text if download.status_code != 200 else '')
+        self.assertEqual(download.content, Path(allowed.file_path).read_bytes())
+        for item in excluded:
+            self.assertEqual(self.client.get(f'/api/reports/history/{item.id}/download',headers=self.teacher_headers).status_code,403)
         self.assertEqual(self.client.post(f'/api/reports/history/{allowed.id}/review',headers=self.teacher_headers,json={'status':'Approved','note':'Not authorized'}).status_code,403)
+
+    def test_subject_teacher_can_preview_but_only_school_year_adviser_can_download(self):
+        from app.models import SubjectTeachingAssignment
+
+        item = self.report()
+        adviser = self.db.scalar(select(SectionAdviserAssignment))
+        self.db.add(SubjectTeachingAssignment(school_year_id=adviser.school_year_id, section_id=adviser.section_id,
+                                              teacher_user_id=self.teacher.id, subject_id=self.subject.id))
+        self.db.delete(adviser)
+        self.db.commit()
+        self.assertEqual(self.client.get(f'/api/reports/history/{item.id}/preview', headers=self.teacher_headers).status_code, 200)
+        self.assertFalse(self.client.get('/api/reports/history', headers=self.teacher_headers).json()[0]['can_download'])
+        self.assertEqual(self.client.get(f'/api/reports/history/{item.id}/download', headers=self.teacher_headers).status_code, 403)
 
     def test_readonly_preview_matches_registered_snapshot_and_preserves_tardy_mark(self):
         self.db.add(AttendanceEvent(id='late-fixture',person_id=self.fixture.student.id,event_date=date(2026,10,13),event_time=time(8,20),direction='Time In',status='Late',source='Test'))
@@ -120,6 +159,7 @@ class AdminReportingPermissionsTest(unittest.TestCase):
         self.assertEqual(self.db.query(GeneratedReport).count(),1)
         Path(item.file_path).write_bytes(before+b'tampered')
         self.assertEqual(self.client.get(f'/api/reports/history/{item.id}/preview',headers=self.teacher_headers).status_code,409)
+        self.assertEqual(self.client.get(f'/api/reports/history/{item.id}/download',headers=self.teacher_headers).status_code,409)
 
     def test_monthly_preview_includes_departed_learners_for_the_selected_month(self):
         student=self.fixture.student

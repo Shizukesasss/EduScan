@@ -56,7 +56,7 @@ function Confirm-RemoteDatabaseStartup {
     }
 
     Write-Host ''
-    $message = 'EduScan API startup applies database migrations and seeds users/reference data in the configured remote database.'
+    $message = 'EduScan API startup seeds reference data in the configured remote database. PostgreSQL runs migrations separately with maintenance credentials. MySQL can apply migrations on startup. Demo users are created only if explicitly enabled.'
     if ($ShowDatabasePrompt) {
         Add-Type -AssemblyName System.Windows.Forms
         $answer = [System.Windows.Forms.MessageBox]::Show(

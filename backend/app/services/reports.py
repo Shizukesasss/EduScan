@@ -20,8 +20,9 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..config import EXPORT_DIR
+from ..config import EXPORT_DIR, settings
 from ..models import GeneratedReport, Person, User
+from ..storage_quota import REPORT_WORK_DIR, atomic_write_path, require_capacity, storage_lock
 from .attendance import active_people, rows_for_people
 from .grading import gradebook_summary
 from .academic_context import is_junior_high, is_senior_high
@@ -56,7 +57,11 @@ def register_report(db: Session, source: Path, report_type: str, parameters: dic
     target = REPORT_DIR / f"{report_id}{source.suffix}"
     committed = False
     try:
-        shutil.copy2(source, target)
+        with storage_lock(EXPORT_DIR):
+            require_capacity(EXPORT_DIR, "Report", settings.report_storage_mib, source.stat().st_size,
+                             extra_roots=(REPORT_DIR,), skip_dirs=(REPORT_WORK_DIR,))
+            with atomic_write_path(target) as temporary:
+                shutil.copy2(source, temporary)
         digest = hashlib.sha256(target.read_bytes()).hexdigest()
         record = GeneratedReport(
             id=report_id, report_type=report_type, filename=source.name, file_path=str(target), file_sha256=digest,

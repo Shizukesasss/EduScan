@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 import json
 
-from sqlalchemy import inspect, text
+from sqlalchemy import delete, inspect, text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.engine import Engine
 
 from .database import Base
@@ -46,6 +47,7 @@ MIGRATIONS = (
     ("0033_deped_password_recovery", "Store time-limited password recovery challenges for verified DepEd accounts"),
     ("0034_monthly_dtr_duty_hours", "Store per-employee recurring duty hours for Form 48"),
     ("0035_attendance_status_override", "Preserve verified arrival status corrections"),
+    ("0036_browser_sessions", "Store revocable browser sessions"),
 )
 
 
@@ -74,7 +76,7 @@ def _rename_column_if_needed(connection, table: str, old_name: str, new_name: st
         connection.execute(text(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}"))
 
 
-def run_migrations(engine: Engine) -> list[str]:
+def run_migrations(engine: Engine, *, after=None) -> list[str]:
     """Apply idempotent, recorded schema migrations instead of untracked create_all calls."""
     applied_now: list[str] = []
     with engine.begin() as connection:
@@ -243,7 +245,7 @@ def run_migrations(engine: Engine) -> list[str]:
                 connection.execute(text(
                     "UPDATE school_sections SET adviser_user_id = ("
                     "SELECT users.id FROM users WHERE LOWER(TRIM(users.full_name)) = LOWER(TRIM(school_sections.adviser_name)) "
-                    "AND users.role = 'teacher' AND users.active = 1 LIMIT 1) "
+                    "AND users.role = 'teacher' AND users.active IS TRUE LIMIT 1) "
                     "WHERE adviser_user_id IS NULL AND adviser_name IS NOT NULL"
                 ))
             elif version == "0005_station_security_sms_controls":
@@ -260,7 +262,7 @@ def run_migrations(engine: Engine) -> list[str]:
                 _create_index_if_missing(connection, "sms_outbox", "ix_sms_outbox_next_attempt_at",
                                          "next_attempt_at")
             elif version == "0006_remove_station_direction_mode":
-                connection.execute(text("DELETE FROM system_settings WHERE `key` LIKE 'scanner:mode:%'"))
+                connection.execute(delete(_models.SystemSetting).where(_models.SystemSetting.key.like("scanner:mode:%")))
             elif version == "0007_personnel_attendance_schedules":
                 Base.metadata.create_all(bind=connection)
             elif version == "0008_completion_workflows":
@@ -420,6 +422,8 @@ def run_migrations(engine: Engine) -> list[str]:
             elif version == "0035_attendance_status_override":
                 _add_column_if_missing(connection, "attendance_events", "status_overridden",
                                        "BOOLEAN NOT NULL DEFAULT FALSE")
+            elif version == "0036_browser_sessions":
+                _models.AuthSession.__table__.create(bind=connection, checkfirst=True)
             elif version == "0018_grade_criteria_adjustment_requests":
                 from .models_grading import GradeCriteriaAdjustmentRequest
                 GradeCriteriaAdjustmentRequest.__table__.create(bind=connection, checkfirst=True)
@@ -428,7 +432,27 @@ def run_migrations(engine: Engine) -> list[str]:
                 {"version": version, "description": description, "applied_at": datetime.utcnow()},
             )
             applied_now.append(version)
+        if after is not None:
+            after(connection)
     return applied_now
+
+
+def verify_schema(engine: Engine) -> None:
+    """Check PostgreSQL schema versions without requiring runtime DDL privileges."""
+    try:
+        with engine.connect() as connection:
+            applied = set(connection.scalars(text("SELECT version FROM public.schema_migrations")))
+    except ProgrammingError:
+        raise RuntimeError("EduScan cannot read the PostgreSQL migration ledger. Run tools/postgres_access.py migrate with the maintenance credential.") from None
+    if any(version not in applied for version, _ in MIGRATIONS):
+        raise RuntimeError("EduScan PostgreSQL migrations are pending. Run tools/postgres_access.py migrate with the maintenance credential.")
+
+
+def initialize_database(engine: Engine) -> None:
+    if engine.dialect.name == "postgresql":
+        verify_schema(engine)
+    else:
+        run_migrations(engine)
 
 
 def upgrade_mapeh_area_schema(engine: Engine, *, approved: bool = False):

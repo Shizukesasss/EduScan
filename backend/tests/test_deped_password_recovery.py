@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 
 from test_google_login import claims, school
+from browser_test_client import response_session_headers
 from app import auth, main
 from app.services import google_login
 
@@ -53,14 +54,14 @@ def test_verified_mailbox_can_reset_eduscan_password_and_sign_in(school, monkeyp
     credentials = {'username': email, 'password': 'New-school-password-2026!'}
     result = school.client.post('/api/auth/login', json=credentials)
     assert result.status_code == 200
-    token = result.json()['access_token']
-    assert school.client.get('/api/auth/me', headers={'Authorization': f'Bearer {token}'}).status_code == 200
+    headers = response_session_headers(result)
+    assert school.client.get('/api/auth/me', headers=headers).json()['auth_provider'] == 'deped_password'
     school.db.execute(text('UPDATE deped_password_resets SET requested_at = :past'),
                       {'past': datetime.utcnow() - timedelta(minutes=2)})
     school.db.commit()
     assert request_code(school, email).status_code == 202
     assert reset(school, email, code_from(messages), 'Another-school-password-2026!').status_code == 200
-    assert school.client.get('/api/auth/me', headers={'Authorization': f'Bearer {token}'}).status_code == 401
+    assert school.client.get('/api/auth/me', headers=headers).status_code == 401
     assert school.client.post('/api/auth/login', json=credentials).status_code == 401
 
 

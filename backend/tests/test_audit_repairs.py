@@ -17,12 +17,11 @@ os.environ["ATTENDANCE_SCHEDULER_ENABLED"] = "false"
 os.environ["SMS_GATEWAY_ENABLED"] = "false"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fastapi.testclient import TestClient
 from openpyxl import Workbook
 from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
-from app.auth import create_token
+from browser_test_client import BrowserTestClient, issued_session_headers
 from app.database import Base, get_db
 from app.main import app
 from app.models import (AttendanceEvent, BiometricModel, BiometricSample, GradeComponent,
@@ -71,9 +70,9 @@ class AuditRepairsTest(unittest.TestCase):
             with Session(self.engine) as db:
                 yield db
         app.dependency_overrides[get_db] = override
-        self.client = TestClient(app)
-        self.teacher_headers = {"Authorization": f"Bearer {create_token(self.teacher)}"}
-        self.admin_headers = {"Authorization": f"Bearer {create_token(self.admin)}"}
+        self.client = BrowserTestClient(app)
+        self.teacher_headers = issued_session_headers(self.db, self.teacher)
+        self.admin_headers = issued_session_headers(self.db, self.admin)
 
     def tearDown(self):
         self.client.close()

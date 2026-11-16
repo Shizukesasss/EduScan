@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +33,12 @@ def _apply_pending_restore() -> None:
         # controlled restore tool. Importing SQL during module import could
         # leave a partially restored live database.
         return
+    restored_db = pending / "eduscan.db"
+    if not restored_db.is_file():
+        return
+    with closing(sqlite3.connect(restored_db)) as connection, connection:
+        if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='auth_sessions'").fetchone():
+            connection.execute("DELETE FROM auth_sessions")
     stamp = __import__("datetime").datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     recovery = DATA_DIR / f"pre_restore_{stamp}"
     recovery.mkdir(parents=True, exist_ok=True)
@@ -97,6 +105,13 @@ for directory in (DATA_DIR, BIOMETRIC_DIR, MODEL_DIR, TEMPLATE_DIR, EXPORT_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
 
+def _positive_int(name: str, default: int) -> int:
+    value = int(os.getenv(name, str(default)))
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "").strip()
@@ -110,6 +125,12 @@ class Settings:
     smtp_password: str = os.getenv("SMTP_PASSWORD", "")
     smtp_from: str = os.getenv("SMTP_FROM", "").strip()
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./data/eduscan.db")
+    seed_demo_accounts: bool = os.getenv(
+        "EDUSCAN_SEED_DEMO_ACCOUNTS", "true" if database_url.startswith("sqlite") else "false"
+    ).lower() == "true"
+    enable_api_docs: bool = os.getenv(
+        "EDUSCAN_ENABLE_API_DOCS", "true" if database_url.startswith("sqlite") else "false"
+    ).lower() == "true"
     secret_key: str = _application_secret()
     encryption_key: bytes = _encryption_key()
     lbph_threshold: float = float(os.getenv("LBPH_THRESHOLD", "65"))
@@ -122,6 +143,18 @@ class Settings:
     sms_gateway_username: str = os.getenv("SMS_GATEWAY_USERNAME", "")
     sms_gateway_password: str = os.getenv("SMS_GATEWAY_PASSWORD", "")
     attendance_scheduler_enabled: bool = os.getenv("ATTENDANCE_SCHEDULER_ENABLED", "true").lower() == "true"
+    biometric_storage_mib: int = _positive_int("EDUSCAN_BIOMETRIC_STORAGE_MIB", 1024)
+    report_storage_mib: int = _positive_int("EDUSCAN_REPORT_STORAGE_MIB", 2048)
+    backup_storage_mib: int = _positive_int("EDUSCAN_BACKUP_STORAGE_MIB", 4096)
+    camera_requests_per_minute: int = _positive_int("EDUSCAN_CAMERA_REQUESTS_PER_MINUTE", 120)
+    report_requests_per_minute: int = _positive_int("EDUSCAN_REPORT_REQUESTS_PER_MINUTE", 30)
+    backup_requests_per_minute: int = _positive_int("EDUSCAN_BACKUP_REQUESTS_PER_MINUTE", 6)
+    password_sign_in_requests_per_minute: int = _positive_int("EDUSCAN_PASSWORD_SIGN_IN_REQUESTS_PER_MINUTE", 30)
+    google_sign_in_requests_per_minute: int = _positive_int("EDUSCAN_GOOGLE_SIGN_IN_REQUESTS_PER_MINUTE", 30)
+    reset_requests_per_minute: int = _positive_int("EDUSCAN_RESET_REQUESTS_PER_MINUTE", 12)
+    reset_confirmations_per_minute: int = _positive_int("EDUSCAN_RESET_CONFIRMATIONS_PER_MINUTE", 30)
+    sms_requests_per_minute: int = _positive_int("EDUSCAN_SMS_REQUESTS_PER_MINUTE", 20)
+    sms_gateway_requests_per_minute: int = _positive_int("EDUSCAN_SMS_GATEWAY_REQUESTS_PER_MINUTE", 30)
 
 
 settings = Settings()

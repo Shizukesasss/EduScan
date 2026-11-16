@@ -102,7 +102,7 @@ export default function TeacherLayout() {
 
   useEffect(() => {
     let cancelled = false;
-    if (!auth.token()) return undefined;
+    if (!auth.signedIn()) return undefined;
 
     Promise.allSettled([
       api.get('/my/advisory-sections'),

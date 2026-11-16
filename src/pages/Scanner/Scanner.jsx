@@ -19,6 +19,7 @@ export default function Scanner() {
   const streamRef = useRef(null);
   const timerRef = useRef(null);
   const busyRef = useRef(false);
+  const retryAtRef = useRef(0);
   const scanningRef = useRef(false);
   const scanGenerationRef = useRef(0);
   const pendingScanRef = useRef(null);
@@ -117,6 +118,7 @@ export default function Scanner() {
 
   const scanOnce = useCallback(async () => {
     if (!scanningRef.current || busyRef.current || !videoRef.current?.videoWidth) return;
+    if (performance.now() < retryAtRef.current) return;
     if (!previewOnly && stationHealth.attendance_auto_visit_ready !== true) {
       clearInterval(timerRef.current); scanningRef.current = false; scanGenerationRef.current += 1; setScanning(false);
       setFeedback({ ok: false, message: 'Restart the updated EduScan API before recording automatic attendance.' });
@@ -184,6 +186,7 @@ export default function Scanner() {
       }
     } catch (err) {
       if (!scanningRef.current || generation !== scanGenerationRef.current) return;
+      if (err.status === 429) retryAtRef.current = performance.now() + err.retryAfter * 1000;
       if (err.message.includes('backend is not reachable')) setBackendReachable(false);
       if (['model_not_trained', 'model_file_missing', 'model_key_mismatch', 'model_integrity_failed', 'model_unreadable', 'presentation_verifier_unavailable', 'identity_verifier_unavailable'].includes(err.code) || err.message.includes('No trained LBPH model is available')) {
         clearInterval(timerRef.current); scanningRef.current = false; scanGenerationRef.current += 1; setScanning(false);
@@ -258,8 +261,6 @@ export default function Scanner() {
     }
   };
 
-  const logout = () => { auth.clear(); window.location.href = '/login'; };
-
   const stopCamera = () => {
     pauseRecognition();
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -267,6 +268,16 @@ export default function Scanner() {
     if (videoRef.current) videoRef.current.srcObject = null;
     setCameraOn(false);
     setFeedback({ ok: true, message: 'Gate camera turned off.' });
+  };
+
+  const logout = async () => {
+    stopCamera();
+    try {
+      await auth.logout();
+      window.location.replace('/login');
+    } catch (error) {
+      setFeedback({ ok: false, message: error.message });
+    }
   };
 
   const handleCameraStatusToggle = () => {

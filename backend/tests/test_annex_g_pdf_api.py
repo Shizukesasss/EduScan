@@ -8,13 +8,12 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 from fastapi import HTTPException
-from fastapi.testclient import TestClient
 from pypdf import PdfReader
 from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import test_annex_g as fixtures
 from app import main
-from app.auth import create_token
+from browser_test_client import BrowserTestClient, issued_session_headers
 from app.models import GeneratedReport
 
 from app.services import reports as reports_service
@@ -38,12 +37,12 @@ class AnnexGPdfApiTests(unittest.TestCase):
             yield self.db
         main.app.dependency_overrides[main.get_db] = get_db
         try:
-            client = TestClient(main.app)
+            client = BrowserTestClient(main.app)
             for user in (self.teacher, self.admin, self.records):
                 user.must_change_password = False
             self.db.commit()
-            teacher_headers = {'Authorization': f'Bearer {create_token(self.teacher)}'}
-            admin_headers = {'Authorization': f'Bearer {create_token(self.admin)}'}
+            teacher_headers = issued_session_headers(self.db, self.teacher)
+            admin_headers = issued_session_headers(self.db, self.admin)
             with patch.object(main, 'build_annex_g_section', return_value=self.report):
                 response = client.get(f'/api/annex-g/preview/{self.enrollment.id}/pdf?term_order=3',headers=teacher_headers)
                 self.assertEqual(response.status_code,200,response.text if response.status_code != 200 else '')
@@ -63,6 +62,18 @@ class AnnexGPdfApiTests(unittest.TestCase):
         self.assertIn('DRAFT', PdfReader(io.BytesIO(response.body)).pages[0].extract_text())
         self.assertEqual(self.db.query(GeneratedReport).count(), 0)
 
+    def test_teacher_workspace_and_pdf_use_full_learner_middle_name(self):
+        self.learner.full_name = 'Learner, Test D. Jr.'
+        self.learner.middle_name = 'De Leon'
+        self.learner.name_extension = 'Jr.'
+        self.db.commit()
+
+        report = main.annex_g_section(self.year.id, '7', 'Jose', 1, self.db, self.teacher)
+        self.assertEqual(report['learners'][0]['full_name'], 'Learner, Test De Leon Jr.')
+        response = main.annex_g_preview_pdf(self.enrollment.id, 1, self.db, self.teacher)
+        self.assertIn('Learner, Test De Leon Jr.', PdfReader(io.BytesIO(response.body)).pages[0].extract_text())
+        self.assertEqual(self.learner.full_name, 'Learner, Test D. Jr.')
+
     def test_preview_rejects_placement_outside_selected_term_roster(self):
         self.report['learners'] = []
         with patch.object(main, 'build_annex_g_section', return_value=self.report):
@@ -70,14 +81,63 @@ class AnnexGPdfApiTests(unittest.TestCase):
                 main.annex_g_preview_pdf(self.enrollment.id, 1, self.db, self.teacher)
         self.assertEqual(error.exception.status_code, 404)
 
+    def test_shs_adviser_can_download_annex_g_with_track_and_subject(self):
+        self.grade.name = '11'
+        self.section.track = 'Technical Professional (TechPro) Track'
+        self.section.track_cluster = 'ICT Support and Computer Programming Technologies'
+        self.math.category = 'SHS'
+        self.math.code = 'SHS-CORE-GM'
+        self.math.name = 'General Mathematics'
+        self.db.commit()
+        book = self.add_gradebook(self.math, 1, 100)
+        book.grade_name = '11'
+        self.db.commit()
+
+        options = main.annex_g_options(self.db, self.teacher)
+        self.assertEqual(options['school_years'][0]['sections'][0]['grade'], '11')
+        report = main.annex_g_section(self.year.id, '11', 'Jose', 1, self.db, self.teacher)
+        self.assertEqual(report['learners'][0]['learning_areas'][0]['term_grades']['1'], 100)
+        response = main.annex_g_preview_pdf(self.enrollment.id, 1, self.db, self.teacher)
+        pdf_text = PdfReader(io.BytesIO(response.body)).pages[0].extract_text()
+        self.assertIn('TechPro', pdf_text)
+        self.assertIn('Mathematics', pdf_text)
+
+    def test_grade12_one_term_elective_uses_only_its_recorded_term(self):
+        self.grade.name = '12'
+        self.section.track = 'Technical Professional (TechPro) Track'
+        self.math.category = 'SHS'
+        self.math.code = 'SHS-EL-WORK-IMMERSION'
+        self.math.name = 'WORK IMMERSION FOR TECH-PRO TRACK (320 HOURS)'
+        self.math.is_elective = True
+        self.math.elective_track = self.section.track
+        self.db.commit()
+        book = self.add_gradebook(self.math, 2, 100)
+        book.grade_name = '12'
+        self.db.commit()
+
+        earlier = main.annex_g_section(self.year.id, '12', 'Jose', 1, self.db, self.teacher)['learners'][0]
+        self.assertEqual(earlier['learning_areas'][0]['term_grades'], {})
+        self.assertIsNone(earlier['learning_areas'][0]['final_grade'])
+        learner = main.annex_g_section(self.year.id, '12', 'Jose', 2, self.db, self.teacher)['learners'][0]
+        self.assertEqual(learner['learning_areas'][0]['term_grades'], {'2': 100})
+        self.assertEqual(learner['learning_areas'][0]['final_grade'], 100)
+        self.assertFalse(any('Term 1' in issue for issue in learner['blockers']))
+        self.admin.role = 'teacher'
+        with self.assertRaises(HTTPException) as denied:
+            main.annex_g_preview_pdf(self.enrollment.id, 2, self.db, self.admin)
+        self.assertEqual(denied.exception.status_code, 403)
+
     def test_class_record_only_learner_can_preview_but_cannot_release(self):
         self.db.delete(self.enrollment)
+        self.learner.full_name = 'Learner, Test D.'
+        self.learner.middle_name = 'De Leon'
         self.db.commit()
         self.add_gradebook(self.math,1,100)
         count=self.db.query(GeneratedReport).count()
         response=main.annex_g_class_record_draft_pdf(self.learner.id,self.year.id,'7','Jose',1,self.db,self.teacher)
         text=PdfReader(io.BytesIO(response.body)).pages[0].extract_text()
         self.assertIn('DRAFT',text)
+        self.assertIn('Learner, Test De Leon', text)
         self.assertIn('Mathematics',text)
         self.assertIn('100',text)
         self.assertEqual(self.db.query(GeneratedReport).count(),count)

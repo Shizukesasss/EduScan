@@ -4,6 +4,7 @@ import unittest
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import test_duplicate_enrollment as helpers
@@ -13,6 +14,7 @@ from app import main
 from app.auth import current_user
 from app.database import Base, get_db
 from app.models import AttendanceEvent, BiometricAuditEvent, GradeLevel, LearnerEnrollment, Person, SchoolSection, SchoolYear, SmsOutbox, SystemAuditEvent
+from app.services import biometrics
 
 
 class AtomicEnrollmentTest(unittest.TestCase):
@@ -151,6 +153,17 @@ class AtomicEnrollmentTest(unittest.TestCase):
         self.assertIsNotNone(self.db.scalar(select(BiometricAuditEvent).where(BiometricAuditEvent.person_id == person.id)))
         self.assertIsNotNone(self.db.scalar(select(SystemAuditEvent).where(SystemAuditEvent.entity_id == str(person.id), SystemAuditEvent.entity_type == 'Person')))
         self.assertEqual(self.db.scalars(select(AttendanceEvent)).all(), before_attendance)
+
+    def test_enrollment_at_storage_quota_leaves_records_and_files_unchanged(self):
+        path = biometrics.BIOMETRIC_DIR / "retained.enc"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(bytes(1024 * 1024))
+        before = self.snapshot()
+        limited = SimpleNamespace(**(vars(biometrics.settings) | {"biometric_storage_mib": 1}))
+        with patch.object(biometrics, "settings", limited):
+            response = self.enroll()
+        self.assertEqual(response.status_code, 507, response.text)
+        self.assertEqual(self.snapshot(), before)
 
     def test_rejected_captures_leave_no_person_samples_audit_or_sms(self):
         before = self.snapshot()

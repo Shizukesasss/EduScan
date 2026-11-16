@@ -1,5 +1,11 @@
-const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000/api';
+const browserHost = globalThis.window?.location?.hostname;
+const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(browserHost);
+const API_BASE = import.meta.env.VITE_API_URL || (loopback ? `http://${browserHost}:8000/api` : '/api');
 const pendingGets = new Map();
+const sessionListeners = new Set();
+let session = { status: 'loading', user: null };
+let sessionRevision = 0;
+let sessionChannel;
 
 function readableValidationErrors(errors) {
   return errors.map(({ loc = [], msg = 'Check this field.', type }) => {
@@ -15,42 +21,85 @@ function readableValidationErrors(errors) {
   }).filter(Boolean).join(' ');
 }
 
+function setSession(next) {
+  session = next;
+  sessionRevision++;
+  pendingGets.clear();
+  sessionListeners.forEach(listener => listener());
+}
+
+async function restoreSession() {
+  setSession({ status: 'loading', user: null });
+  const revision = sessionRevision;
+  try {
+    const user = await request('/auth/me', { signal: AbortSignal.timeout(15000) });
+    if (revision === sessionRevision) setSession({ status: 'ready', user });
+  } catch (error) {
+    if (revision === sessionRevision) {
+      setSession(error.status === 401
+        ? { status: 'ready', user: null }
+        : { status: 'error', user: null, message: error.message });
+    }
+  }
+  return session.user;
+}
+
 export const auth = {
-  token: () => localStorage.getItem('eduscan.token'),
-  role: () => localStorage.getItem('userRole'),
-  name: () => localStorage.getItem('eduscan.fullName'),
-  provider: () => localStorage.getItem('eduscan.authProvider') || 'password',
-  mustChangePassword: () => localStorage.getItem('eduscan.mustChangePassword') === 'true',
-  save(result) {
-    localStorage.setItem('eduscan.token', result.access_token);
-    localStorage.setItem('userRole', result.role);
-    localStorage.setItem('eduscan.fullName', result.full_name);
-    localStorage.setItem('eduscan.authProvider', result.auth_provider || 'password');
-    localStorage.setItem('eduscan.mustChangePassword', String(Boolean(result.must_change_password)));
+  snapshot: () => session,
+  subscribe(listener) {
+    sessionListeners.add(listener);
+    return () => sessionListeners.delete(listener);
   },
-  passwordChanged() { localStorage.setItem('eduscan.mustChangePassword', 'false'); },
+  signedIn: () => Boolean(session.user),
+  role: () => session.user?.role,
+  name: () => session.user?.full_name,
+  provider: () => session.user?.auth_provider || 'password',
+  mustChangePassword: () => Boolean(session.user?.must_change_password),
+  restore: restoreSession,
+  start() {
+    try {
+      for (const key of ['eduscan.token', 'userRole', 'eduscan.fullName', 'eduscan.authProvider', 'eduscan.mustChangePassword']) {
+        globalThis.localStorage?.removeItem(key);
+      }
+    } catch { /* Session restoration works without browser storage. */ }
+    if (globalThis.window?.BroadcastChannel && !sessionChannel) {
+      sessionChannel = new window.BroadcastChannel('eduscan.session');
+      sessionChannel.addEventListener('message', restoreSession);
+    }
+    return restoreSession();
+  },
+  async confirmSignIn() {
+    const user = await restoreSession();
+    if (!user) throw new Error(session.message || 'EduScan could not restore the session. Use the authorized website and allow its session cookie.');
+    sessionChannel?.postMessage('changed');
+    return user;
+  },
   clear() {
-    localStorage.removeItem('eduscan.token');
-    localStorage.removeItem('userRole');
-    localStorage.removeItem('eduscan.fullName');
-    localStorage.removeItem('eduscan.authProvider');
-    window.google?.accounts?.id?.disableAutoSelect();
-    localStorage.removeItem('eduscan.mustChangePassword');
+    setSession({ status: 'ready', user: null });
+    globalThis.window?.google?.accounts?.id?.disableAutoSelect();
+    sessionChannel?.postMessage('changed');
+  },
+  async logout() {
+    await request('/auth/logout', { method: 'POST', signal: AbortSignal.timeout(15000) });
+    auth.clear();
   },
 };
 
 async function request(path, options = {}) {
   const mutating = !['GET', 'HEAD'].includes((options.method || 'GET').toUpperCase());
+  const revision = sessionRevision;
   if (mutating) pendingGets.clear();
   const headers = new Headers(options.headers || {});
-  const token = auth.token();
-  if (token) headers.set('Authorization', `Bearer ${token}`);
+  headers.set('X-EduScan-Request', '1');
+  if (path !== '/auth/me' && session.user?.session_context) {
+    headers.set('X-EduScan-Session-Context', session.user.session_context);
+  }
   if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
   let response;
   try {
-    response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+    response = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'include' });
   } catch (error) {
     if (error.name === 'TimeoutError') throw new Error('EduScan backend took too long to respond. Check the API connection and try again.');
     if (error.name === 'AbortError') throw new Error('EduScan request was cancelled.');
@@ -58,7 +107,10 @@ async function request(path, options = {}) {
   } finally {
     if (mutating) pendingGets.clear();
   }
-  if (response.status === 401) auth.clear();
+  if (response.status === 401 && revision === sessionRevision &&
+      (!path.startsWith('/auth/') || path === '/auth/change-password')) {
+    setSession({ status: 'ready', user: null });
+  }
   if (!response.ok) {
     let detail = `Request failed (${response.status})`;
     let details;
@@ -70,8 +122,14 @@ async function request(path, options = {}) {
           : payload.detail?.message || 'Check the information you entered and try again.';
     } catch { /* preserve status message */ }
     const error = new Error(detail);
+    error.status = response.status;
+    if (response.status === 429) {
+      const seconds = Number(response.headers.get('Retry-After'));
+      error.retryAfter = Number.isFinite(seconds) && seconds > 0 ? seconds : 1;
+    }
     error.code = details?.code;
     error.details = details;
+    if (error.code === 'session_changed' && revision === sessionRevision) void restoreSession();
     throw error;
   }
   if (response.status === 204) return null;
@@ -82,7 +140,7 @@ function get(path, options = {}) {
   // Share only simultaneous default reads. Refreshes still fetch fresh data,
   // and callers with their own headers/signals retain independent requests.
   if (Object.keys(options).length) return request(path, options);
-  const key = JSON.stringify([auth.token(), path]);
+  const key = JSON.stringify([sessionRevision, path]);
   if (!pendingGets.has(key)) {
     const pending = request(path, options).finally(() => {
       if (pendingGets.get(key) === pending) pendingGets.delete(key);

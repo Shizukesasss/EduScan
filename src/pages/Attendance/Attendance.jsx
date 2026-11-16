@@ -70,7 +70,7 @@ export default function Attendance() {
   useEffect(() => {
     let busy = false;
     const refresh = async () => {
-      if (busy || document.visibilityState === 'hidden' || !auth.token()) return;
+      if (busy || document.visibilityState === 'hidden' || !auth.signedIn()) return;
       busy = true;
       try { await loadRows(); } finally { busy = false; }
     };

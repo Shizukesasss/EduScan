@@ -177,7 +177,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
         self.assertEqual(saved['9999']['full_name'], 'Previous Principal')
 
     def test_admin_reads_each_teachers_saved_record_without_separate_grade_calculation(self):
-        from app.main import get_gradebook_endpoint, ensure_gradebook_access
+        from app.main import get_gradebook_endpoint
         other_teacher = User(username='parity-teacher', full_name='Other Teacher', password_hash='unused', role='teacher')
         other_section = SchoolSection(grade_level_id=self.grade.id, name='Parity Section')
         other_student = Person(external_id='PARITY', full_name='Other Learner', sex='Female', role='Student', grade='11', section='Parity Section')
@@ -201,7 +201,7 @@ class ClassRecordRegressionTest(unittest.TestCase):
             self.assertEqual(refreshed, get_gradebook_endpoint(book.id, db=self.db, user=teacher))
             self.assertNotEqual(refreshed['students'], admin_view['students'])
         with self.assertRaises(HTTPException):
-            ensure_gradebook_access(self.db, self.teacher, books[1])
+            get_gradebook_endpoint(books[1].id, db=self.db, user=self.teacher)
 
     def test_strengthened_shs_policy_wins_over_legacy_policies(self):
         book = self.create()
@@ -1526,7 +1526,12 @@ class ClassRecordRegressionTest(unittest.TestCase):
             self.db.commit()
             books.append(book)
         snapshots = {book.id: grading.get_gradebook_full(self.db, book.id) for book in books}
-        with patch.object(reports, 'EXPORT_DIR', Path(TEST_DIR.name)):
+        directory = tempfile.TemporaryDirectory(dir=TEST_DIR.name)
+        self.addCleanup(directory.cleanup)
+        exports = Path(directory.name)
+        registry = exports / 'registered'
+        registry.mkdir()
+        with patch.multiple(reports, EXPORT_DIR=exports, REPORT_DIR=registry):
             response = gradebook_report_pdf_new(books[0].id, region='V', division='V', school_id='301874',
                                                 all_terms=True, db=self.db, user=officer)
             self.assertIn('AllTerms', response.filename)

@@ -96,20 +96,29 @@ export default function AnnexGWorkspace() {
   }, [selectionQuery, selectedTerm, showError]);
 
   const saveComment = async (learner) => {
-    try {
-      await api.put('/annex-g/comments', { enrollment_id: learner.enrollment_id, term_order: selectedTerm, comment: comments[learner.enrollment_id] || '' });
-      showSuccess(`Term ${selectedTerm} comment saved for ${learner.full_name}.`);
-      const query = new URLSearchParams({ school_year_id: schoolYearId, grade: selectedGrade, section: selectedSection, term_order: selectedTerm });
-      setReport(await api.get(`/annex-g/section?${query}`));
-    } catch (error) { showError(error.message); }
+    const enrollmentId = learner.enrollment_id;
+    const draft = comments[enrollmentId] ?? '';
+    const saved = await api.put('/annex-g/comments', {
+      enrollment_id: enrollmentId, term_order: selectedTerm, comment: draft,
+    });
+    setReport((current) => ({
+      ...current,
+      learners: current.learners.map((item) => item.enrollment_id === enrollmentId
+        ? { ...item, comments: { ...item.comments, [selectedTerm]: saved.comment } }
+        : item),
+    }));
+    setComments((current) => (current[enrollmentId] ?? '') === draft
+      ? { ...current, [enrollmentId]: saved.comment }
+      : current);
+    showSuccess(`Term ${selectedTerm} comment saved for ${learner.full_name}.`);
   };
 
-  const preview = (learner) => {
+  const draftPdfPath = (learner) => {
     if (learner.placement_verified === false) {
       const query = new URLSearchParams({ school_year_id: schoolYearId, grade: selectedGrade, section: selectedSection, term_order: selectedTerm });
-      return api.openDocument(`/annex-g/draft/${learner.person_id}/pdf?${query}`);
+      return `/annex-g/draft/${learner.person_id}/pdf?${query}`;
     }
-    return api.openDocument(`/annex-g/preview/${learner.enrollment_id}/pdf?term_order=${selectedTerm}`);
+    return `/annex-g/preview/${learner.enrollment_id}/pdf?term_order=${selectedTerm}`;
   };
   const reviewEnrollment = (learner) => {
     const context = selectedYear.sections.find((item) => item.grade === selectedGrade && item.section === selectedSection);
@@ -185,7 +194,7 @@ export default function AnnexGWorkspace() {
   return <section className="card-static annex-g-workspace">
     <div className="annex-g-header">
       <div>
-        <p className="eyebrow">Grades 7–10 · Adviser draft &amp; records release</p>
+        <p className="eyebrow">Grades 7–12 · Adviser draft &amp; records release</p>
         <h2>Annex G learner reports</h2>
         <p className="section-copy">Uses verified school-year enrollment, calculated age, finalized grades, and recorded attendance. Missing source data blocks release; this workspace never edits scores or attendance.</p>
       </div>
@@ -207,7 +216,7 @@ export default function AnnexGWorkspace() {
     </div>}
 
     {loading && <p className="muted-small">Loading verified enrollment and term records…</p>}
-    {!selectionQuery && <p className="empty-cell">No Grade 7–10 section is available for this account.</p>}
+    {!selectionQuery && <p className="empty-cell">No Grade 7–12 section is available for this account.</p>}
     {!loading && failedQuery === selectionQuery && selectionQuery && <p className="empty-cell">The report could not be loaded for this selection.</p>}
 
     {reportMatches && report.blockers?.length > 0 && <div className="annex-g-blockers annex-g-blockers--section">
@@ -232,6 +241,10 @@ export default function AnnexGWorkspace() {
       {visibleLearners.length === 0 && <p className="empty-cell">No learners match the current filter.</p>}
       {visibleLearners.map((learner) => {
         const isCollapsed = Boolean(collapsedIds[learner.enrollment_id]);
+        const draftComment = comments[learner.enrollment_id] ?? '';
+        const savedComment = learner.comments?.[selectedTerm];
+        const isCommentSaved = savedComment !== undefined && draftComment === savedComment;
+        const isCommentSaving = pendingAction === `comment-${learner.enrollment_id}`;
         const learnerReleases = report.released_reports?.filter((item) => item.parameters.enrollment_id === learner.enrollment_id) || [];
         return <article className={`annex-g-learner${isCollapsed ? ' is-collapsed' : ''}`} key={learner.enrollment_id}>
           <div className="annex-g-learner-heading">
@@ -267,7 +280,7 @@ export default function AnnexGWorkspace() {
                 </colgroup>
                 <thead>
                   <tr>
-                    <th>Learning area</th>
+                    <th>{['11', '12'].includes(String(selectedGrade)) ? 'Subject' : 'Learning area'}</th>
                     <th className="num-col">Term 1</th>
                     <th className="num-col">Term 2</th>
                     <th className="num-col">Term 3</th>
@@ -284,7 +297,7 @@ export default function AnnexGWorkspace() {
             {role === 'teacher' && learner.placement_verified !== false && <div className="annex-g-comment-box">
               <label>
                 <span className="field-label">Term {selectedTerm} teacher comment / recommendation</span>
-                <textarea className="input-field" rows="2" maxLength="2000" value={comments[learner.enrollment_id] || ''} onChange={(event) => setComments((current) => ({ ...current, [learner.enrollment_id]: event.target.value }))} />
+                <textarea className="input-field" rows="2" maxLength="2000" value={draftComment} onChange={(event) => setComments((current) => ({ ...current, [learner.enrollment_id]: event.target.value }))} />
               </label>
               <p className="muted-small">PDF previews include saved term comments. Save your changes before previewing or release.</p>
             </div>}
@@ -301,11 +314,14 @@ export default function AnnexGWorkspace() {
               </div>)}
             </div>
             <div className="action-row">
-              <button type="button" className="btn-secondary" disabled={Boolean(pendingAction)} onClick={() => runAction(`preview-${learner.enrollment_id}`, () => preview(learner))}>
+              <button type="button" className="btn-secondary" disabled={Boolean(pendingAction)} onClick={() => runAction(`preview-${learner.enrollment_id}`, () => api.openDocument(draftPdfPath(learner)))}>
                 {pendingAction === `preview-${learner.enrollment_id}` ? 'Preparing PDF…' : 'Preview PDF'}
               </button>
-              {role === 'teacher' && learner.placement_verified !== false && <button type="button" className="btn-primary" disabled={Boolean(pendingAction)} onClick={() => runAction(`comment-${learner.enrollment_id}`, () => saveComment(learner))}>
-                {pendingAction === `comment-${learner.enrollment_id}` ? 'Saving…' : 'Save term comment'}
+              <button type="button" className="btn-secondary" disabled={Boolean(pendingAction)} onClick={() => runAction(`draft-pdf-${learner.enrollment_id}`, () => api.download(draftPdfPath(learner), `Annex-G-DRAFT-${learner.person_id}-Term${selectedTerm}.pdf`))}>
+                {pendingAction === `draft-pdf-${learner.enrollment_id}` ? 'Downloading…' : 'Download draft PDF'}
+              </button>
+              {role === 'teacher' && learner.placement_verified !== false && <button type="button" className="btn-primary" disabled={Boolean(pendingAction) || isCommentSaved} onClick={() => runAction(`comment-${learner.enrollment_id}`, () => saveComment(learner))}>
+                {isCommentSaving ? 'Saving…' : isCommentSaved ? 'SAVED COMMENT' : 'Save term comment'}
               </button>}
               {options.can_release && <button type="button" className="btn-primary" disabled={Boolean(pendingAction) || learner.placement_verified === false || learner.blockers.length > 0 || report.blockers.length > 0} onClick={() => runAction(`release-${learner.enrollment_id}`, () => release(learner))}>
                 {pendingAction === `release-${learner.enrollment_id}` ? 'Releasing PDF…' : 'Release PDF'}

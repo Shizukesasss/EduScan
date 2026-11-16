@@ -3,10 +3,12 @@ from __future__ import annotations
 import calendar
 import io
 import os
-import uuid
 import zipfile
+import zlib
+from contextlib import closing
 from datetime import date, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from xml.etree import ElementTree as ET
 
 from fastapi import HTTPException
@@ -16,8 +18,11 @@ from PIL import Image, ImageDraw
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..archive_limits import MAX_WORKBOOK_EXPANDED_BYTES, check_archive_size, checked_workbook, expanded_chunks
 from ..config import EXPORT_DIR, TEMPLATE_DIR, settings
 from ..models import CalendarException, Person
+from ..request_limits import MAX_SF2_TEMPLATE_BYTES
+from ..storage_quota import REPORT_WORK_DIR, require_capacity, storage_lock
 from .attendance import PUNCH_FIELDS, active_people, rows_for_people, rows_for_people_on_days, local_now, MANILA
 from .export_files import new_report_path
 from .enrollment import enrollment_remark
@@ -26,6 +31,7 @@ from .session_report import SESSION_REPORT_TITLE, fill_session_report
 
 DEFAULT_TEMPLATE = TEMPLATE_DIR / "School Form 2 (SF2) Daily Attendance Report of Learners.xlsx"
 SHEET_NAME = "School Form 2 (SF2)"
+SF2_WORKSHEET_PATH = "xl/worksheets/sheet1.xml"
 DAY_COLUMNS = list(range(4, 29))  # D:AB, official form capacity: 25 reporting days
 MALE_ROWS = list(range(14, 35))
 FEMALE_ROWS = list(range(36, 61))
@@ -52,18 +58,31 @@ def template_path() -> Path:
 
 
 def save_template(data: bytes) -> Path:
-    if len(data) > 20 * 1024 * 1024:
+    if len(data) > MAX_SF2_TEMPLATE_BYTES:
         raise HTTPException(status_code=413, detail="SF2 template exceeds the 20 MB limit")
-    target = DEFAULT_TEMPLATE
-    target.write_bytes(data)
     try:
-        workbook = load_workbook(target, read_only=True, data_only=False)
-        if SHEET_NAME not in workbook.sheetnames:
-            raise ValueError(f"Required sheet '{SHEET_NAME}' is missing")
-        workbook.close()
+        with (checked_workbook(io.BytesIO(data), MAX_WORKBOOK_EXPANDED_BYTES) as source,
+              closing(load_workbook(source, read_only=True, data_only=False, keep_links=False)) as workbook):
+            if SHEET_NAME not in workbook.sheetnames:
+                raise HTTPException(status_code=422, detail=f"The workbook must contain the '{SHEET_NAME}' sheet")
+            # The official exporter edits the worksheet XML directly to preserve workbook formatting.
+            if getattr(workbook[SHEET_NAME], "_worksheet_path", None) != SF2_WORKSHEET_PATH:
+                raise HTTPException(status_code=422, detail=f"Upload the official template with '{SHEET_NAME}' as its primary worksheet")
+    except HTTPException:
+        raise
     except Exception as exc:
-        target.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail=f"The uploaded file is not the expected SF2 workbook: {exc}")
+        raise HTTPException(status_code=422, detail="The uploaded file could not be read as an .xlsx workbook") from exc
+
+    target = DEFAULT_TEMPLATE
+    staged = None
+    try:
+        with NamedTemporaryFile(dir=target.parent, suffix=".xlsx", delete=False) as upload:
+            staged = Path(upload.name)
+            upload.write(data)
+        staged.replace(target)
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
     return target
 
 
@@ -305,11 +324,12 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
     source = template_path()
     try:
         with zipfile.ZipFile(source, "r") as archive:
-            members = {item.filename: archive.read(item.filename) for item in archive.infolist()}
-            member_info = {item.filename: item for item in archive.infolist()}
-    except zipfile.BadZipFile as exc:
+            entries = check_archive_size(archive, MAX_WORKBOOK_EXPANDED_BYTES, "SF2 template")
+            members = {item.filename: b"".join(expanded_chunks(archive, item)) for item in entries}
+            member_info = {item.filename: item for item in entries}
+    except (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail="SF2 template is not a valid XLSX archive") from exc
-    worksheet_name = "xl/worksheets/sheet1.xml"
+    worksheet_name = SF2_WORKSHEET_PATH
     drawing_name = "xl/drawings/drawing1.xml"
     relationship_name = "xl/drawings/_rels/drawing1.xml.rels"
     if worksheet_name not in members:
@@ -436,13 +456,25 @@ def generate_temporary_log(db: Session, day: date, grade: str | None = None,
             cell.number_format = "hh:mm AM/PM"
     suffix = f"-Grade-{grade}-{section}" if grade and section else "-All-School"
     filename = f"temporary-attendance-{day.isoformat()}{suffix}.xlsx"
-    output = new_report_path(EXPORT_DIR, filename) if snapshot else EXPORT_DIR / filename
-    temporary = output.with_name(f'.{output.stem}-{uuid.uuid4().hex}.tmp.xlsx')
+    work_path = new_report_path(EXPORT_DIR, filename)
+    if snapshot:
+        try:
+            workbook.save(work_path)
+        except Exception:
+            work_path.unlink(missing_ok=True)
+            work_path.parent.rmdir()
+            raise
+        return work_path
+    output = EXPORT_DIR / filename
     try:
-        workbook.save(temporary)
-        os.replace(temporary, output)
+        workbook.save(work_path)
+        with storage_lock(EXPORT_DIR):
+            require_capacity(EXPORT_DIR, "Report", settings.report_storage_mib, work_path.stat().st_size,
+                             replacing=(output,), skip_dirs=(REPORT_WORK_DIR,))
+            os.replace(work_path, output)
     finally:
-        temporary.unlink(missing_ok=True)
+        work_path.unlink(missing_ok=True)
+        work_path.parent.rmdir()
     return output
 
 
@@ -454,7 +486,10 @@ def refresh_temporary_log_pdf(db: Session, day: date) -> Path:
     target = EXPORT_DIR / temporary.name
     try:
         temporary.write_bytes(gate_log_pdf(source))
-        os.replace(temporary, target)
+        with storage_lock(EXPORT_DIR):
+            require_capacity(EXPORT_DIR, "Report", settings.report_storage_mib, temporary.stat().st_size,
+                             replacing=(target,), skip_dirs=(REPORT_WORK_DIR,))
+            os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
         source.unlink(missing_ok=True)

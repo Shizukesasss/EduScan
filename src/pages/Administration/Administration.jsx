@@ -545,6 +545,7 @@ function AccountManager({ users, schoolYears, reload, success, fail }) {
     return () => { cancelled = true; };
   }, []);
   const googleAccount = users.find((item) => item.id === editing)?.auth_provider === 'google';
+  const passwordHelp = editing ? 'Reset passwords' : 'Temporary passwords';
   const patch = (field, value) => setForm((c) => ({ ...c, [field]: value }));
   const edit  = (item) => { setEditing(item.id); setForm({ username: item.username, password: '', role: item.role, full_name: item.full_name, active: item.active }); };
   const save  = async (event) => { event.preventDefault(); try { if (editing) await api.put(`/admin/users/${editing}`, { role: form.role, full_name: form.full_name, active: form.active, new_password: form.password || null }); else await api.post('/admin/users', form); success(editing ? 'Account updated.' : 'Account created.'); setEditing(null); setForm(emptyUser); await reload(); } catch (err) { fail(err); } };
@@ -556,7 +557,7 @@ function AccountManager({ users, schoolYears, reload, success, fail }) {
       <section className="card-static">
         <div className="section-heading"><div><p className="eyebrow">Role-based access</p><h2>{editing ? 'Edit account' : authConfig?.deped_only ? 'School accounts' : 'Create account'}</h2></div></div>
         {authConfigError && <p className="login-error" role="alert">{authConfigError}</p>}
-        <p className="section-copy">{authConfig?.deped_only || googleAccount ? 'DepEd accounts receive teacher access at first Google sign-in. Manage their role and active status here, then assign their classes in academic setup. Google manages their passwords.' : 'Temporary and reset passwords need 12 or more characters, including a capital letter, a small letter, a number, and a symbol such as ! or #. The account owner must choose a new password the next time they sign in.'}</p>
+        <p className="section-copy">{authConfig?.deped_only || googleAccount ? 'DepEd accounts receive teacher access at first Google sign-in. Manage their role and active status here, then assign their classes in academic setup. Google manages their passwords.' : `${passwordHelp} need 12 or more characters, including a capital letter, a small letter, a number, and a symbol such as ! or #. The account owner must choose a new password the next time they sign in.`}</p>
         {authConfig && (editing || !authConfig.deped_only) && <form onSubmit={save}>
           <div className="form-grid three-columns">
             <Field label="Username" value={form.username} onChange={(v) => patch('username', v)} disabled={Boolean(editing)} required />

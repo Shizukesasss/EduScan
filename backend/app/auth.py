@@ -3,24 +3,27 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 import os
-import time
+import secrets
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from fastapi import Depends, HTTPException, Request, Response, status
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import get_db
-from .models import User
+from .models import AuthSession, User
 
 
-bearer = HTTPBearer(auto_error=False)
 DEPED_PASSWORD_PREFIX = "deped:"
 DEPED_PASSWORD_PROVIDER = "deped_password"
+SESSION_COOKIE = "eduscan_session"
+SESSION_LIFETIME = timedelta(hours=8)
+SESSION_REQUEST_HEADER = "X-EduScan-Request"
+SESSION_CONTEXT_HEADER = "X-EduScan-Session-Context"
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def hash_password(password: str) -> str:
@@ -40,66 +43,109 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
-def _b64(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode().rstrip("=")
-
-
-def _unb64(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-
-
 def has_deped_password(user: User) -> bool:
     return bool(user.google_sub and user.google_email and user.google_email.endswith("@deped.gov.ph")
                 and user.password_hash.startswith(DEPED_PASSWORD_PREFIX))
 
 
-def _deped_password_stamp(user: User) -> str:
-    return hashlib.sha256(f"{user.google_email}:{user.password_hash}".encode()).hexdigest()
+def _password_stamp(user: User) -> str:
+    return hashlib.sha256(user.password_hash.encode()).hexdigest()
 
 
-def create_token(user: User, lifetime: timedelta = timedelta(hours=8), *, auth_provider: str = "password") -> str:
-    payload = {"sub": user.id, "role": user.role, "name": user.full_name, "exp": int(time.time() + lifetime.total_seconds())}
-    payload["auth_provider"] = auth_provider
-    if auth_provider in {"google", DEPED_PASSWORD_PROVIDER}:
-        payload["google_sub"] = user.google_sub
-    if auth_provider == DEPED_PASSWORD_PROVIDER:
-        payload["password_stamp"] = _deped_password_stamp(user)
-    body = _b64(json.dumps(payload, separators=(",", ":")).encode())
-    signature = _b64(hmac.new(settings.secret_key.encode(), body.encode(), hashlib.sha256).digest())
-    return f"{body}.{signature}"
+def require_app_request(request: Request) -> None:
+    origin = request.headers.get("origin")
+    if request.headers.get(SESSION_REQUEST_HEADER) != "1" or (origin is not None and origin not in settings.allowed_origins):
+        raise HTTPException(403, "Send this request from an authorized EduScan website")
 
 
-def decode_token(token: str) -> dict:
-    try:
-        body, signature = token.split(".", 1)
-        expected = _b64(hmac.new(settings.secret_key.encode(), body.encode(), hashlib.sha256).digest())
-        if not hmac.compare_digest(signature, expected):
-            raise ValueError("Invalid signature")
-        payload = json.loads(_unb64(body))
-        if payload["exp"] < time.time():
-            raise ValueError("Expired")
-        return payload
-    except (ValueError, KeyError, json.JSONDecodeError):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired access token")
+def secure_session_transport(request: Request) -> bool:
+    if request.url.scheme == "https":
+        return True
+    origin = request.headers.get("origin")
+    if (request.url.scheme == "http" and request.url.hostname in _LOOPBACK_HOSTS
+            and request.client is not None and request.client.host in _LOOPBACK_HOSTS):
+        if origin is None or urlsplit(origin).hostname in _LOOPBACK_HOSTS:
+            return False
+    raise HTTPException(403, "Use HTTPS to sign in to EduScan")
 
 
-def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bearer), db: Session = Depends(get_db)) -> User:
-    if not credentials:
+def _cookie_digest(token: str | None) -> str | None:
+    if not token or len(token) != 43 or not token.isascii():
+        return None
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _session_context(digest: str) -> str:
+    # This is a public context identifier. Only the cookie can authenticate a request.
+    return hashlib.sha256(f"browser-context:{digest}".encode()).hexdigest()
+
+
+def require_matching_session_context(request: Request) -> None:
+    supplied = request.headers.get(SESSION_CONTEXT_HEADER)
+    digest = _cookie_digest(request.cookies.get(SESSION_COOKIE))
+    if supplied is not None and (digest is None or supplied != _session_context(digest)):
+        raise HTTPException(409, detail={
+            "code": "session_changed",
+            "message": "The signed-in account changed. Check the active account and try again.",
+        })
+
+
+def issue_session(db: Session, user: User, *, provider: str = "password") -> str:
+    now = datetime.utcnow()
+    token = secrets.token_urlsafe(32)
+    db.execute(delete(AuthSession).where(AuthSession.user_id == user.id, AuthSession.expires_at <= now))
+    db.add(AuthSession(
+        digest=_cookie_digest(token), user_id=user.id, expires_at=now + SESSION_LIFETIME,
+        provider=provider, google_sub=user.google_sub,
+        password_stamp=None if provider == "google" else _password_stamp(user),
+    ))
+    return token
+
+
+def revoke_session(db: Session, token: str | None) -> None:
+    digest = _cookie_digest(token)
+    if digest is not None:
+        db.execute(delete(AuthSession).where(AuthSession.digest == digest))
+
+
+def revoke_user_sessions(db: Session, user_id: int) -> None:
+    db.execute(delete(AuthSession).where(AuthSession.user_id == user_id))
+
+
+def set_session_cookie(response: Response, token: str, *, secure: bool) -> None:
+    response.set_cookie(SESSION_COOKIE, token, path="/api", max_age=int(SESSION_LIFETIME.total_seconds()),
+                        secure=secure, httponly=True, samesite="lax")
+
+
+def clear_session_cookie(response: Response, *, secure: bool) -> None:
+    response.delete_cookie(SESSION_COOKIE, path="/api", secure=secure, httponly=True, samesite="lax")
+
+
+def current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    digest = _cookie_digest(request.cookies.get(SESSION_COOKIE))
+    if digest is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    payload = decode_token(credentials.credentials)
-    user = db.get(User, int(payload["sub"]))
-    if not user or not user.active:
+    require_app_request(request)
+    secure_session_transport(request)
+    require_matching_session_context(request)
+    session = db.get(AuthSession, digest)
+    if session is None or session.expires_at <= datetime.utcnow():
+        raise HTTPException(401, "Session expired. Please sign in again")
+    user = db.get(User, session.user_id)
+    if user is None or not user.active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is inactive")
-    if payload.get("auth_provider") == DEPED_PASSWORD_PROVIDER:
-        if (not settings.deped_password_recovery or not has_deped_password(user)
-                or payload.get("google_sub") != user.google_sub
-                or payload.get("password_stamp") != _deped_password_stamp(user)):
+    if session.provider != "google" and session.password_stamp != _password_stamp(user):
+        raise HTTPException(401, "Your password has changed. Please sign in again")
+    if session.provider == DEPED_PASSWORD_PROVIDER:
+        if not settings.deped_password_recovery or not has_deped_password(user) or session.google_sub != user.google_sub:
             raise HTTPException(status_code=401, detail="Please sign in again")
-    elif settings.deped_only or user.google_email:
-        if (payload.get("auth_provider") != "google" or not user.google_sub
-                or payload.get("google_sub") != user.google_sub
+    elif session.provider == "google" or settings.deped_only or user.google_email:
+        if (session.provider != "google" or not user.google_sub
+                or session.google_sub != user.google_sub
                 or not user.google_email or user.google_email.split("@")[-1] != "deped.gov.ph"):
             raise HTTPException(status_code=401, detail="Please sign in with your DepEd Google account")
+    request.state.auth_provider = session.provider
+    request.state.session_context = _session_context(digest)
     return user
 
 

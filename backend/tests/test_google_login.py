@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, text, create_engine, inspect
 
 import test_attendance_sync as fixtures
+from browser_test_client import response_session_headers
 from app import auth, main
 from app.models import User, ClassSchedule
 from app.migrations import MIGRATIONS, run_migrations
@@ -139,7 +140,7 @@ def test_api_google_login_creates_session_and_denies_admin_routes(school):
     assert result["role"] == "teacher"
     assert result["auth_provider"] == "google"
     assert result["must_change_password"] is False
-    headers = {"Authorization": f"Bearer {result['access_token']}"}
+    headers = response_session_headers(response)
     assert school.client.get("/api/auth/me", headers=headers).status_code == 200
     assert school.client.get("/api/admin/users", headers=headers).status_code == 403
     assert school.client.get("/api/persons?scope=assigned", headers=headers).json() == []
@@ -155,9 +156,9 @@ def test_strict_mode_rejects_password_login_and_existing_password_sessions(schoo
 
 
 def test_google_account_cannot_use_local_password_change(school):
-    result = google_sign_in(school).json()
+    result = google_sign_in(school)
     response = school.client.post("/api/auth/change-password",
-        headers={"Authorization": f"Bearer {result['access_token']}"},
+        headers=response_session_headers(result),
         json={"current_password": "anything", "new_password": "Strong-New-Password123!"})
     assert response.status_code == 403
 
@@ -166,8 +167,8 @@ def test_google_account_never_inherits_unlinked_name_based_schedule(school):
     school.db.add(ClassSchedule(grade="10", section="Rizal", subject="Mathematics",
         teacher_name="New Teacher", start_time=time(7), end_time=time(8), teacher_user_id=None))
     school.db.commit()
-    result = google_sign_in(school).json()
-    response = school.client.get("/api/schedules", headers={"Authorization": f"Bearer {result['access_token']}"})
+    result = google_sign_in(school)
+    response = school.client.get("/api/schedules", headers=response_session_headers(result))
     assert response.status_code == 200
     assert response.json() == []
 
@@ -270,7 +271,7 @@ def test_explicit_subject_keeps_role_and_disabled_users_stay_blocked_at_api(scho
     response = google_sign_in(school, email="head@deped.gov.ph")
     assert response.status_code == 200
     assert response.json()["role"] == "admin"
-    headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+    headers = response_session_headers(response)
     assert school.client.get("/api/admin/users", headers=headers).status_code == 200
     school.db.refresh(school.admin)
     school.admin.active = False
@@ -281,8 +282,8 @@ def test_explicit_subject_keeps_role_and_disabled_users_stay_blocked_at_api(scho
 
 def test_strict_admin_cannot_create_unusable_local_password_account(school):
     google_login.reserve_google_email(school.db, "admin", "head@deped.gov.ph")
-    result = google_sign_in(school, email="head@deped.gov.ph").json()
-    response = school.client.post("/api/admin/users", headers={"Authorization": f"Bearer {result['access_token']}"},
+    result = google_sign_in(school, email="head@deped.gov.ph")
+    response = school.client.post("/api/admin/users", headers=response_session_headers(result),
         json={"username": "local-new", "password": "Strong-Password-123!", "role": "teacher", "full_name": "Local Teacher"})
     assert response.status_code == 403
     assert school.db.scalar(select(User).where(User.username == "local-new")) is None
@@ -290,14 +291,14 @@ def test_strict_admin_cannot_create_unusable_local_password_account(school):
 
 def test_admin_password_reset_does_not_lock_google_teacher_out_of_workspace(school):
     google_login.reserve_google_email(school.db, "admin", "head@deped.gov.ph")
-    admin_result = google_sign_in(school, email="head@deped.gov.ph", sub="admin-subject").json()
-    teacher_result = google_sign_in(school).json()
+    admin_result = google_sign_in(school, email="head@deped.gov.ph", sub="admin-subject")
+    teacher_result = google_sign_in(school)
     teacher = school.db.scalar(select(User).where(User.google_sub == "google-sub-123"))
     response = school.client.put(f"/api/admin/users/{teacher.id}",
-        headers={"Authorization": f"Bearer {admin_result['access_token']}"},
+        headers=response_session_headers(admin_result),
         json={"role": "teacher", "full_name": "Teacher", "active": True, "new_password": "Strong-Password-123!"})
     assert response.status_code == 403
-    response = school.client.get("/api/auth/me", headers={"Authorization": f"Bearer {teacher_result['access_token']}"})
+    response = school.client.get("/api/auth/me", headers=response_session_headers(teacher_result))
     assert response.json()["must_change_password"] is False
 
 

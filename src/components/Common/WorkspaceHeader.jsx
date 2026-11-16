@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { auth } from '../../api/client';
+import { useToast } from '../../contexts/useToast';
 
 export default function WorkspaceHeader({
   brandHref = '/dashboard',
@@ -14,6 +15,7 @@ export default function WorkspaceHeader({
 }) {
   const location = useLocation();
   const navigate = useNavigate();
+  const { showError } = useToast();
   const [isScrolled, setIsScrolled] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
@@ -116,11 +118,15 @@ export default function WorkspaceHeader({
     }
   };
 
-  const handleSignOut = () => {
+  const handleSignOut = async () => {
     setUserMenuOpen(false);
     setMobileNavOpen(false);
-    auth.clear();
-    window.location.href = '/login';
+    try {
+      await auth.logout();
+      navigate('/login', { replace: true });
+    } catch (error) {
+      showError(error.message);
+    }
   };
 
   return (

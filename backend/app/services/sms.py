@@ -15,7 +15,13 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import Person, SmsOutbox
+from ..rate_limits import RequestRateLimiter
 from .settings_store import get_json, get_secret
+
+
+gateway_rate_limiter = RequestRateLimiter({
+    "SMS gateway": (settings.sms_gateway_requests_per_minute, min(25, settings.sms_gateway_requests_per_minute)),
+})
 
 
 DEFAULT_TEMPLATES = {
@@ -70,8 +76,12 @@ def validate_local_gateway_url(gateway_url: str) -> tuple[str, int]:
         raise HTTPException(status_code=422, detail=f"Gateway host could not be resolved on this network: {exc}") from exc
     if not resolved:
         raise HTTPException(status_code=422, detail="Gateway host did not resolve to an address")
-    if any(not (ipaddress.ip_address(address).is_private or ipaddress.ip_address(address).is_loopback or ipaddress.ip_address(address).is_link_local) for address in resolved):
-        raise HTTPException(status_code=422, detail="Android Local Server must use a private, loopback, or link-local network address")
+    for address in resolved:
+        ip = ipaddress.ip_address(address)
+        if ip.is_link_local or str(ip) == "169.254.169.254":
+            raise HTTPException(status_code=422, detail="Android Local Server cannot target link-local or metadata addresses")
+        if not (ip.is_private or ip.is_loopback):
+            raise HTTPException(status_code=422, detail="Android Local Server must use a private or loopback network address")
     return parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
 
 
@@ -253,6 +263,13 @@ def send_record(db: Session, record: SmsOutbox) -> SmsOutbox:
         record.status = "queued"
         record.next_attempt_at = now + timedelta(minutes=5)
         record.last_error = "Local 30-minute SMS safety limit reached; delivery was deferred"
+        db.commit()
+        return record
+    retry_after = gateway_rate_limiter.retry_after("SMS gateway", "outbound")
+    if retry_after is not None:
+        record.status = "queued"
+        record.next_attempt_at = now + timedelta(seconds=retry_after)
+        record.last_error = "SMS gateway request limit reached; delivery was deferred"
         db.commit()
         return record
     record.attempts += 1

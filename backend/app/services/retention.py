@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..config import BASE_DIR, BIOMETRIC_DIR, MODEL_DIR
 from ..models import BiometricSample, LegalHold, Person, RecognitionReview, RetentionExecution, SmsOutbox, User
+from ..storage_quota import LOCK_NAME
 from .audit import add_audit
 from .settings_store import get_json
 
@@ -48,7 +49,7 @@ def _expired_files(root: Path, cutoff: datetime, referenced: set[Path] | None = 
                    name_prefix: str | None = None) -> list[Path]:
     result = []
     for path in root.rglob("*") if root.exists() else []:
-        if not path.is_file() or (name_prefix and not path.name.startswith(name_prefix)):
+        if path.name == LOCK_NAME or not path.is_file() or (name_prefix and not path.name.startswith(name_prefix)):
             continue
         if referenced and path.resolve() in referenced:
             continue

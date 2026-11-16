@@ -8,6 +8,7 @@ import io
 import zipfile
 import hashlib
 import uuid
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -24,35 +25,63 @@ os.environ["SMS_GATEWAY_ENABLED"] = "false"
 os.environ["ATTENDANCE_SCHEDULER_ENABLED"] = "false"
 os.environ["SF2_TEMPLATE_PATH"] = str(BACKEND_DIR / "data" / "templates" / "School Form 2 (SF2) Daily Attendance Report of Learners.xlsx")
 
-from fastapi.testclient import TestClient  # noqa: E402
+from browser_test_client import BrowserTestClient, response_session_headers
 from app.main import app  # noqa: E402
 from api_test_database import isolated_app_database  # noqa: E402
 
 
 class EduScanSmokeTest(unittest.TestCase):
+    def test_new_account_requires_changing_its_temporary_password(self):
+        username = 'temporary.password.test'
+        temporary_password = 'Initial-Teacher-2026!'
+        account = self.client.post('/api/admin/users', headers=self.headers, json={
+            'username': username, 'role': 'teacher', 'full_name': 'Temporary Password Test',
+            'password': temporary_password,
+        })
+        self.assertEqual(account.status_code, 200, account.text)
+        login = self.client.post('/api/auth/login', json={'username': username, 'password': temporary_password})
+        self.assertEqual(login.status_code, 200, login.text)
+        self.assertTrue(login.json()['must_change_password'])
+        headers = response_session_headers(login)
+        blocked = self.client.get('/api/my/advisory-sections', headers=headers)
+        self.assertEqual(blocked.status_code, 403, blocked.text)
+        weak = self.client.post('/api/auth/change-password', headers=headers, json={
+            'current_password': temporary_password, 'new_password': '456',
+        })
+        self.assertEqual(weak.status_code, 422, weak.text)
+        changed = self.client.post('/api/auth/change-password', headers=headers, json={
+            'current_password': temporary_password, 'new_password': 'Changed-Teacher-2026!',
+        })
+        self.assertEqual(changed.status_code, 200, changed.text)
+        self.assertFalse(changed.json()['must_change_password'])
+        old_login = self.client.post('/api/auth/login', json={'username': username, 'password': temporary_password})
+        self.assertEqual(old_login.status_code, 401, old_login.text)
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.addClassCleanup(TEST_DIR.cleanup)
         cls.database_context = isolated_app_database(database_path, Path(TEST_DIR.name), os.environ["SF2_TEMPLATE_PATH"])
         cls.database_context.__enter__()
         cls.addClassCleanup(cls.database_context.__exit__, None, None, None)
-        cls.client_context = TestClient(app)
+        cls.client_context = BrowserTestClient(app)
         cls.client = cls.client_context.__enter__()
         cls.addClassCleanup(cls.client_context.__exit__, None, None, None)
         response = cls.client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
         assert response.status_code == 200, response.text
-        cls.headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+        cls.headers = response_session_headers(response)
         changed = cls.client.post("/api/auth/change-password", headers=cls.headers, json={
             "current_password": "admin123", "new_password": "Smoke-Admin-Password-2026!",
         })
         assert changed.status_code == 200, changed.text
+        cls.headers = response_session_headers(changed)
         login = cls.client.post("/api/auth/login", json={"username": "teacher", "password": "teacher123"})
         assert login.status_code == 200, login.text
-        cls.teacher_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        cls.teacher_headers = response_session_headers(login)
         changed = cls.client.post("/api/auth/change-password", headers=cls.teacher_headers, json={
             "current_password": "teacher123", "new_password": "Smoke-Teacher-Password-2026!",
         })
         assert changed.status_code == 200, changed.text
+        cls.teacher_headers = response_session_headers(changed)
         teacher = next(item for item in cls.client.get("/api/admin/users", headers=cls.headers).json() if item["username"] == "teacher")
         cls.teacher_account = teacher
         structure = cls.client.get("/api/admin/academic-structure", headers=cls.headers).json()
@@ -403,7 +432,7 @@ class EduScanSmokeTest(unittest.TestCase):
         self.assertEqual(removed_exception.status_code, 200, removed_exception.text)
 
     def test_roster_import_routes_are_removed(self) -> None:
-        paths = {route.path for route in self.client.app.routes}
+        paths = self.client.app.openapi()["paths"]
         self.assertNotIn('/api/admin/roster/import', paths)
         self.assertNotIn('/api/admin/roster/imports', paths)
         self.assertIn('/api/admin/annex-g/enrollments/import', paths)
@@ -576,11 +605,12 @@ class EduScanSmokeTest(unittest.TestCase):
             "username": "adviser.scope", "password": "Scoped-Teacher-2026!",
         })
         self.assertEqual(teacher_login.status_code, 200, teacher_login.text)
-        teacher_headers = {"Authorization": f"Bearer {teacher_login.json()['access_token']}"}
+        teacher_headers = response_session_headers(teacher_login)
         teacher_password = self.client.post("/api/auth/change-password", headers=teacher_headers, json={
             "current_password": "Scoped-Teacher-2026!", "new_password": "Scoped-Teacher-Updated-2026!",
         })
         self.assertEqual(teacher_password.status_code, 200, teacher_password.text)
+        teacher_headers = response_session_headers(teacher_password)
         assigned = self.client.get("/api/my/advisory-sections", headers=teacher_headers)
         self.assertEqual([(item["grade"], item["section"]) for item in assigned.json()], [("11-T", "Advisory")])
         advisory_roster = self.client.get("/api/persons?role=Student", headers=teacher_headers)
@@ -654,6 +684,10 @@ class EduScanSmokeTest(unittest.TestCase):
             self.assertIn(name, text)
 
     def test_z_secure_backup_and_restore_staging(self) -> None:
+        import sqlite3
+        from contextlib import closing
+        from app.services import backup
+
         passphrase = "Capstone-Recovery-2026!"
         created = self.client.post("/api/admin/backups", headers=self.headers, data={"passphrase": passphrase})
         self.assertEqual(created.status_code, 200, created.text)
@@ -661,12 +695,19 @@ class EduScanSmokeTest(unittest.TestCase):
         downloaded = self.client.get(f"/api/admin/backups/{filename}", headers=self.headers)
         self.assertEqual(downloaded.status_code, 200, downloaded.text)
         self.assertTrue(downloaded.content.startswith(b"EDUSCAN1"))
-        restored = self.client.post("/api/admin/backups/restore", headers=self.headers,
-                                    data={"passphrase": passphrase, "confirmation": "STAGE RESTORE"},
-                                    files={"file": (filename, downloaded.content, "application/octet-stream")})
+        existing = backup.BACKUP_DIR / "retained.edubak"
+        existing.write_bytes(bytes(1024 * 1024))
+        self.addCleanup(existing.unlink, missing_ok=True)
+        with patch.object(backup, "settings", replace(backup.settings, backup_storage_mib=1)):
+            restored = self.client.post("/api/admin/backups/restore", headers=self.headers,
+                                        data={"passphrase": passphrase, "confirmation": "STAGE RESTORE"},
+                                        files={"file": (filename, downloaded.content, "application/octet-stream")})
         self.assertEqual(restored.status_code, 200, restored.text)
         self.assertTrue(restored.json()["restart_required"])
-        self.assertTrue((Path(TEST_DIR.name) / "pending_restore" / "ready.json").exists())
+        pending = Path(TEST_DIR.name) / "pending_restore"
+        self.assertTrue((pending / "ready.json").exists())
+        with closing(sqlite3.connect(pending / "eduscan.db")) as snapshot:
+            self.assertEqual(snapshot.execute("SELECT COUNT(*) FROM auth_sessions").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

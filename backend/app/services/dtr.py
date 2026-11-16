@@ -28,6 +28,7 @@ from .audit import add_audit
 from .enrollment import enrollment_block
 from .export_files import new_report_path
 from .dtr_form import write_form48
+from ..rate_limits import RateLimitedRoute, rate_limit
 from .reports import register_report
 from .settings_store import get_json
 
@@ -36,7 +37,7 @@ DTR_REPORT_TYPE = 'Monthly Form 48'
 PERSONNEL_ROLES = ('Faculty', 'Non-teaching Personnel')
 
 admin_required = require_roles('admin')
-router = APIRouter(prefix='/api/dtr', dependencies=[Depends(admin_required)])
+router = APIRouter(prefix='/api/dtr', dependencies=[Depends(admin_required)], route_class=RateLimitedRoute)
 
 
 class DutyHours(BaseModel):
@@ -196,6 +197,7 @@ def preview(person_id: int, year: Annotated[int, Query(ge=1900, le=9999)],
 
 
 @router.get('/{person_id}/export')
+@rate_limit("report")
 def export(person_id: int, year: Annotated[int, Query(ge=1900, le=9999)],
            month: Annotated[int, Query(ge=1, le=12)], format: Annotated[str, Query(pattern='^(pdf|xlsx)$')],
            db: Session = Depends(get_db), admin: User = Depends(admin_required)):

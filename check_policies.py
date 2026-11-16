@@ -1,20 +1,21 @@
-import urllib.request
+import argparse
 import json
+from scripts.eduscan_api import school_api
 
 def main():
-    login_data = json.dumps({"username": "admin", "password": "admin123"}).encode('utf-8')
-    req = urllib.request.Request("http://127.0.0.1:8000/api/auth/login", data=login_data, headers={'Content-Type': 'application/json'})
-    token = json.loads(urllib.request.urlopen(req).read().decode())['access_token']
-
-    req = urllib.request.Request("http://127.0.0.1:8000/api/grading-policies", headers={'Authorization': 'Bearer ' + token})
-    res = json.loads(urllib.request.urlopen(req).read().decode())
-    for p in res:
-        print(f"Policy: {p['name']} (ID: {p['id']})")
-        # Fetch the full policy to get components
-        req2 = urllib.request.Request(f"http://127.0.0.1:8000/api/grading-policies/{p['id']}", headers={'Authorization': 'Bearer ' + token})
-        pfull = json.loads(urllib.request.urlopen(req2).read().decode())
-        for c in pfull.get('components', []):
-            print(f"  - {c['name']}: {c['weight']}%")
+    parser = argparse.ArgumentParser(description="List EduScan grading policies and their component weights.")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--username", default="admin")
+    args = parser.parse_args()
+    with school_api(args.base_url, args.username) as request:
+        with request("/api/grading-policies") as response:
+            policies = json.load(response)
+        for policy in policies:
+            print(f"Policy: {policy['name']} (ID: {policy['id']})")
+            with request(f"/api/grading-policies/{policy['id']}") as response:
+                details = json.load(response)
+            for component in details.get('components', []):
+                print(f"  - {component['name']}: {component['weight']}%")
 
 if __name__ == "__main__":
     main()

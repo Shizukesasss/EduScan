@@ -17,14 +17,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi import HTTPException
 from fastapi import HTTPException
-from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
-from app.auth import create_token
+from browser_test_client import BrowserTestClient, issued_session_headers
 from app.database import Base, get_db
 from app.main import app
 from app.models import BiometricSample, Person, SmsOutbox, SystemSetting, User
+from app.rate_limits import RequestRateLimiter
 from app.services import sms
 from app.services.settings_store import get_json, get_secret, set_json, set_secret
 
@@ -45,8 +45,8 @@ class SmsEnrollmentTest(unittest.TestCase):
             with Session(self.engine) as db:
                 yield db
         app.dependency_overrides[get_db] = session_override
-        self.client = TestClient(app)
-        self.headers = {"Authorization": f"Bearer {create_token(self.admin)}"}
+        self.client = BrowserTestClient(app)
+        self.headers = issued_session_headers(self.db, self.admin)
         self.result = {"action": "created", "accepted": 20, "model": {"version": "test-model-1", "person_count": 1}}
 
     def tearDown(self):
@@ -210,6 +210,33 @@ class SmsEnrollmentTest(unittest.TestCase):
             post.assert_not_called()
         self.assertEqual(record.attempts, 0)
         self.assertEqual(record.status, "queued")
+
+    def test_manual_and_background_sends_share_attempt_budget_including_failures(self):
+        set_json(self.db, "sms", {**self.config, "enabled": True})
+        first, second = self.record(), self.record()
+        now = 100.0
+        limiter = RequestRateLimiter({"SMS gateway": (60, 1)}, clock=lambda: now)
+        with (patch.object(sms, "gateway_rate_limiter", limiter),
+              patch.object(sms, "validate_local_gateway_url"),
+              patch.object(sms.httpx, "post") as post):
+            post.side_effect = OSError("Test connection dropped")
+            sms.send_record(self.db, first)
+            self.assertEqual(first.status, "failed")
+            sms.dispatch_queued(self.db)
+            post.assert_called_once()
+            self.assertEqual(second.status, "queued")
+            self.assertEqual(second.attempts, 0)
+            self.assertGreater(second.next_attempt_at, datetime.utcnow() - timedelta(seconds=1))
+
+            now += 1
+            second.next_attempt_at = datetime.utcnow() - timedelta(seconds=1)
+            self.db.commit()
+            post.side_effect = None
+            post.return_value.content = b'{"id":"test-message"}'
+            post.return_value.json.return_value = {"id": "test-message"}
+            sms.dispatch_queued(self.db)
+            self.assertEqual(second.status, "accepted")
+            self.assertEqual(second.attempts, 1)
 
     def test_diagnostics_and_disabled_test_button_do_not_send(self):
         with patch("app.services.sms.validate_local_gateway_url", return_value=("192.168.1.25", 8080)), patch("app.services.sms.socket.create_connection"), patch("app.services.sms.httpx.get") as get, patch("app.services.sms.httpx.post") as post:

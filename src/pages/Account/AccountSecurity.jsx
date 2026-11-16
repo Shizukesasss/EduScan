@@ -28,7 +28,7 @@ export default function AccountSecurity() {
         window.location.replace('/login');
         return;
       }
-      auth.passwordChanged();
+      await auth.confirmSignIn();
       window.location.replace(destination());
     } catch (err) {
       setError(err.message);
@@ -38,7 +38,14 @@ export default function AccountSecurity() {
     }
   };
 
-  const logout = () => { auth.clear(); window.location.replace('/login'); };
+  const logout = async () => {
+    try {
+      await auth.logout();
+      window.location.replace('/login');
+    } catch (error) {
+      showError(error.message);
+    }
+  };
 
   if (auth.provider() === 'google') return <div className="account-security-shell">
     <section className="account-security-card">

@@ -17,7 +17,8 @@ if str(BACKEND_DIR) not in sys.path:
 
 from app.config import BIOMETRIC_DIR, DATA_DIR, MODEL_DIR, TEMPLATE_DIR
 from app.database import engine
-from app.services.backup import create_secure_backup, find_mysql_program, write_mysql_defaults_file
+from app.models import AuthSession
+from app.services.backup import clear_restored_sessions, create_secure_backup, find_mysql_program, write_mysql_defaults_file
 
 
 def main() -> int:
@@ -72,7 +73,9 @@ def main() -> int:
         )
 
     engine.dispose()
-    with engine.connect() as connection:
+    with engine.begin() as connection:
+        AuthSession.__table__.create(bind=connection, checkfirst=True)
+        clear_restored_sessions(connection)
         revision_count = connection.scalar(text("SELECT COUNT(*) FROM schema_migrations"))
         user_count = connection.scalar(text("SELECT COUNT(*) FROM users"))
 

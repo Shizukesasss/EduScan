@@ -15,6 +15,12 @@ Applies to: configured SQLite or MySQL database, application secret, encryption 
 
 ## Creating an operational backup
 
+Restoring a backup ends existing browser sessions. Operators and other users sign in again after recovery.
+
+The backup quota defaults to 4 GiB for the local backup directory and 4 GiB for each managed off-device folder. Set `EDUSCAN_BACKUP_STORAGE_MIB` in `backend\.env` to change these limits. Restore staging uses the archive limits below. Leave room in the local backup quota for the safety archive created before applying a PostgreSQL or MySQL restore.
+
+The restore upload accepts an encrypted `.edubak` file up to 250 MiB. The API allows up to 251 MiB for the entire multipart request, including the form fields. A reverse proxy that fronts this endpoint needs to allow at least that much request body data. The decrypted ZIP may expand to at most 1 GiB in total, with an 8 MiB limit on the manifest. Backup creation checks the same limits before saving a new archive. The API verifies every restored file before publishing the staging directory. Allow enough free disk space for the expanded restore and for the files retained by your recovery procedure.
+
 1. Sign in as an administrator and open Administration > Backup & recovery.
 2. Enter a unique passphrase of at least 12 characters and create the backup.
 3. For SQLite, EduScan uses the SQLite online backup API. For MySQL, it uses a transaction-consistent `mysqldump` through the restricted application account.
@@ -36,6 +42,17 @@ Applies to: configured SQLite or MySQL database, application secret, encryption 
 2. Before database initialization, EduScan moves the current SQLite database and local artifacts to a timestamped `backend\data\pre_restore_*` folder.
 3. EduScan then activates the staged database, encryption key, application secret when present, biometric samples, models, and templates as one recovery set.
 4. Complete the recovery validation checklist before reopening the scanner.
+
+## Applying a PostgreSQL restore
+
+1. Stop every EduScan instance that uses the target database.
+2. Run `scripts\apply-postgres-restore.ps1` after staging a verified archive.
+3. Enter the separate PostgreSQL maintenance URL at the hidden prompt, or supply
+   `EDUSCAN_MIGRATION_DATABASE_URL` in the offline command's environment. Keep the
+   runtime URL in `backend\.env` so the safety backup can use it.
+4. The tool takes an encrypted safety backup, restores the dump with the
+   maintenance role, clears browser sessions, and reapplies the runtime grants.
+   Verify the deployment before restarting.
 
 ## Applying a MySQL restore
 

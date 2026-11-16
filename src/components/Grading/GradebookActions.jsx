@@ -29,7 +29,7 @@ export default function GradebookActions({
   const userRole = auth.role();
   const canEdit = userRole === 'teacher' && !gradebook?.is_legacy_readonly;
   const isRecordsOfficer = userRole === 'records_officer';
-  const canReopen = isRecordsOfficer && !gradebook?.is_legacy_readonly;
+  const canReopen = canEdit || (isRecordsOfficer && !gradebook?.is_legacy_readonly);
 
   const status = gradebook?.status || 'Draft';
   const isDraft = status === 'Draft';
@@ -384,7 +384,7 @@ export default function GradebookActions({
               <h3>
                 {activeDialog === 'finalize' && 'Finalize Gradebook'}
                 {activeDialog === 'lock' && 'Lock Gradebook'}
-                {activeDialog === 'reopen' && 'Authorized Reopen'}
+                {activeDialog === 'reopen' && 'Reopen Gradebook'}
               </h3>
             </div>
 
@@ -393,7 +393,7 @@ export default function GradebookActions({
                 {activeDialog === 'finalize' &&
                   'Finalizing permanently calculates official term ratings. Direct score edits will be locked. All learners must have complete scores.'}
                 {activeDialog === 'lock' &&
-                  'Locking archives this gradebook. A records officer can reopen the class record with an audit reason.'}
+                  'Locking archives this gradebook. The assigned teacher or a records officer can reopen it with a reason.'}
                 {activeDialog === 'reopen' &&
                   'Reopening reverts the gradebook to Draft status. An explicit, auditable reason is required.'}
               </p>

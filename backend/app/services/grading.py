@@ -12,7 +12,7 @@ import math
 from collections import defaultdict
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -141,51 +141,58 @@ def gradebook_roster_query(book: Gradebook, roster_person_ids: list[int] | None 
     return query.order_by(Person.full_name, Person.external_id)
 
 
-def teacher_grading_section_ids(db: Session, user: User) -> set[int]:
+def teacher_grading_sections(user: User):
     """Sections where the teacher is adviser or has a subject assignment."""
     from ..models import SectionAdviserAssignment
-    adviser_ids = set(db.scalars(select(SectionAdviserAssignment.section_id).where(SectionAdviserAssignment.teacher_user_id == user.id)).all())
-    teaching_ids = set(db.scalars(select(SubjectTeachingAssignment.section_id).join(
+    adviser = select(SectionAdviserAssignment.section_id).where(SectionAdviserAssignment.teacher_user_id == user.id)
+    teaching = select(SubjectTeachingAssignment.section_id).join(
         SchoolSection, SchoolSection.id == SubjectTeachingAssignment.section_id,
     ).where(
         SubjectTeachingAssignment.teacher_user_id == user.id,
         SubjectTeachingAssignment.active.is_(True),
         SchoolSection.active.is_(True),
         SchoolSection.deleted_at.is_(None),
-    )).all())
-    return adviser_ids | teaching_ids
+    )
+    return adviser.union(teaching)
 
 
-def teacher_can_access_gradebook_context(
-    db: Session, user: User, school_year_id: int, section_id: int, subject_id: int,
-) -> bool:
-    """Check the exact subject/section/year; section membership alone is insufficient."""
-    teacher_subject_ids = set(db.scalars(select(SubjectTeachingAssignment.subject_id).join(
+def teacher_grading_section_ids(db: Session, user: User) -> set[int]:
+    return set(db.scalars(teacher_grading_sections(user)))
+
+
+def _teacher_gradebook_assignment(teacher_id, school_year_id, section_id, subject_id):
+    assignments = select(SubjectTeachingAssignment.subject_id).join(
         SchoolSection, SchoolSection.id == SubjectTeachingAssignment.section_id,
     ).join(GradeLevel, GradeLevel.id == SchoolSection.grade_level_id).join(
         Subject, Subject.id == SubjectTeachingAssignment.subject_id,
     ).where(
         SubjectTeachingAssignment.school_year_id == school_year_id,
-        SubjectTeachingAssignment.teacher_user_id == user.id,
+        SubjectTeachingAssignment.teacher_user_id == teacher_id,
         SubjectTeachingAssignment.active.is_(True),
         SchoolSection.active.is_(True), SchoolSection.deleted_at.is_(None),
         GradeLevel.active.is_(True), GradeLevel.deleted_at.is_(None),
         Subject.active.is_(True), Subject.deleted_at.is_(None),
-    )).all())
-    if len(teacher_subject_ids) > 1:
-        return False
-
-    assignment = db.scalar(select(SubjectTeachingAssignment).where(
+    ).correlate(Gradebook)
+    subject_count = assignments.with_only_columns(
+        func.count(func.distinct(SubjectTeachingAssignment.subject_id)),
+    ).scalar_subquery()
+    exact = select(SubjectTeachingAssignment.id).where(
         SubjectTeachingAssignment.school_year_id == school_year_id,
         SubjectTeachingAssignment.section_id == section_id,
         SubjectTeachingAssignment.subject_id == subject_id,
+        SubjectTeachingAssignment.teacher_user_id == teacher_id,
         SubjectTeachingAssignment.active.is_(True),
-    ))
-    if assignment:
-        return assignment.teacher_user_id == user.id
-    # Subject assignments are the source of truth for teacher gradebooks.
-    # An adviser must not gain access to every subject when no assignment exists.
-    return False
+    ).correlate(Gradebook).exists()
+    return and_(subject_count <= 1, exact)
+
+
+def teacher_gradebook_scope(teacher_id):
+    return _teacher_gradebook_assignment(teacher_id, Gradebook.school_year_id, Gradebook.section_id, Gradebook.subject_id)
+
+
+def teacher_can_access_gradebook_context(db: Session, user: User, school_year_id: int, section_id: int, subject_id: int) -> bool:
+    """Require the exact subject, section and school year."""
+    return bool(db.scalar(select(_teacher_gradebook_assignment(user.id, school_year_id, section_id, subject_id))))
 
 
 def _validate_subject_teacher(db: Session, school_year_id: int, subject_id: int,
@@ -227,16 +234,19 @@ def validate_score_value(item: AssessmentItem, score: float | None, status: str)
 
 
 def get_gradebook_full(db: Session, gradebook_id: int, *, include_mapeh_summary=True,
-                       roster_person_ids: list[int] | None = None, _report_data: dict | None = None) -> dict | None:
+                       roster_person_ids: list[int] | None = None, _report_data: dict | None = None,
+                       teacher_id: int | None = None) -> dict | None:
     """Load a gradebook with all components, items, scores, and calculations."""
-    book = _report_data['book'] if _report_data is not None else db.scalar(
-        select(Gradebook)
-        .options(
+    if _report_data is None:
+        query = select(Gradebook).options(
             joinedload(Gradebook.components).joinedload(GradebookComponent.items),
             joinedload(Gradebook.section),
-        )
-        .where(Gradebook.id == gradebook_id)
-    )
+        ).where(Gradebook.id == gradebook_id)
+        if teacher_id is not None:
+            query = query.where(teacher_gradebook_scope(teacher_id))
+        book = db.scalar(query)
+    else:
+        book = _report_data['book']
     if not book:
         return None
 
@@ -466,10 +476,10 @@ def mapeh_combined_summary(db, book):
 
 
 def get_student_breakdown(
-    db: Session, gradebook_id: int, person_id: int,
+    db: Session, gradebook_id: int, person_id: int, *, teacher_id: int | None = None,
 ) -> dict | None:
     """Generate a calculation breakdown for a single student."""
-    full = get_gradebook_full(db, gradebook_id)
+    full = get_gradebook_full(db, gradebook_id, teacher_id=teacher_id)
     if not full:
         return None
 

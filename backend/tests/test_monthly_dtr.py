@@ -8,7 +8,7 @@ from sqlalchemy.dialects import mysql, postgresql, sqlite
 
 import test_attendance_sync as fixtures
 from app.models import AttendanceCorrection, AttendanceEvent, Person, PersonnelSchedule, SchoolYear, User
-from app.auth import create_token
+from browser_test_client import issued_session_headers
 from app.services.dtr import _schedule_update
 
 
@@ -91,7 +91,7 @@ def test_admin_dtr_reports_the_selected_employee_and_respects_recurring_duty():
                     must_change_password=False)
         db.add(head)
         db.commit()
-        head_headers = {'Authorization': f'Bearer {create_token(head)}'}
+        head_headers = issued_session_headers(db, head)
         history = client.get('/api/reports/history', headers=admin).json()
         assert len([report for report in history if report['report_type'] == 'Monthly Form 48']) == 2
         assert client.get('/api/reports/history', headers=head_headers).json() == []

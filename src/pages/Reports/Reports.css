@@ -49,7 +49,19 @@
 .reports-preview-heading h3 { margin: 0 0 8px; }
 .reports-preview-heading .muted-small { margin: 0 0 16px; font-size: 13px; }
 .reports-page .table-scroll { min-width: 0; max-width: 100%; overflow-x: auto; border-radius: 10px; }
-.reports-page .reports-preview-table, .reports-page .reports-history-table, .reports-sf2 .interactive-table, .reports-page .teacher-released-reports > .table-scroll > table { width: 100%; table-layout: fixed; }
+.reports-page .reports-preview-table, .reports-page .reports-history-table, .reports-sf2 .interactive-table { width: 100%; table-layout: fixed; }
+.reports-page .sf2-report-list { width: 100%; min-width: 720px; table-layout: fixed; }
+.sf2-report-list th:first-child { width: 16%; }
+.sf2-report-list th:nth-child(4) { width: 14%; }
+.sf2-report-list th:last-child { width: 230px; }
+.sf2-report-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.sf2-report-actions button { white-space: nowrap; }
+.teacher-released-reports .section-heading { flex-wrap: wrap; }
+.teacher-released-reports .report-readonly-preview { margin-top: 24px; }
+.reports-page .sf2-attendance-preview { width: max-content; min-width: 100%; table-layout: auto; }
+.reports-page .sf2-attendance-preview th { white-space: nowrap; }
+.reports-page .sf2-attendance-preview td:first-child:not([colspan]) { min-width: 160px; }
+.reports-page .sf2-attendance-preview td:last-child:not([colspan]) { max-width: 280px; }
 .reports-page .reports-history-table { min-width: 720px; }
 .reports-page .interactive-table th { font-size: 12px; text-transform: none; letter-spacing: 0; padding: 12px; white-space: normal; overflow-wrap: anywhere; }
 .reports-page .interactive-table td { padding: 14px 12px; vertical-align: top; line-height: 1.6; font-size: 13px; white-space: normal; overflow-wrap: anywhere; }

@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { useSyncExternalStore } from 'react';
 import { ToastProvider } from './contexts/ToastContext';
 
 // Layouts
@@ -23,8 +24,13 @@ import OperationalControls from './pages/Operations/OperationalControls';
 import { auth } from './api/client';
 
 function RoleGuard({ roles, children, allowPasswordChange = false }) {
-  if (!auth.token() || !roles.includes(auth.role())) return <Navigate to="/login" replace />;
-  if (auth.mustChangePassword() && !allowPasswordChange) return <Navigate to="/account/security" replace />;
+  const session = useSyncExternalStore(auth.subscribe, auth.snapshot, auth.snapshot);
+  if (session.status === 'loading') return <div className="request-feedback" role="status">Checking your session…</div>;
+  if (session.status === 'error') return <div className="request-feedback" role="alert">{session.message}{' '}
+    <button type="button" className="btn-secondary" onClick={() => void auth.restore()}>Retry</button>
+  </div>;
+  if (!roles.includes(session.user?.role)) return <Navigate to="/login" replace />;
+  if (session.user.must_change_password && !allowPasswordChange) return <Navigate to="/account/security" replace />;
   return children;
 }
 

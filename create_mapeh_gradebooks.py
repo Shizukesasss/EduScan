@@ -1,27 +1,20 @@
-import urllib.request
+import argparse
 import json
-import sys
+from urllib.error import HTTPError
+from scripts.eduscan_api import school_api
 
 def main():
-    # 1. Login to get token
-    login_data = json.dumps({"username": "admin", "password": "admin123"}).encode('utf-8')
-    req = urllib.request.Request("http://127.0.0.1:8000/api/auth/login", data=login_data, headers={'Content-Type': 'application/json'})
-    try:
-        with urllib.request.urlopen(req) as response:
-            token = json.loads(response.read().decode())['access_token']
-    except Exception as e:
-        print("Login failed:", e)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Create MAPEH gradebooks using the EduScan API.")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--username", default="admin")
+    args = parser.parse_args()
+    with school_api(args.base_url, args.username) as request:
+        create_gradebooks(request)
 
-    headers = {
-        'Authorization': f'Bearer {token}',
-        'Content-Type': 'application/json'
-    }
-
+def create_gradebooks(request):
     # 2. Get Academic Structure to get grade levels, sections, etc.
-    req = urllib.request.Request("http://127.0.0.1:8000/api/admin/academic-structure?context=grading", headers=headers)
-    with urllib.request.urlopen(req) as response:
-        struct = json.loads(response.read().decode())
+    with request("/api/admin/academic-structure?context=grading") as response:
+        struct = json.load(response)
 
     school_years = struct['school_years']
     grading_periods = struct['grading_periods']
@@ -47,20 +40,18 @@ def main():
         if any(s['code'] == sub['code'] for s in struct['subjects']):
             print(f"Subject {sub['code']} already exists.")
             continue
-        req = urllib.request.Request("http://127.0.0.1:8000/api/admin/subjects", data=json.dumps(sub).encode(), headers=headers)
         try:
-            with urllib.request.urlopen(req) as response:
+            with request("/api/admin/subjects", sub):
                 print("Created subject:", sub['name'])
-        except urllib.error.HTTPError as e:
+        except HTTPError as e:
              if e.code == 409:
                  print(f"Subject {sub['code']} exists (conflict)")
              else:
                  print(f"Failed to create {sub['code']}: {e.read().decode()}")
 
     # Fetch structure again to get the new subject IDs
-    req = urllib.request.Request("http://127.0.0.1:8000/api/admin/academic-structure?context=grading", headers=headers)
-    with urllib.request.urlopen(req) as response:
-        struct = json.loads(response.read().decode())
+    with request("/api/admin/academic-structure?context=grading") as response:
+        struct = json.load(response)
 
     mapeh_subjects = [s for s in struct['subjects'] if s['code'].startswith('MAPEH-')]
     print(f"Found {len(mapeh_subjects)} MAPEH subjects: {[s['name'] for s in mapeh_subjects]}")
@@ -82,8 +73,7 @@ def main():
                             "grading_policy_id": None
                         }
                         try:
-                            req = urllib.request.Request("http://127.0.0.1:8000/api/gradebooks", data=json.dumps(payload).encode(), headers=headers)
-                            with urllib.request.urlopen(req) as response:
+                            with request("/api/gradebooks", payload):
                                 created += 1
                                 print(f"Created gradebook for {sy['name']} Q{gp['quarter']} Section {sec['name']} {subj['name']}")
                         except Exception as e:

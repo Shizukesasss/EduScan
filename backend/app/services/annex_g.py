@@ -5,20 +5,24 @@ import html
 import io
 import re
 import uuid
+from contextlib import closing
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 from fastapi import HTTPException
 from openpyxl import load_workbook
 from sqlalchemy.orm import Session, joinedload, selectinload
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
+from ..archive_limits import MAX_WORKBOOK_EXPANDED_BYTES, checked_workbook
 from ..models import (AnnexGTermComment, CalendarException, GradeLevel, GradingPeriod, LearnerEnrollment,
                       Person, RosterImportAudit, SchoolSection, SchoolYear, SectionAdviserAssignment,
                       Subject, SubjectTeachingAssignment, User)
 from ..models_grading import AssessmentItem, Gradebook, GradebookComponent, StudentScore
-from .academic_context import normalize_grade_name, subject_matches_grade
+from ..request_limits import MAX_ROSTER_WORKBOOK_BYTES
+from .academic_context import elective_track_for_subject, is_senior_high, normalize_grade_name, subject_matches_grade
 from .attendance import local_now, rows_for_people_on_days
+from .class_access import adviser_assignment
 from .grading import get_gradebook_full
 from .grading_engine import round_value
 from .settings_store import get_json
@@ -34,6 +38,17 @@ DEFAULT_ANNEX_G_SCHOOL = {
     'province': 'Albay',
     'school_id': '301875',
 }
+ANNEX_G_GRADES = ('7', '8', '9', '10', '11', '12')
+
+
+def annex_g_learner_name(person: Person) -> str:
+    surname = (person.surname or '').strip()
+    first_name = (person.first_name or '').strip()
+    middle_name = (person.middle_name or '').strip()
+    if not (surname and first_name and middle_name):
+        return person.full_name
+    extension = (person.name_extension or '').strip()
+    return ' '.join(part for part in (f'{surname},', first_name, middle_name, extension) if part)
 
 
 def annex_g_school_profile_data(db: Session) -> dict:
@@ -60,34 +75,34 @@ def _value_date(value: object, field: str, row_number: int) -> date | None:
 
 
 def _records(data: bytes, required: dict[str, set[str]], optional: dict[str, set[str]] | None = None) -> list[tuple[int, dict[str, object]]]:
-    if len(data) > 15 * 1024 * 1024:
+    if len(data) > MAX_ROSTER_WORKBOOK_BYTES:
         raise HTTPException(status_code=413, detail="Workbook exceeds 15 MB")
     try:
-        book = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-        sheet = book.active
-        rows = sheet.iter_rows(values_only=True)
-        headers = next(rows)
+        with (checked_workbook(io.BytesIO(data), MAX_WORKBOOK_EXPANDED_BYTES) as source,
+              closing(load_workbook(source, read_only=True, data_only=True, keep_links=False)) as book):
+            rows = book.active.iter_rows(values_only=True)
+            headers = next(rows)
+            indexes: dict[str, int] = {}
+            fields = {**required, **(optional or {})}
+            for index, value in enumerate(headers):
+                name = _header(value)
+                for field, names in fields.items():
+                    if name in names:
+                        indexes[field] = index
+                        break
+            missing = set(required) - set(indexes)
+            if missing:
+                raise HTTPException(status_code=422, detail=f"Workbook is missing columns: {', '.join(sorted(missing))}")
+            result = []
+            for row_number, values in enumerate(rows, start=2):
+                item = {field: values[index] if index < len(values) else None for field, index in indexes.items()}
+                if any(value not in (None, "") for value in item.values()):
+                    result.append((row_number, item))
+            return result
+    except HTTPException:
+        raise
     except Exception as error:
-        raise HTTPException(status_code=422, detail=f"Workbook could not be read: {error}") from error
-    indexes: dict[str, int] = {}
-    fields = {**required, **(optional or {})}
-    for index, value in enumerate(headers):
-        name = _header(value)
-        for field, names in fields.items():
-            if name in names:
-                indexes[field] = index
-                break
-    missing = set(required) - set(indexes)
-    if missing:
-        book.close()
-        raise HTTPException(status_code=422, detail=f"Workbook is missing columns: {', '.join(sorted(missing))}")
-    result = []
-    for row_number, values in enumerate(rows, start=2):
-        item = {field: values[index] if index < len(values) else None for field, index in indexes.items()}
-        if any(value not in (None, "") for value in item.values()):
-            result.append((row_number, item))
-    book.close()
-    return result
+        raise HTTPException(status_code=422, detail="Workbook could not be read as an .xlsx file") from error
 
 
 def _approval(approved_reference: str) -> str:
@@ -129,8 +144,8 @@ def import_annex_g_enrollments(db: Session, data: bytes, filename: str, approved
                 raise ValueError(f"row {row_number}: school year {school_year_name or '(blank)'} is not configured")
             grade_name = normalize_grade_name(str(raw["grade"] or ""))
             grade = db.scalar(select(GradeLevel).where(GradeLevel.name == grade_name, GradeLevel.active.is_(True), GradeLevel.deleted_at.is_(None)))
-            if not grade or grade_name not in {"7", "8", "9", "10"}:
-                raise ValueError(f"row {row_number}: Grade 7–10 is required")
+            if not grade or grade_name not in ANNEX_G_GRADES:
+                raise ValueError(f"row {row_number}: Grade 7–12 is required")
             section_name = str(raw["section"] or "").strip()
             section = db.scalar(select(SchoolSection).where(
                 SchoolSection.grade_level_id == grade.id,
@@ -323,7 +338,8 @@ def _attendance_by_learner(db: Session, enrollments: list[LearnerEnrollment], te
 
 
 def annex_g_class_record_people(db: Session, school_year_id: int, section_id: int | None = None,
-                               term_order: int = 3, *, unplaced_only: bool = True):
+                               term_order: int = 3, *, unplaced_only: bool = True,
+                               placement_window: tuple[date, date] | None = None, adviser_id: int | None = None):
     """Saved score membership is draft evidence, not a verified enrollment/date."""
     query = select(Gradebook.section_id, Person).select_from(Gradebook).join(
         SchoolSection, SchoolSection.id == Gradebook.section_id).join(
@@ -337,27 +353,61 @@ def annex_g_class_record_people(db: Session, school_year_id: int, section_id: in
             Gradebook.is_legacy_readonly.is_(False), Person.role == 'Student')
     if section_id is not None:
         query = query.where(Gradebook.section_id == section_id)
+    if adviser_id is not None:
+        query = query.where(adviser_assignment(adviser_id, school_year_id, Gradebook.section_id))
     if unplaced_only:
         query = query.where(Person.id.not_in(select(LearnerEnrollment.person_id).where(
             LearnerEnrollment.school_year_id == school_year_id)))
+    elif placement_window is not None:
+        starts_on, ends_on = placement_window
+        placements = select(LearnerEnrollment.id).where(
+            LearnerEnrollment.school_year_id == school_year_id, LearnerEnrollment.person_id == Person.id,
+        ).correlate(Person, Gradebook)
+        query = query.where(or_(~placements.exists(), placements.where(
+            LearnerEnrollment.section_id == Gradebook.section_id, LearnerEnrollment.starts_on <= ends_on,
+            or_(LearnerEnrollment.ends_on.is_(None), LearnerEnrollment.ends_on >= starts_on),
+        ).exists()))
     return db.execute(query.distinct().order_by(Person.full_name, Person.id)).unique().all()
 
 
+def _shs_subject_terms(subject: Subject, grade: str, school_year: str,
+                       recorded: set[int]) -> tuple[tuple[int, ...], str | None]:
+    from .shs_class_record_export import is_supported_shs_ecr_school_year, shs_ecr_subject_term_count
+
+    if not is_supported_shs_ecr_school_year(school_year):
+        return tuple(sorted(recorded)), 'The SHS course schedule is not configured for this school year.'
+    try:
+        count = shs_ecr_subject_term_count(subject, grade)
+    except HTTPException as error:
+        return tuple(sorted(recorded)), str(error.detail)
+    if count == 3:
+        return (1, 2, 3), None
+    blocks = [tuple(range(start, start + count)) for start in range(1, 5 - count)]
+    matches = [block for block in blocks if recorded and recorded.issubset(block)]
+    if len(matches) == 1:
+        return matches[0], None
+    return tuple(sorted(recorded)), f'{subject.name}: confirm which {count} term(s) this subject is taught.'
+
+
 def build_annex_g_section(db: Session, school_year_id: int, grade: str, section: str,
-                          term_order: int, *, include_unverified: bool = False) -> dict:
+                          term_order: int, *, include_unverified: bool = False, adviser_id: int | None = None) -> dict:
     if term_order not in {1, 2, 3}:
         raise HTTPException(status_code=422, detail="Annex G supports Terms 1, 2, and 3")
     year = db.scalar(select(SchoolYear).where(SchoolYear.id == school_year_id, SchoolYear.deleted_at.is_(None)))
     if not year:
         raise HTTPException(status_code=404, detail="School year was not found")
     grade_name = normalize_grade_name(grade)
-    if grade_name not in {"7", "8", "9", "10"}:
-        raise HTTPException(status_code=422, detail="Annex G is available for Grades 7–10 only")
+    if grade_name not in ANNEX_G_GRADES:
+        raise HTTPException(status_code=422, detail="Annex G is available for Grades 7–12 only")
+    senior = is_senior_high(grade_name)
     grade_record = db.scalar(select(GradeLevel).where(
         GradeLevel.name == grade_name, GradeLevel.deleted_at.is_(None)))
-    section_record = db.scalar(select(SchoolSection).where(
+    section_query = select(SchoolSection).where(
         SchoolSection.grade_level_id == grade_record.id if grade_record else False,
-        SchoolSection.name == section, SchoolSection.deleted_at.is_(None))) if grade_record else None
+        SchoolSection.name == section, SchoolSection.deleted_at.is_(None))
+    if adviser_id is not None:
+        section_query = section_query.where(adviser_assignment(adviser_id, year.id, SchoolSection.id))
+    section_record = db.scalar(section_query)
     if not section_record:
         raise HTTPException(status_code=404, detail="Grade and section were not found")
     terms = {item.term_order: item for item in db.scalars(select(GradingPeriod).where(
@@ -367,20 +417,22 @@ def build_annex_g_section(db: Session, school_year_id: int, grade: str, section:
         raise HTTPException(status_code=409, detail=f"Term {term_order} is not configured for {year.name}")
     report_end = terms[term_order].ends_on
     reference_date = first_friday_of_june(year)
-    enrollments = db.scalars(select(LearnerEnrollment).options(
+    enrollment_query = select(LearnerEnrollment).join(Person).options(
         joinedload(LearnerEnrollment.person), joinedload(LearnerEnrollment.school_year),
         joinedload(LearnerEnrollment.grade_level), joinedload(LearnerEnrollment.section),
     ).where(
-        LearnerEnrollment.school_year_id == year.id,
+        LearnerEnrollment.school_year_id == year.id, Person.role == "Student",
         LearnerEnrollment.grade_level_id == grade_record.id,
         LearnerEnrollment.section_id == section_record.id,
         LearnerEnrollment.starts_on <= report_end,
         (LearnerEnrollment.ends_on.is_(None) | (LearnerEnrollment.ends_on >= year.starts_on)),
-    ).order_by(LearnerEnrollment.person_id, LearnerEnrollment.starts_on)).all()
-    enrollments = [item for item in enrollments if item.person.role == "Student"]
+    )
+    if adviser_id is not None:
+        enrollment_query = enrollment_query.where(adviser_assignment(adviser_id, year.id, LearnerEnrollment.section_id))
+    enrollments = db.scalars(enrollment_query.order_by(LearnerEnrollment.person_id, LearnerEnrollment.starts_on)).all()
     verified_enrollments = list(enrollments)
     if include_unverified:
-        for _, person in annex_g_class_record_people(db, year.id, section_record.id, term_order):
+        for _, person in annex_g_class_record_people(db, year.id, section_record.id, term_order, adviser_id=adviser_id):
             enrollments.append(SimpleNamespace(id=-person.id, person_id=person.id, person=person,
                 school_year=year, grade_level=grade_record, section=section_record,
                 starts_on=None, ends_on=None, placement_verified=False))
@@ -393,12 +445,20 @@ def build_annex_g_section(db: Session, school_year_id: int, grade: str, section:
         SubjectTeachingAssignment.active.is_(True), Subject.active.is_(True), Subject.deleted_at.is_(None),
     ).order_by(Subject.name)).all()
     assignments = [item for item in assignments if subject_matches_grade(item.subject, grade_name)]
+    if senior:
+        track = (section_record.track or '').strip().casefold()
+        cluster = (section_record.track_cluster or '').strip().casefold()
+        assignments = [item for item in assignments if not item.subject.is_elective or (
+            (elective_track_for_subject(item.subject.category, True, item.subject.elective_track) or '').casefold() == track
+            and (not item.subject.elective_cluster or item.subject.elective_cluster.strip().casefold() == cluster)
+        )]
+        assignments.sort(key=lambda item: (item.subject.is_elective, item.subject.name.casefold()))
     if not assignments:
         assignment_issue = "No active learning-area assignments were found for this section and school year."
     else:
         assignment_issue = None
 
-    books = db.scalars(select(Gradebook).options(
+    book_query = select(Gradebook).options(
         selectinload(Gradebook.components).selectinload(GradebookComponent.items),
         joinedload(Gradebook.grading_policy), joinedload(Gradebook.subject),
         joinedload(Gradebook.school_year), joinedload(Gradebook.grading_period), joinedload(Gradebook.section),
@@ -406,14 +466,17 @@ def build_annex_g_section(db: Session, school_year_id: int, grade: str, section:
         Gradebook.school_year_id == year.id,
         Gradebook.section_id == section_record.id,
         Gradebook.subject_id.in_([item.subject_id for item in assignments] or [-1]),
-        Gradebook.term_order <= term_order,
+        Gradebook.term_order <= (3 if senior else term_order),
         Gradebook.is_legacy_readonly.is_(False),
-    )).all()
+    )
+    if adviser_id is not None:
+        book_query = book_query.where(adviser_assignment(adviser_id, year.id, Gradebook.section_id))
+    books = db.scalars(book_query).all()
     book_map = {(book.subject_id, book.term_order, book.learning_area or ""): book for book in books}
     computed: dict[int, dict[int, dict]] = {}
     verified_ids = list(dict.fromkeys(item.person_id for item in verified_enrollments))
     draft_ids = {item.person_id for item in enrollments if not getattr(item, 'placement_verified', True)}
-    final_books = [book for book in books if book.status in {'Finalized', 'Locked'}]
+    final_books = [book for book in books if book.term_order <= term_order and book.status in {'Finalized', 'Locked'}]
     report_data = {}
     if final_books and person_ids:
         students = db.scalars(select(Person).where(Person.role == 'Student', Person.id.in_(person_ids))
@@ -426,11 +489,9 @@ def build_annex_g_section(db: Session, school_year_id: int, grade: str, section:
         heads = get_json(db, 'school.heads', {})
         report_data = {book.id: {'book': book, 'students': students, 'scores': scores_by_book[book.id],
                                 'policy': book.grading_policy, 'school_heads': heads} for book in final_books}
-    for book in books:
+    for book in final_books:
         # Annex G only publishes finalized/locked grades. Draft calculations
         # cannot contribute to this report and need not hold a DB connection.
-        if book.status not in {'Finalized', 'Locked'}:
-            continue
         # Active assessment items depend on the supplied roster. Keep the official
         # verified cohort unchanged even when extra draft learners are displayed.
         rows_by_person = {}
@@ -456,8 +517,12 @@ def build_annex_g_section(db: Session, school_year_id: int, grade: str, section:
     learning_area_specs = []
     for assignment in assignments:
         subject = assignment.subject
-        is_mapeh = subject.code.casefold() == "mapeh" or "mapeh" in subject.name.casefold()
-        learning_area_specs.append({"subject": subject, "mapeh": is_mapeh})
+        is_mapeh = not senior and (subject.code.casefold() == "mapeh" or "mapeh" in subject.name.casefold())
+        course_terms, term_issue = (1, 2, 3), None
+        if senior:
+            recorded = {number for subject_id, number, area in book_map if subject_id == subject.id and not area}
+            course_terms, term_issue = _shs_subject_terms(subject, grade_name, year.name, recorded)
+        learning_area_specs.append((subject, is_mapeh, course_terms, term_issue))
 
     learner_rows = []
     for enrollment in enrollments:
@@ -475,9 +540,8 @@ def build_annex_g_section(db: Session, school_year_id: int, grade: str, section:
             blockers.append(assignment_issue)
         rows = []
         final_grades = []
-        for spec in learning_area_specs:
-            subject = spec["subject"]
-            if spec["mapeh"]:
+        for subject, is_mapeh, course_terms, term_issue in learning_area_specs:
+            if is_mapeh:
                 area_rows = []
                 for area_key, area_name in (("music_arts", "Music and Arts"), ("pe_health", "Physical Education and Health")):
                     area_terms: dict[str, int | None] = {}
@@ -512,7 +576,9 @@ def build_annex_g_section(db: Session, school_year_id: int, grade: str, section:
                 final_grades.append(mapeh_final)
                 continue
             terms_grades: dict[str, int | None] = {}
-            for number in range(1, term_order + 1):
+            if term_issue:
+                blockers.append(term_issue)
+            for number in (number for number in course_terms if number <= term_order):
                 book = book_map.get((subject.id, number, ""))
                 grade_value = None
                 if not book:
@@ -528,20 +594,22 @@ def build_annex_g_section(db: Session, school_year_id: int, grade: str, section:
                     else:
                         grade_value = student["reported_grade"]
                 terms_grades[str(number)] = grade_value
-            final_grade = _term_average([terms_grades.get(str(number)) for number in (1, 2, 3)]) if term_order == 3 else None
+            final_grade = (_term_average([terms_grades.get(str(number)) for number in course_terms])
+                           if course_terms and not term_issue and max(course_terms) <= term_order else None)
             rows.append({"name": subject.name, "term_grades": terms_grades, "final_grade": final_grade,
                          "descriptor": _descriptor(final_grade),
                          "remarks": "Passed" if final_grade is not None and final_grade >= 75 else "Failed" if final_grade is not None else ""})
             final_grades.append(final_grade)
         general_average = _term_average(final_grades) if term_order == 3 else None
         if term_order == 3 and final_grades and general_average is None:
-            blockers.append("General Average is unavailable until every assigned learning area has all three finalized term grades.")
+            blockers.append("General Average is unavailable until every assigned subject has finalized grades for its scheduled terms."
+                            if senior else "General Average is unavailable until every assigned learning area has all three finalized term grades.")
         monthly = attendance.get(enrollment.id, [])
         unresolved = sum(item["unresolved_days"] for item in monthly)
         if unresolved:
             blockers.append(f"Attendance has {unresolved} unresolved instructional day(s); reconcile attendance through the selected term.")
         learner_rows.append({
-            "enrollment_id": enrollment.id, "person_id": person.id, "full_name": person.full_name,
+            "enrollment_id": enrollment.id, "person_id": person.id, "full_name": annex_g_learner_name(person),
             "placement_verified": placement_verified, "record_source": 'verified_enrollment' if placement_verified else 'class_record_draft',
             "lrn": person.lrn, "sex": person.sex, "grade": grade_name, "section": section_record.name,
             "age": age, "learning_areas": rows, "general_average": general_average,
@@ -581,6 +649,7 @@ def build_annex_g_section(db: Session, school_year_id: int, grade: str, section:
         "unverified_learner_count": len(enrollments) - len(verified_enrollments),
         "school_year_id": year.id, "school_year": year.name, "grade": grade_name,
         "section": section_record.name, "term_order": term_order, "term_name": terms[term_order].name,
+        "track": section_record.track if senior else None,
         "age_reference_date": reference_date.isoformat(),
         "school": {"name": profile.get("name", ""), "region": profile.get("region", ""),
                    "division": profile.get("division", ""), "school_id": profile.get("school_id", ""),

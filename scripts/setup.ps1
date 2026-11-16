@@ -62,27 +62,30 @@ if ($Sf2Template) {
 }
 
 # Database bootstrap
-# If DATABASE_URL in .env points to SQLite and the database file does not yet
-# exist, run the seed script automatically so the app is ready out of the box.
+# Seed a fresh local SQLite database when demo accounts are enabled.
 # If DATABASE_URL points to PostgreSQL (or MySQL), seeding is skipped here -
 # connect to your central server and EduScan's own migrations will apply the
 # schema on first start.
 $dbPath = Join-Path $backendRoot "data\eduscan.db"
 $databaseUrl = [System.Environment]::GetEnvironmentVariable('DATABASE_URL', 'Process')
-if ($null -eq $databaseUrl -and (Test-Path -LiteralPath $environmentFile)) {
+$demoAccounts = [System.Environment]::GetEnvironmentVariable('EDUSCAN_SEED_DEMO_ACCOUNTS', 'Process')
+if (($null -eq $databaseUrl -or $null -eq $demoAccounts) -and (Test-Path -LiteralPath $environmentFile)) {
   foreach ($rawLine in [System.IO.File]::ReadAllLines($environmentFile)) {
     $line = $rawLine.Trim()
     if (-not $line -or $line.StartsWith('#') -or -not $line.Contains('=')) { continue }
     $separator = $line.IndexOf('=')
-    if ($line.Substring(0, $separator).Trim() -ceq 'DATABASE_URL') {
+    $key = $line.Substring(0, $separator).Trim()
+    if ($null -eq $databaseUrl -and $key -ceq 'DATABASE_URL') {
       $databaseUrl = $line.Substring($separator + 1).Trim()
-      break
+    }
+    if ($null -eq $demoAccounts -and $key -ceq 'EDUSCAN_SEED_DEMO_ACCOUNTS') {
+      $demoAccounts = $line.Substring($separator + 1).Trim()
     }
   }
 }
 $useRemoteDatabase = $databaseUrl -match '^(?i:postgresql|mysql)(?:\+[^:]+)?:'
 
-if (-not $useRemoteDatabase -and -not (Test-Path -LiteralPath $dbPath)) {
+if (-not $useRemoteDatabase -and ($null -eq $demoAccounts -or $demoAccounts -eq 'true') -and -not (Test-Path -LiteralPath $dbPath)) {
   Write-Host ""
   Write-Host "  No local database found - seeding demo SQLite database..."
   Push-Location $backendRoot
@@ -101,7 +104,7 @@ if (-not $useRemoteDatabase -and -not (Test-Path -LiteralPath $dbPath)) {
   Write-Host "  Default logins: admin/admin123  teacher/teacher123  scanner/scanner123"
 } elseif ($useRemoteDatabase) {
   Write-Host "  PostgreSQL/MySQL DATABASE_URL detected - skipping local seed."
-  Write-Host "  EduScan will apply schema migrations to your central server on first start."
+  Write-Host "  Run the PostgreSQL maintenance migration before starting EduScan. MySQL retains startup migrations."
 }
 
 # npm dependencies

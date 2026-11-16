@@ -30,6 +30,7 @@ from app.models import AttendanceCorrection, AttendanceEvent, Person, User
 from app.services import gate_exports, reports, scheduler, sf2
 from app.services.attendance import MANILA
 from app.services.settings_store import set_json
+from app.storage_quota import StorageQuotaExceeded
 
 
 class ReportingReliabilityTest(unittest.TestCase):
@@ -43,11 +44,13 @@ class ReportingReliabilityTest(unittest.TestCase):
         self.first = Person(external_id="FIRST", full_name="Learner One", sex="Male", role="Student", grade="10", section="One", enrollment_start_date=date(2026, 10, 1))
         self.second = Person(external_id="SECOND", full_name="Learner Two", sex="Female", role="Student", grade="10", section="Two", enrollment_start_date=date(2026, 10, 1))
         self.db.add_all([self.teacher, self.first, self.second]); self.db.commit()
-        self.registry = self.root / "registered"; self.registry.mkdir()
+        self.exports = self.root / "exports"
+        self.registry = self.exports / "registered"
+        self.registry.mkdir(parents=True)
         self.day = date(2026, 10, 12)
         self.now = datetime(2026, 10, 12, 10, 0, tzinfo=MANILA)
-        self.patches = [patch.object(reports, "EXPORT_DIR", self.root), patch.object(reports, "REPORT_DIR", self.registry),
-                        patch.object(sf2, "EXPORT_DIR", self.root),
+        self.patches = [patch.object(reports, "EXPORT_DIR", self.exports), patch.object(reports, "REPORT_DIR", self.registry),
+                        patch.object(sf2, "EXPORT_DIR", self.exports),
                         patch.object(sf2, "settings", replace(sf2.settings,
                             sf2_template_path=os.environ["SF2_TEMPLATE_PATH"])),
                         patch.object(gate_exports, "SessionLocal", side_effect=lambda: Session(self.engine)),
@@ -87,6 +90,25 @@ class ReportingReliabilityTest(unittest.TestCase):
                 workbook.close()
             self.assertEqual(result[3], hashlib.sha256(result[1].read_bytes()).hexdigest())
             self.assertEqual(result[4]["section"], section)
+
+    def test_concurrent_reports_cannot_both_use_the_same_quota_space(self):
+        barrier = threading.Barrier(2)
+
+        def export(section):
+            source = reports.new_report_path(self.exports, f"{section}.xlsx")
+            source.write_bytes(bytes(600 * 1024))
+            barrier.wait(timeout=10)
+            with Session(self.engine) as db:
+                try:
+                    reports.register_report(db, source, "Attendance Range", {"section": section}, self.teacher)
+                except StorageQuotaExceeded:
+                    return False
+            return True
+
+        with patch.object(reports, "settings", replace(reports.settings, report_storage_mib=1)):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                self.assertCountEqual(executor.map(export, ("One", "Two")), [True, False])
+        self.assertEqual(len(list(self.registry.glob("*.xlsx"))), 1)
 
     def test_download_snapshot_is_not_overwritten_by_daily_refresh(self):
         stable = sf2.generate_temporary_log(self.db, self.day, "10", "One")

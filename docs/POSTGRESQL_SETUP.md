@@ -34,8 +34,8 @@ When someone clones the repo and runs `scripts\setup.ps1`:
   causes merge conflicts, and is invisible to other developers.
 
 - If `backend\.env` has a PostgreSQL `DATABASE_URL`, the seed step is skipped.
-  The app connects to the central server on start and applies any missing schema
-  migrations automatically. All changes go directly to the shared database.
+  Start PostgreSQL deployments after running the maintenance migration. The API
+  verifies the migration ledger and seeds reference data using its runtime login.
 
 ---
 
@@ -45,17 +45,18 @@ When someone clones the repo and runs `scripts\setup.ps1`:
 
 1. Download and install **PostgreSQL 16** from https://www.postgresql.org/download/windows/
 
-2. Open pgAdmin or psql and run:
+2. Connect as the database administrator with psql and run:
 
 ```sql
--- Create the dedicated database and user
-CREATE DATABASE eduscan;
-CREATE USER eduscan_app WITH PASSWORD 'CHANGE_THIS_PASSWORD';
-GRANT ALL PRIVILEGES ON DATABASE eduscan TO eduscan_app;
-
--- Required for SQLAlchemy schema creation
+CREATE ROLE eduscan_owner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE ROLE eduscan_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+\password eduscan_owner
+\password eduscan_app
+CREATE DATABASE eduscan OWNER eduscan_owner;
 \c eduscan
-GRANT ALL ON SCHEMA public TO eduscan_app;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA public TO eduscan_owner;
+GRANT CONNECT ON DATABASE eduscan TO eduscan_app;
 ```
 
 3. Note the server IP address (e.g. `192.168.1.10`).
@@ -69,6 +70,8 @@ GRANT ALL ON SCHEMA public TO eduscan_app;
    ```
    # Allow EduScan app from the school LAN (adjust subnet as needed)
    host    eduscan    eduscan_app    192.168.1.0/24    scram-sha-256
+   # Allow the separate maintenance login only from the administration host.
+   host    eduscan    eduscan_owner  192.168.1.10/32   scram-sha-256
    ```
 
 6. Restart the PostgreSQL service.
@@ -82,7 +85,39 @@ Most hosted providers give you a connection string in the format:
 postgresql+psycopg2://user:password@host:5432/dbname
 ```
 
-Copy that string and use it as `DATABASE_URL` in `backend\.env`.
+For an existing database, use the role that owns the EduScan relations as the
+maintenance login. Create a separate `eduscan_app` login with the restricted role
+attributes shown above. Use its connection string as `DATABASE_URL` in
+`backend\.env`. Use the same host, port and database in both URLs. For Supabase's
+session pooler, the runtime username is `eduscan_app.<project-ref>`.
+
+### Supabase Data API
+
+EduScan's browser calls FastAPI. For a dedicated Supabase project, open
+**Integrations > Data API** and turn off **Enable Data API** and **Automatically
+expose new tables**. For a shared project that needs the Data API, keep EduScan's
+`public` schema out of its exposed schemas and expose a separate schema for the
+other application's API. Review existing views and functions in exposed schemas
+for access to EduScan. [Supabase Data API controls](https://supabase.com/docs/guides/api/securing-your-api)
+
+Run the following from the project root to audit effective grants and the runtime
+role. The audit reads PostgreSQL catalogs. Review the Data API integration
+settings in the dashboard to verify the HTTP exposure separately.
+
+```powershell
+& "backend\.venv\Scripts\python.exe" backend\tools\postgres_access.py audit
+```
+
+Before switching an existing owner connection to the runtime login, the owner
+can remove existing direct Data API grants on EduScan tables and their sequences.
+
+```powershell
+& "backend\.venv\Scripts\python.exe" backend\tools\postgres_access.py revoke-data-api --confirm "REVOKE EDUSCAN DATA API GRANTS"
+```
+
+The command checks effective privileges, including column-level grants. It rolls
+back when inherited Data API grants remain. Keep the former owner password in
+the operator's secrets store before replacing the URL in `backend\.env`.
 
 ---
 
@@ -129,8 +164,31 @@ EDUSCAN_ENCRYPTION_KEY=your-fernet-key-here
 ALLOWED_ORIGINS=http://127.0.0.1:5175,http://localhost:5175
 ```
 
-5. Run `scripts\start.ps1`. EduScan will automatically create all tables in
-   PostgreSQL on the first start (schema migrations run at startup).
+5. Run the maintenance migration before starting the app or after updating to a
+   version with schema changes. The command prompts for the maintenance URL
+   with hidden input, or reads `EDUSCAN_MIGRATION_DATABASE_URL` from the maintenance
+   process environment. Keep that credential out of the app service and its
+   `.env`.
+
+   ```powershell
+   & "backend\.venv\Scripts\python.exe" backend\tools\postgres_access.py migrate
+   & "backend\.venv\Scripts\python.exe" backend\tools\postgres_access.py audit
+   & ".\scripts\start.ps1"
+   ```
+
+   The migration runs with the owner login. It grants the runtime login
+   application table reads and writes, sequence access for inserts and backups,
+   and read access to the migration ledger. It rejects a runtime login that
+   owns app objects, has elevated roles, or can create permanent objects in the
+   database or `public` schema.
+
+   On a fresh server database, create a named administrator from the EduScan server console. Run the following from the `backend` directory and enter a unique temporary password at the prompt.
+
+   ```powershell
+   & ".venv\Scripts\python.exe" tools\create_admin.py --username school.admin --full-name "School Administrator"
+   ```
+
+   Server databases default to disabling interactive API docs and demo-account seeding. For a shared SQLite deployment also set `EDUSCAN_SEED_DEMO_ACCOUNTS=false` and `EDUSCAN_ENABLE_API_DOCS=false`. Review previously created demo accounts before opening access. For institutional Google sign-in, reserve the named administrator's verified DepEd address using the [Google login setup](DEPED_GOOGLE_LOGIN.md).
 
 The supplied launcher binds the website and API to `127.0.0.1`. The origin list above is for a local browser; adding a LAN origin alone does not expose the servers on the network. Deploy a shared site and API over HTTPS with an appropriate network and camera-permission configuration if other devices must access them. A shared PostgreSQL database contains enrollment metadata, but the encrypted face samples, trained model, and matching key also need an authorized encrypted backup/restore or new consent-based enrollment. Never place the connection string or biometric artifacts in Git.
 
@@ -144,17 +202,18 @@ the new central PostgreSQL server:
 ```powershell
 # From the project root:
 & "backend\.venv\Scripts\python.exe" backend\tools\migrate_sqlite_to_postgresql.py `
-    --pg-url "postgresql+psycopg2://eduscan_app:CHANGE_THIS_PASSWORD@192.168.1.10:5432/eduscan" `
     --confirm "MIGRATE TO POSTGRESQL"
 ```
 
 The migration tool:
+- Prompts for the PostgreSQL maintenance URL with hidden input
 - **Never modifies** the SQLite source
 - Aborts if the PostgreSQL target already has data (add `--force-wipe` to override)
 - Verifies row counts table-by-table after copying
 - Resets PostgreSQL sequences so new records don't conflict
 
-After migration, update `backend\.env` with the PostgreSQL `DATABASE_URL`.
+After copying, set the runtime `DATABASE_URL` in `backend\.env` and run
+`postgres_access.py migrate` to apply the runtime grants before starting the API.
 
 ---
 
@@ -176,7 +235,7 @@ git add, git commit, git push
                                            git pull (gets code changes)
                                            scripts\start.ps1
                                              → connects to central DB
-                                             → migrations apply automatically
+                                             → verifies the migration ledger
                                              → all users see changes
 ```
 
@@ -212,6 +271,6 @@ To verify:
 | Use SQLite (local dev)              | Keep default `DATABASE_URL` in `backend\.env`   |
 | Use PostgreSQL (shared)             | Set `DATABASE_URL=postgresql+psycopg2://...`    |
 | Seed fresh local demo DB            | `backend\.venv\Scripts\python.exe backend\seed_demo.py` |
-| Migrate SQLite → PostgreSQL         | `python backend\tools\migrate_sqlite_to_postgresql.py --pg-url ... --confirm "MIGRATE TO POSTGRESQL"` |
+| Migrate SQLite → PostgreSQL         | `python backend\tools\migrate_sqlite_to_postgresql.py --confirm "MIGRATE TO POSTGRESQL"` |
 | Reset & reseed local DB             | Delete `backend\data\eduscan.db`, run `seed_demo.py` |
 | Check current DB backend            | Look at `DATABASE_URL` in `backend\.env`        |

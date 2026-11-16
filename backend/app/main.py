@@ -14,29 +14,36 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, extract, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from .auth import (DEPED_PASSWORD_PREFIX, DEPED_PASSWORD_PROVIDER, create_token, current_user, has_deped_password,
-                   hash_password, require_roles, seed_users, verify_password)
+from .auth import (DEPED_PASSWORD_PREFIX, DEPED_PASSWORD_PROVIDER, SESSION_COOKIE, clear_session_cookie, current_user,
+                   has_deped_password, hash_password, issue_session, require_app_request, require_matching_session_context,
+                   require_roles, revoke_session, revoke_user_sessions, secure_session_transport, seed_users,
+                   set_session_cookie, verify_password)
 from .services.google_login import DOMAIN, google_user, verify_google_credential
 from .schemas import DepedRecoveryConfirm, DepedRecoveryRequest, GoogleLoginRequest
 from .services import password_recovery
 from .config import settings
 from .database import SessionLocal, engine, get_db
-from .migrations import run_migrations
+from .migrations import initialize_database
+from .rate_limits import RateLimitedRoute, RequestRateLimiter, rate_limit
+from .request_limits import (FormBodyLimitMiddleware, MAX_BACKUP_ARCHIVE_BYTES, MAX_CAMERA_UPLOAD_BYTES,
+                             MAX_ROSTER_WORKBOOK_BYTES, MAX_SF2_TEMPLATE_BYTES)
 from .models import (
     AttendanceCorrection, AttendanceEvent, AttendanceResetAudit, BiometricAuditEvent, BiometricModel, BiometricSample, CalendarException,
     BackupRun, ClassSchedule, ExcusedAbsence, GeneratedReport, GradeChangeAudit, GradeComponent, GradebookState,
     GradeLevel, GradeScore, GradingPeriod, Intervention, LegalHold, Person, PersonnelSchedule, RecognitionReview,
     RecordDisposalAudit, RetentionExecution, LearnerEnrollment, AnnexGTermComment,
     SchoolSection, SchoolYear, SmsOutbox,
-    Subject, SubjectTeachingAssignment, SystemAuditEvent, User,
+    Subject, SubjectTeachingAssignment, SystemAuditEvent, SystemSetting, User,
 )
 from .schemas import (
     AttendanceCorrectionPayload, AttendanceResetPayload, AttendanceSettingsPayload, BiometricChangeReason, CalendarExceptionPayload,
@@ -50,9 +57,14 @@ from .schemas import (
     UserCreate, UserUpdate, SchoolHeadPayload, AnnexGCommentPayload, AnnexGPlacementPayload, AnnexGSchoolProfilePayload,
 )
 from .services.attendance import attendance_event_query, close_day, latest_day_reset, list_rows, record_gate_match, reset_day, save_correction
+from .services.class_access import (
+    advised_people, adviser_assignment, adviser_sections_for_year, assigned_roster_sections, json_columns,
+    person_in_sections, report_section_scope, school_year_for_date, scoped_record, section_query,
+)
 from .services.audit import add_audit, model_snapshot
 from .services.academic import RECOVERABLE_REFERENCES, change_deleted_reference, deleted_references
 from .services.backup import BACKUP_DIR, database_backend, run_managed_backup, stage_secure_restore
+from .storage_quota import StorageQuotaExceeded, quota_detail
 from .services.biometrics import biometric_service
 from .services.sface_test import recognize_test_frames as sface_test_frames
 from .services.gate_presence import gate_presence
@@ -61,7 +73,7 @@ from .services.gate_defaults import configure_fast_gate
 from .services.disposal import dispose_person_records
 from .services.dtr import DTR_REPORT_TYPE, router as dtr_router
 from .services.annex_g_pdf import AnnexGLayoutError, TEMPLATE_VERSION, render_annex_g_pdf
-from .services.annex_g import (import_annex_g_enrollments, backfill_annex_g_dobs,
+from .services.annex_g import (ANNEX_G_GRADES, import_annex_g_enrollments, backfill_annex_g_dobs, annex_g_learner_name,
                                build_annex_g_section, annex_g_school_profile_data, annex_g_class_record_people)
 from .services.scheduler import attendance_scheduler
 from .services import grading as grading_service
@@ -93,23 +105,67 @@ from .services.sms import (
 )
 
 
-app = FastAPI(title="EduScan API", version="1.0.0")
+if "*" in settings.allowed_origins:
+    raise ValueError("ALLOWED_ORIGINS must list individual EduScan website origins")
+
+app = FastAPI(
+    title="EduScan API",
+    version="1.0.0",
+    openapi_url="/openapi.json" if settings.enable_api_docs else None,
+)
+app.router.route_class = RateLimitedRoute
+app.state.request_limiter = RequestRateLimiter({
+    "camera": (settings.camera_requests_per_minute, min(12, settings.camera_requests_per_minute)),
+    "report": (settings.report_requests_per_minute, min(30, settings.report_requests_per_minute)),
+    "backup": (settings.backup_requests_per_minute, min(6, settings.backup_requests_per_minute)),
+    "password sign-in": (settings.password_sign_in_requests_per_minute, min(20, settings.password_sign_in_requests_per_minute)),
+    "Google sign-in": (settings.google_sign_in_requests_per_minute, min(20, settings.google_sign_in_requests_per_minute)),
+    "password recovery request": (settings.reset_requests_per_minute, min(12, settings.reset_requests_per_minute)),
+    "password recovery confirmation": (settings.reset_confirmations_per_minute, min(15, settings.reset_confirmations_per_minute)),
+    "SMS": (settings.sms_requests_per_minute, min(20, settings.sms_requests_per_minute)),
+    "SMS cancellation": (settings.sms_requests_per_minute, min(20, settings.sms_requests_per_minute)),
+})
 app.include_router(dtr_router)
+app.add_middleware(FormBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.allowed_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition"],
+    expose_headers=["Content-Disposition", "Retry-After"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "private, no-store"
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    if "x-powered-by" in response.headers:
+        del response.headers["x-powered-by"]
+    if "server" in response.headers:
+        del response.headers["server"]
+    return response
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(request: Request, error: RequestValidationError):
+    details = [{key: item[key] for key in ("type", "loc", "msg")} for item in error.errors()]
+    return await request_validation_exception_handler(request, RequestValidationError(details))
 
 
 @app.on_event("startup")
 def startup() -> None:
-    run_migrations(engine)
+    initialize_database(engine)
     with SessionLocal() as db:
-        seed_users(db)
+        if settings.seed_demo_accounts:
+            seed_users(db)
         seed_reference_data(db)
         configure_fast_gate(db)
     if settings.attendance_scheduler_enabled:
@@ -188,107 +244,64 @@ def reset_json(item: AttendanceResetAudit) -> dict:
     }
 
 
+def adviser_sections_query(user: User, school_year_id):
+    query = section_query(SchoolSection)
+    if user.role not in {"admin", "records_officer"}:
+        query = query.where(SchoolSection.id.in_(adviser_sections_for_year(user.id, school_year_id)))
+    return query
+
+
 def adviser_sections(db: Session, user: User, school_year_id: int | None = None) -> list[SchoolSection]:
-    query = select(SchoolSection).join(GradeLevel).where(
-        SchoolSection.active.is_(True), SchoolSection.deleted_at.is_(None), GradeLevel.deleted_at.is_(None))
-    if user.role in {"admin", "records_officer"}:
-        return db.scalars(query).all()
-    from .services.section_advisers import advised_section_ids
-    allowed = advised_section_ids(db, user.id, school_year_id)
-    return [item for item in db.scalars(query).all() if item.id in allowed]
+    if school_year_id is None:
+        school_year_id = school_year_for_date(date.today())
+    return db.scalars(adviser_sections_query(user, school_year_id)).all()
 
 
 def ensure_adviser_access(db: Session, user: User, grade: str, section: str, school_year_id: int | None = None) -> None:
     if user.role in {"admin", "records_officer"}:
         return
-    allowed = {(item.grade_level.name, item.name)
-               for item in adviser_sections(db, user, school_year_id)}
-    if (grade, section) not in allowed:
-        raise HTTPException(
-            status_code=403, detail="This section is not assigned to the signed-in adviser")
+    if school_year_id is None:
+        school_year_id = school_year_for_date(date.today())
+    query = adviser_sections_query(user, school_year_id).with_only_columns(SchoolSection.id)
+    if db.scalar(query.where(GradeLevel.name == grade, SchoolSection.name == section)) is None:
+        raise HTTPException(status_code=403, detail="This section is not assigned to the signed-in adviser")
 
 
-def report_sections(
-    db: Session, user: User, starts_on: date | None = None, ends_on: date | None = None,
+def report_sections_query(
+    user: User, starts_on: date | None = None, ends_on: date | None = None,
     school_year_name: str | None = None,
-) -> list[SchoolSection]:
-    """Active sections an adviser or subject teacher may report on for this period."""
-    sections = db.scalars(select(SchoolSection).join(GradeLevel).where(
-        SchoolSection.active.is_(True), SchoolSection.deleted_at.is_(None),
-        GradeLevel.active.is_(True), GradeLevel.deleted_at.is_(None),
-    ).order_by(GradeLevel.name, SchoolSection.name)).all()
-    if user.role in {"admin", "records_officer"}:
-        return sections
-
-    allowed_ids = set()
-    advisory_allowed = starts_on is None and ends_on is None
-    if starts_on and ends_on:
-        active_years = select(SchoolYear.id).where(
-            SchoolYear.active.is_(True), SchoolYear.deleted_at.is_(None),
-            SchoolYear.starts_on <= ends_on, SchoolYear.ends_on >= starts_on,
-        )
+):
+    query = section_query(SchoolSection).where(GradeLevel.active.is_(True))
+    if user.role not in {"admin", "records_officer"}:
+        years = select(SchoolYear.id).where(SchoolYear.deleted_at.is_(None))
         if school_year_name:
-            active_years = active_years.where(SchoolYear.name == school_year_name)
-        advisory_allowed = db.scalar(active_years.limit(1)) is not None
-    if advisory_allowed:
-        year_query = select(SchoolYear.id).where(SchoolYear.deleted_at.is_(None))
-        if school_year_name:
-            year_query = year_query.where(SchoolYear.name == school_year_name)
-        elif starts_on and ends_on:
-            year_query = year_query.where(SchoolYear.starts_on <= ends_on, SchoolYear.ends_on >= starts_on)
+            years = years.where(SchoolYear.name == school_year_name)
+        if starts_on is not None and ends_on is not None:
+            years = years.where(SchoolYear.starts_on <= ends_on, SchoolYear.ends_on >= starts_on)
+            advisory_years = years.where(years.where(SchoolYear.active.is_(True)).exists())
+        elif school_year_name:
+            advisory_years = years
         else:
-            from .services.section_advisers import current_school_year_id
-            year_query = year_query.where(SchoolYear.id == (current_school_year_id(db) or -1))
-        for year_id in db.scalars(year_query).all():
-            allowed_ids.update(item.id for item in adviser_sections(db, user, year_id))
-    assignments = select(SubjectTeachingAssignment.section_id).join(
-        SchoolYear, SchoolYear.id == SubjectTeachingAssignment.school_year_id,
-    ).where(
-        SubjectTeachingAssignment.teacher_user_id == user.id,
-        SubjectTeachingAssignment.active.is_(True),
-        SchoolYear.deleted_at.is_(None),
-    )
-    if starts_on and ends_on:
-        assignments = assignments.where(
-            SchoolYear.starts_on <= ends_on, SchoolYear.ends_on >= starts_on,
-        )
-    if school_year_name:
-        assignments = assignments.where(SchoolYear.name == school_year_name)
-    allowed_ids.update(db.scalars(assignments).all())
-    return [item for item in sections if item.id in allowed_ids]
+            advisory_years = years.where(SchoolYear.id == school_year_for_date(date.today()))
+        query = query.where(report_section_scope(user.id, advisory_years, years))
+    return query
 
 
-def teacher_roster_sections(db: Session, user: User) -> list[SchoolSection]:
-    active_years = db.scalars(select(SchoolYear.name).where(
-        SchoolYear.active.is_(True), SchoolYear.deleted_at.is_(None),
-    ).order_by(SchoolYear.name)).all()
-    if not active_years:
-        return adviser_sections(db, user)
-    sections = {
-        item.id: item
-        for year_name in active_years
-        for item in report_sections(db, user, school_year_name=year_name)
-    }
-    return list(sections.values())
+def report_sections(db: Session, user: User, starts_on: date | None = None, ends_on: date | None = None,
+                    school_year_name: str | None = None) -> list[SchoolSection]:
+    query = report_sections_query(user, starts_on, ends_on, school_year_name)
+    return db.scalars(query.order_by(GradeLevel.name, SchoolSection.name)).all()
 
 
-def ensure_report_access(
-    db: Session, user: User, grade: str, section: str,
-    starts_on: date | None = None, ends_on: date | None = None,
-    school_year_name: str | None = None,
-) -> None:
+def ensure_report_access(db: Session, user: User, grade: str, section: str, starts_on: date | None = None,
+                         ends_on: date | None = None, school_year_name: str | None = None) -> None:
     if starts_on and ends_on and starts_on > ends_on:
-        raise HTTPException(status_code=422, detail="The report start date must be on or before the end date")
+        raise HTTPException(422, "The report start date must be on or before the end date")
     if user.role in {"admin", "records_officer"}:
         return
-    allowed = {(item.grade_level.name, item.name) for item in report_sections(
-        db, user, starts_on, ends_on, school_year_name,
-    )}
-    if (grade, section) not in allowed:
-        raise HTTPException(
-            status_code=403,
-            detail="This section is not assigned to the signed-in teacher for the selected period",
-        )
+    query = report_sections_query(user, starts_on, ends_on, school_year_name).with_only_columns(SchoolSection.id)
+    if db.scalar(query.where(GradeLevel.name == grade, SchoolSection.name == section)) is None:
+        raise HTTPException(403, "This section is not assigned to the signed-in teacher for the selected period")
 
 
 def report_parameters_allowed(db: Session, user: User, parameters: dict) -> bool:
@@ -301,17 +314,52 @@ def report_parameters_allowed(db: Session, user: User, parameters: dict) -> bool
         if parameters.get("date"):
             starts_on = ends_on = date.fromisoformat(str(parameters["date"]))
         if parameters.get("year") and parameters.get("month"):
-            month = int(parameters["month"])
-            year = int(parameters["year"])
+            year, month = int(parameters["year"]), int(parameters["month"])
             starts_on = date(year, month, 1)
             ends_on = date(year + (month == 12), month % 12 + 1, 1) - timedelta(days=1)
-        ensure_report_access(
-            db, user, grade, section, starts_on, ends_on,
-            str(parameters.get("school_year") or "") or None,
-        )
+        ensure_report_access(db, user, grade, section, starts_on, ends_on, str(parameters.get("school_year") or "") or None)
     except (HTTPException, TypeError, ValueError):
         return False
     return True
+
+
+def teacher_roster_scope(user: User, scope: str, day: date | None = None):
+    if scope == "assigned":
+        return assigned_roster_sections(user.id, day)
+    return adviser_sections_query(user, school_year_for_date(day or date.today())).with_only_columns(SchoolSection.id)
+
+
+def teacher_sf2_scope(db: Session, user: User, *, download=False):
+    parameters = json_columns(db, GeneratedReport.parameters_json)
+    year_name = func.nullif(parameters["school_year"].as_string(), "")
+    year = parameters["year"].as_integer()
+    month = parameters["month"].as_integer()
+    month_key = year * 12 + month
+    start_month = extract("year", SchoolYear.starts_on) * 12 + extract("month", SchoolYear.starts_on)
+    end_month = extract("year", SchoolYear.ends_on) * 12 + extract("month", SchoolYear.ends_on)
+    no_period = or_(year.is_(None), month.is_(None))
+    matches_period = or_(no_period, and_(year.between(1, 9999), month.between(1, 12),
+                                         month_key.between(start_month, end_month)))
+    years = select(SchoolYear.id).where(
+        SchoolYear.deleted_at.is_(None), or_(year_name.is_(None), SchoolYear.name == year_name), matches_period,
+    ).correlate(GeneratedReport)
+    advisory_years = years.where(or_(
+        and_(~no_period, years.where(SchoolYear.active.is_(True)).exists()),
+        and_(no_period, or_(year_name.is_not(None), SchoolYear.id == school_year_for_date(date.today()))),
+    ))
+    sections = section_query(SchoolSection.id).where(
+        GradeLevel.active.is_(True), GradeLevel.name == parameters["grade"].as_string(),
+        SchoolSection.name == parameters["section"].as_string(),
+        report_section_scope(user.id, advisory_years, years),
+    ).correlate(GeneratedReport)
+    if download:
+        named_years = select(SchoolYear.id).where(SchoolYear.deleted_at.is_(None), SchoolYear.name == year_name).correlate(GeneratedReport)
+        sections = sections.where(SchoolSection.id.in_(select(SectionAdviserAssignment.section_id).where(
+            SectionAdviserAssignment.teacher_user_id == user.id,
+            SectionAdviserAssignment.school_year_id.in_(named_years),
+        )))
+    return and_(GeneratedReport.report_type == "Official SF2", GeneratedReport.generated_by_role == "admin",
+                GeneratedReport.status.not_in(["Rejected", "Superseded"]), sections.exists())
 
 
 def biometric_enrollment_json(person: Person, db: Session, include_samples: bool = False) -> dict:
@@ -362,20 +410,43 @@ def auth_config() -> dict:
             "deped_password_recovery": settings.deped_password_recovery}
 
 
-@app.post("/api/auth/google", response_model=LoginResponse)
-def google_login(payload: GoogleLoginRequest, request: Request, db: Session = Depends(get_db)) -> LoginResponse:
-    origin = request.headers.get("origin")
-    if origin and origin not in settings.allowed_origins:
-        raise HTTPException(403, "Sign in from an authorized EduScan website")
+def sign_in_response(db: Session, user: User, provider: str, request: Request, response: Response,
+                     *, secure: bool) -> LoginResponse:
+    # Recheck the verified identity while locking the same user row used by account changes.
+    identity = (User.google_sub == user.google_sub, User.google_email == user.google_email) if provider == "google" else (
+        User.password_hash == user.password_hash, User.google_email == user.google_email, User.google_sub == user.google_sub,
+    )
+    updated = db.execute(update(User).where(User.id == user.id, User.active.is_(True), *identity).values(
+        failed_login_count=0, locked_until=None, last_login_at=datetime.utcnow(),
+    ))
+    if updated.rowcount != 1:
+        raise HTTPException(401, "Your account changed. Please sign in again")
+    db.refresh(user)
+    revoke_session(db, request.cookies.get(SESSION_COOKIE))
+    token = issue_session(db, user, provider=provider)
+    db.commit()
+    set_session_cookie(response, token, secure=secure)
+    return LoginResponse(role=user.role, full_name=user.full_name,
+                         must_change_password=user.must_change_password, auth_provider=provider)
+
+
+@app.post("/api/auth/google", response_model=LoginResponse, dependencies=[Depends(require_app_request)])
+@rate_limit("Google sign-in")
+def google_login(payload: GoogleLoginRequest, request: Request, response: Response,
+                 db: Session = Depends(get_db)) -> LoginResponse:
+    secure = secure_session_transport(request)
     if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
         raise HTTPException(415, "Google sign-in requires a JSON request")
     user = google_user(db, verify_google_credential(payload.credential, payload.nonce))
-    return LoginResponse(access_token=create_token(user, auth_provider="google"), role=user.role,
-                         full_name=user.full_name, must_change_password=False, auth_provider="google")
+    return sign_in_response(db, user, "google", request, response, secure=secure)
 
 
-@app.post("/api/auth/login", response_model=LoginResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
+@app.post("/api/auth/login", response_model=LoginResponse, dependencies=[Depends(require_app_request)])
+@rate_limit("password sign-in")
+def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)) -> LoginResponse:
+    if payload.website:
+        raise HTTPException(400, "Invalid login request")
+    secure = secure_session_transport(request)
     identifier = payload.username.strip().lower()
     deped_login = settings.deped_password_recovery and identifier.endswith(f"@{DOMAIN}")
     if settings.deped_only and not deped_login:
@@ -401,22 +472,22 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
             if user.failed_login_count >= 5:
                 user.locked_until = now + timedelta(minutes=15)
                 user.failed_login_count = 0
+                add_audit(db, None, "Lockout", "User", user.id,
+                          f"Account {user.username} temporarily locked for 15 minutes after 5 failed login attempts")
             db.commit()
         raise HTTPException(
             status_code=401, detail="Invalid username or password")
-    user.failed_login_count = 0
-    user.locked_until = None
-    user.last_login_at = now
     provider = DEPED_PASSWORD_PROVIDER if deped_login else "password"
-    token = create_token(user, auth_provider=provider)
-    db.commit()
-    return LoginResponse(access_token=token, role=user.role, full_name=user.full_name,
-                         must_change_password=user.must_change_password, auth_provider=provider)
+    return sign_in_response(db, user, provider, request, response, secure=secure)
 
 
-@app.post("/api/auth/password-reset/request", status_code=202)
+@app.post("/api/auth/password-reset/request", status_code=202,
+          dependencies=[Depends(require_app_request), Depends(secure_session_transport)])
+@rate_limit("password recovery request")
 def request_password_reset(payload: DepedRecoveryRequest, background: BackgroundTasks,
                            db: Session = Depends(get_db)) -> dict:
+    if payload.website:
+        return {"message": "If this DepEd account is eligible, a reset code will be sent to its inbox."}
     password_recovery.require_recovery_configuration()
     challenge = password_recovery.issue_code(db, payload.email)
     if challenge:
@@ -427,7 +498,9 @@ def request_password_reset(payload: DepedRecoveryRequest, background: Background
     return {"message": "If this DepEd account is eligible, a reset code will be sent to its inbox."}
 
 
-@app.post("/api/auth/password-reset/confirm")
+@app.post("/api/auth/password-reset/confirm",
+          dependencies=[Depends(require_app_request), Depends(secure_session_transport)])
+@rate_limit("password recovery confirmation")
 def confirm_password_reset(payload: DepedRecoveryConfirm, background: BackgroundTasks,
                            db: Session = Depends(get_db)) -> dict:
     password_recovery.require_recovery_configuration()
@@ -438,17 +511,30 @@ def confirm_password_reset(payload: DepedRecoveryConfirm, background: Background
 
 
 @app.get("/api/auth/me")
-def me(user: User = Depends(current_user)) -> dict:
+def me(request: Request, user: User = Depends(current_user)) -> dict:
     return {"id": user.id, "username": user.username, "role": user.role, "full_name": user.full_name,
             "must_change_password": user.must_change_password, "password_changed_at": user.password_changed_at,
-            "auth_provider": "google" if user.google_sub else "password", "google_email": user.google_email}
+            "auth_provider": request.state.auth_provider, "google_email": user.google_email,
+            "session_context": request.state.session_context}
+
+
+@app.post("/api/auth/logout", status_code=204, dependencies=[Depends(require_app_request)])
+def logout(request: Request, db: Session = Depends(get_db)) -> Response:
+    secure = secure_session_transport(request)
+    require_matching_session_context(request)
+    revoke_session(db, request.cookies.get(SESSION_COOKIE))
+    db.commit()
+    response = Response(status_code=204)
+    clear_session_cookie(response, secure=secure)
+    return response
 
 
 @app.post("/api/auth/change-password")
-def change_password(payload: PasswordChangePayload, db: Session = Depends(get_db),
+def change_password(payload: PasswordChangePayload, request: Request, response: Response, db: Session = Depends(get_db),
                     user: User = Depends(current_user)) -> dict:
+    secure = secure_session_transport(request)
     deped_password = settings.deped_password_recovery and has_deped_password(user)
-    if (settings.deped_only or user.google_email) and not deped_password:
+    if request.state.auth_provider == "google" or ((settings.deped_only or user.google_email) and not deped_password):
         raise HTTPException(403, "Your password is managed by Google. Manage it through your DepEd Google account.")
     stored = user.password_hash.removeprefix(DEPED_PASSWORD_PREFIX) if deped_password else user.password_hash
     if not verify_password(payload.current_password, stored):
@@ -457,14 +543,22 @@ def change_password(payload: PasswordChangePayload, db: Session = Depends(get_db
     if payload.current_password == payload.new_password:
         raise HTTPException(
             status_code=422, detail="Choose a new password that is different from your current one.")
-    user.password_hash = (DEPED_PASSWORD_PREFIX if deped_password else "") + hash_password(payload.new_password)
-    user.must_change_password = False
-    user.password_changed_at = datetime.utcnow()
-    user.failed_login_count = 0
-    user.locked_until = None
+    changed = db.execute(update(User).where(
+        User.id == user.id, User.active.is_(True), User.password_hash == user.password_hash,
+    ).values(password_hash=(DEPED_PASSWORD_PREFIX if deped_password else "") + hash_password(payload.new_password),
+             must_change_password=False, password_changed_at=datetime.utcnow(), failed_login_count=0, locked_until=None))
+    if changed.rowcount != 1:
+        raise HTTPException(409, "Your account changed. Sign in again before changing your password")
+    db.refresh(user)
+    revoke_user_sessions(db, user.id)
+    token = None if deped_password else issue_session(db, user)
     add_audit(db, user, "PasswordChange", "User", user.id,
               "Account owner changed their password", {}, {"must_change_password": False})
     db.commit()
+    if token is None:
+        clear_session_cookie(response, secure=secure)
+    else:
+        set_session_cookie(response, token, secure=secure)
     return {"changed": True, "role": user.role, "full_name": user.full_name,
             "must_change_password": False}
 
@@ -542,6 +636,9 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
         item.password_changed_at = None
         item.failed_login_count = 0
         item.locked_until = None
+    if payload.new_password or not item.active:
+        db.flush()
+        revoke_user_sessions(db, item.id)
     add_audit(db, actor, "Update", "User", item.id,
               f"Account {item.username} updated", before, model_snapshot(item))
     db.commit()
@@ -559,6 +656,8 @@ def deactivate_user(user_id: int, db: Session = Depends(get_db),
             status_code=422, detail="You cannot deactivate your own account")
     before = model_snapshot(item)
     item.active = False
+    db.flush()
+    revoke_user_sessions(db, item.id)
     add_audit(db, actor, "Deactivate", "User", item.id,
               f"Account {item.username} deactivated", before, model_snapshot(item))
     db.commit()
@@ -592,13 +691,9 @@ def persons(role: str | None = None, grade: str | None = None, section: str | No
         query = query.where(Person.grade == grade)
     if section:
         query = query.where(Person.section == section)
-    items = db.scalars(query).all()
     if user.role == "teacher":
-        sections = teacher_roster_sections(db, user) if scope == "assigned" else adviser_sections(db, user)
-        allowed = {(item.grade_level.name, item.name)
-                   for item in sections}
-        items = [item for item in items if item.role ==
-                 "Student" and (item.grade, item.section) in allowed]
+        query = query.where(Person.role == "Student", person_in_sections(teacher_roster_scope(user, scope)))
+    items = db.scalars(query).all()
     return [person_json(item, db) for item in items]
 
 
@@ -804,6 +899,15 @@ def disposal_audits(db: Session = Depends(get_db), _: User = Depends(require_rol
              "actor_name": item.actor_name, "actor_role": item.actor_role, "created_at": item.created_at} for item in items]
 
 
+async def read_bounded_upload(file: UploadFile, byte_limit: int, detail: str) -> bytes:
+    if file.size is not None and file.size > byte_limit:
+        raise HTTPException(status_code=413, detail=detail)
+    data = await file.read(byte_limit + 1)
+    if len(data) > byte_limit:
+        raise HTTPException(status_code=413, detail=detail)
+    return data
+
+
 @app.post("/api/admin/annex-g/enrollments/import")
 async def annex_g_enrollment_import(file: UploadFile = File(...), approved_reference: str = Form(...),
                                     dry_run: bool = Form(True), db: Session = Depends(get_db),
@@ -811,7 +915,10 @@ async def annex_g_enrollment_import(file: UploadFile = File(...), approved_refer
     filename = file.filename or "enrollments.xlsx"
     if not filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=422, detail="Upload an approved .xlsx enrollment roster")
-    return import_annex_g_enrollments(db, await file.read(), filename, approved_reference, user, dry_run)
+    data = await read_bounded_upload(file, MAX_ROSTER_WORKBOOK_BYTES, "Workbook exceeds 15 MB")
+    if not data.startswith(b"PK\x03\x04"):
+        raise HTTPException(status_code=422, detail="Uploaded file signature does not match an Excel workbook (.xlsx)")
+    return import_annex_g_enrollments(db, data, filename, approved_reference, user, dry_run)
 
 
 @app.post("/api/admin/annex-g/dobs/import")
@@ -821,7 +928,10 @@ async def annex_g_dob_import(file: UploadFile = File(...), approved_reference: s
     filename = file.filename or "learner-dates-of-birth.xlsx"
     if not filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=422, detail="Upload an approved .xlsx DOB source")
-    return backfill_annex_g_dobs(db, await file.read(), filename, approved_reference, user, dry_run)
+    data = await read_bounded_upload(file, MAX_ROSTER_WORKBOOK_BYTES, "Workbook exceeds 15 MB")
+    if not data.startswith(b"PK\x03\x04"):
+        raise HTTPException(status_code=422, detail="Uploaded file signature does not match an Excel workbook (.xlsx)")
+    return backfill_annex_g_dobs(db, data, filename, approved_reference, user, dry_run)
 
 
 @app.get("/api/admin/annex-g/placement-candidates")
@@ -837,7 +947,7 @@ def annex_g_placement_candidates(school_year_id: int = Query(gt=0), db: Session 
         Person.role == "Student", Person.active.is_(True), Person.id.not_in(placed_people),
     ).order_by(Person.full_name)).all()
     return {"school_year": {"id": year.id, "name": year.name}, "candidates": [
-        {"id": item.id, "full_name": item.full_name, "lrn": item.lrn,
+        {"id": item.id, "full_name": annex_g_learner_name(item), "lrn": item.lrn,
          "current_grade": item.grade, "current_section": item.section}
         for item in candidates
     ]}
@@ -858,8 +968,8 @@ def create_annex_g_placement(payload: AnnexGPlacementPayload, db: Session = Depe
         SchoolSection.active.is_(True)))
     if not year or not person or person.role != "Student" or not person.active:
         raise HTTPException(status_code=404, detail="Active learner or school year was not found")
-    if not grade or not section or section.grade_level_id != grade.id or grade.name not in {"7", "8", "9", "10"}:
-        raise HTTPException(status_code=422, detail="Choose a Grade 7–10 section from the academic structure")
+    if not grade or not section or section.grade_level_id != grade.id or grade.name not in ANNEX_G_GRADES:
+        raise HTTPException(status_code=422, detail="Choose a Grade 7–12 section from the academic structure")
     if not year.starts_on <= payload.starts_on <= year.ends_on:
         raise HTTPException(status_code=422, detail="Placement start date must be within the selected school year")
     if db.scalar(select(LearnerEnrollment.id).where(
@@ -890,19 +1000,16 @@ def create_annex_g_placement(payload: AnnexGPlacementPayload, db: Session = Depe
         "source_reference": placement.source_reference}
 
 
-def _annex_g_enrollment(db: Session, enrollment_id: int) -> LearnerEnrollment:
-    enrollment = db.get(LearnerEnrollment, enrollment_id)
-    if not enrollment or enrollment.person.role != "Student":
+def _annex_g_enrollment(db: Session, enrollment_id: int, user: User) -> LearnerEnrollment:
+    query = select(LearnerEnrollment).join(Person).where(LearnerEnrollment.id == enrollment_id, Person.role == "Student")
+    if user.role == "teacher":
+        enrollment = scoped_record(db, query, adviser_assignment(user.id, LearnerEnrollment.school_year_id, LearnerEnrollment.section_id),
+                                   LearnerEnrollment.id, "This school-year section is not assigned to you as adviser")
+    else:
+        enrollment = db.scalar(query)
+    if not enrollment:
         raise HTTPException(status_code=404, detail="Verified learner placement was not found")
     return enrollment
-
-
-def _annex_g_access(db: Session, user: User, enrollment: LearnerEnrollment) -> None:
-    if user.role in {"admin", "records_officer"}:
-        return
-    adviser = adviser_for_section(db, enrollment.school_year_id, enrollment.section_id)
-    if user.role != "teacher" or not adviser or adviser.id != user.id:
-        raise HTTPException(status_code=403, detail="This school-year section is not assigned to you as adviser")
 
 
 @app.get("/api/annex-g/school-profile")
@@ -936,7 +1043,7 @@ def annex_g_options(db: Session = Depends(get_db),
         ).where(SectionAdviserAssignment.teacher_user_id == user.id, SchoolYear.deleted_at.is_(None))).all()
         for assignment in assignments:
             section = db.get(SchoolSection, assignment.section_id)
-            if not section or section.grade_level.name not in {"7", "8", "9", "10"}:
+            if not section or section.deleted_at is not None or section.grade_level.deleted_at is not None or section.grade_level.name not in ANNEX_G_GRADES:
                 continue
             year = db.get(SchoolYear, assignment.school_year_id)
             contexts.setdefault(assignment.school_year_id, {"id": assignment.school_year_id,
@@ -948,7 +1055,7 @@ def annex_g_options(db: Session = Depends(get_db),
         contexts = {}
         years = db.scalars(select(SchoolYear).where(SchoolYear.deleted_at.is_(None))).all()
         sections = db.scalars(select(SchoolSection).options(joinedload(SchoolSection.grade_level)).join(GradeLevel).where(
-            GradeLevel.name.in_(["7", "8", "9", "10"]), GradeLevel.deleted_at.is_(None),
+            GradeLevel.name.in_(ANNEX_G_GRADES), GradeLevel.deleted_at.is_(None),
             GradeLevel.active.is_(True), SchoolSection.deleted_at.is_(None),
             SchoolSection.active.is_(True))).all()
         for year in years:
@@ -961,14 +1068,21 @@ def annex_g_options(db: Session = Depends(get_db),
         year = db.get(SchoolYear, item['id'])
         verified = {}
         placed_ids = set()
-        for placement in db.scalars(select(LearnerEnrollment).options(joinedload(LearnerEnrollment.person))
-                                   .where(LearnerEnrollment.school_year_id == year.id)).all():
+        placements = select(LearnerEnrollment).options(joinedload(LearnerEnrollment.person)).where(
+            LearnerEnrollment.school_year_id == year.id)
+        if user.role == "teacher":
+            placements = placements.where(adviser_assignment(user.id, year.id, LearnerEnrollment.section_id))
+        for placement in db.scalars(placements):
             placed_ids.add(placement.person_id)
             if placement.person.role == 'Student' and placement.starts_on <= year.ends_on and (not placement.ends_on or placement.ends_on >= year.starts_on):
                 verified.setdefault(placement.section_id, set()).add(placement.person_id)
         recorded = {}
-        for section_id, person in annex_g_class_record_people(db, year.id, unplaced_only=False):
-            if person.id not in placed_ids or person.id in verified.get(section_id, set()):
+        adviser_id = user.id if user.role == "teacher" else None
+        for section_id, person in annex_g_class_record_people(
+            db, year.id, unplaced_only=False, adviser_id=adviser_id,
+            placement_window=(year.starts_on, year.ends_on) if adviser_id is not None else None,
+        ):
+            if adviser_id is not None or person.id not in placed_ids or person.id in verified.get(section_id, set()):
                 recorded.setdefault(section_id, set()).add(person.id)
         for section_id, section in item['sections'].items():
             confirmed = verified.get(section_id, set())
@@ -990,23 +1104,27 @@ def annex_g_section(school_year_id: int = Query(gt=0), grade: str = Query(), sec
                     user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> dict:
     year = db.get(SchoolYear, school_year_id)
     grade_name = grading_service.normalize_grade_name(grade)
-    grade_record = db.scalar(select(GradeLevel).where(GradeLevel.name == grade_name))
-    section_record = db.scalar(select(SchoolSection).where(SchoolSection.grade_level_id == (grade_record.id if grade_record else -1),
-        SchoolSection.name == section))
-    if not year or not grade_record or not section_record:
+    if not year:
         raise HTTPException(status_code=404, detail="School-year section was not found")
+    query = select(SchoolSection).join(GradeLevel).where(GradeLevel.name == grade_name, SchoolSection.name == section)
     if user.role == "teacher":
-        adviser = adviser_for_section(db, year.id, section_record.id)
-        if not adviser or adviser.id != user.id:
-            raise HTTPException(status_code=403, detail="This school-year section is not assigned to you as adviser")
-    report = build_annex_g_section(db, year.id, grade_name, section_record.name, term_order, include_unverified=True)
+        section_record = scoped_record(db, query, adviser_assignment(user.id, year.id, SchoolSection.id), SchoolSection.id,
+                                       "This school-year section is not assigned to you as adviser")
+    else:
+        section_record = db.scalar(query)
+    if not section_record:
+        raise HTTPException(status_code=404, detail="School-year section was not found")
+    report = build_annex_g_section(db, year.id, grade_name, section_record.name, term_order, include_unverified=True,
+                                   adviser_id=user.id if user.role == "teacher" else None)
     adviser = adviser_for_section(db, year.id, section_record.id)
-    released = []
-    for item in db.scalars(select(GeneratedReport).where(GeneratedReport.report_type == "Annex G")
-                           .order_by(GeneratedReport.created_at.desc()).limit(500)).all():
-        params = json.loads(item.parameters_json)
-        if params.get("school_year_id") == year.id and params.get("section_id") == section_record.id and params.get("term_order") == term_order:
-            released.append(report_json(item))
+    params = json_columns(db, GeneratedReport.parameters_json)
+    query = select(GeneratedReport).where(
+        GeneratedReport.report_type == "Annex G", params["school_year_id"].as_integer() == year.id,
+        params["section_id"].as_integer() == section_record.id, params["term_order"].as_integer() == term_order,
+    )
+    if user.role == "teacher":
+        query = query.where(adviser_assignment(user.id, year.id, section_record.id))
+    released = [report_json(item) for item in db.scalars(query.order_by(GeneratedReport.created_at.desc()).limit(500))]
     return {**report, "adviser_name": adviser.full_name if adviser else "",
             "released_reports": released}
 
@@ -1014,8 +1132,7 @@ def annex_g_section(school_year_id: int = Query(gt=0), grade: str = Query(), sec
 @app.put("/api/annex-g/comments")
 def save_annex_g_comment(payload: AnnexGCommentPayload, db: Session = Depends(get_db),
                          user: User = Depends(require_roles("teacher"))) -> dict:
-    enrollment = _annex_g_enrollment(db, payload.enrollment_id)
-    _annex_g_access(db, user, enrollment)
+    enrollment = _annex_g_enrollment(db, payload.enrollment_id, user)
     if not db.scalar(select(GradingPeriod.id).where(GradingPeriod.school_year_id == enrollment.school_year_id,
             GradingPeriod.term_order == payload.term_order, GradingPeriod.deleted_at.is_(None))):
         raise HTTPException(status_code=409, detail="That term is not configured for this school year")
@@ -1038,13 +1155,13 @@ def save_annex_g_comment(payload: AnnexGCommentPayload, db: Session = Depends(ge
 
 @app.get("/api/annex-g/preview/{enrollment_id}", response_class=Response, include_in_schema=False)
 @app.get("/api/annex-g/preview/{enrollment_id}/pdf", response_class=Response)
+@rate_limit("report")
 def annex_g_preview_pdf(enrollment_id: int, term_order: int = Query(ge=1, le=3),
                         db: Session = Depends(get_db),
                         user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> Response:
-    enrollment = _annex_g_enrollment(db, enrollment_id)
-    _annex_g_access(db, user, enrollment)
+    enrollment = _annex_g_enrollment(db, enrollment_id, user)
     report = build_annex_g_section(db, enrollment.school_year_id, enrollment.grade_level.name,
-                                   enrollment.section.name, term_order)
+                                   enrollment.section.name, term_order, adviser_id=user.id if user.role == "teacher" else None)
     if not any(row['enrollment_id'] == enrollment.id for row in report['learners']):
         raise HTTPException(status_code=404, detail="The learner is outside the selected term report roster")
     try:
@@ -1057,6 +1174,7 @@ def annex_g_preview_pdf(enrollment_id: int, term_order: int = Query(ge=1, le=3),
 
 
 @app.get("/api/annex-g/draft/{person_id}/pdf", response_class=Response)
+@rate_limit("report")
 def annex_g_class_record_draft_pdf(person_id: int, school_year_id: int = Query(gt=0),
                                    grade: str = Query(), section: str = Query(),
                                    term_order: int = Query(ge=1, le=3), db: Session = Depends(get_db),
@@ -1076,12 +1194,13 @@ def annex_g_class_record_draft_pdf(person_id: int, school_year_id: int = Query(g
 
 
 @app.post("/api/annex-g/release/{enrollment_id}")
+@rate_limit("report")
 def release_annex_g(enrollment_id: int, term_order: int = Query(ge=1, le=3),
                     db: Session = Depends(get_db),
                     user: User = Depends(require_roles("records_officer"))) -> dict:
     if user.role != "records_officer":
         raise HTTPException(status_code=403, detail="Only a Records Officer can release Annex G.")
-    enrollment = _annex_g_enrollment(db, enrollment_id)
+    enrollment = _annex_g_enrollment(db, enrollment_id, user)
     report = build_annex_g_section(db, enrollment.school_year_id, enrollment.grade_level.name,
                                    enrollment.section.name, term_order)
     learner = next((row for row in report["learners"] if row["enrollment_id"] == enrollment.id), None)
@@ -1135,12 +1254,21 @@ def release_annex_g(enrollment_id: int, term_order: int = Query(ge=1, le=3),
 @app.get("/api/annex-g/releases/{report_id}", response_class=Response)
 def annex_g_released_file(report_id: str, db: Session = Depends(get_db),
                           user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> Response:
-    item = db.get(GeneratedReport, report_id)
-    if not item or item.report_type != "Annex G" or item.status not in {"Released", "Superseded"}:
+    query = select(GeneratedReport).where(GeneratedReport.id == report_id, GeneratedReport.report_type == "Annex G",
+                                          GeneratedReport.status.in_(["Released", "Superseded"]))
+    if user.role == "teacher":
+        params = json_columns(db, GeneratedReport.parameters_json)
+        allowed = select(LearnerEnrollment.id).join(Person).where(
+            LearnerEnrollment.id == params["enrollment_id"].as_integer(), Person.role == "Student",
+            adviser_assignment(user.id, LearnerEnrollment.school_year_id, LearnerEnrollment.section_id),
+        ).correlate(GeneratedReport).exists()
+        item = scoped_record(db, query, allowed, GeneratedReport.id, "This school-year section is not assigned to you as adviser")
+    else:
+        item = db.scalar(query)
+    if not item:
         raise HTTPException(status_code=404, detail="Released Annex G report was not found")
     parameters = json.loads(item.parameters_json)
-    enrollment = _annex_g_enrollment(db, int(parameters["enrollment_id"]))
-    _annex_g_access(db, user, enrollment)
+    _annex_g_enrollment(db, int(parameters["enrollment_id"]), user)
     path = Path(item.file_path)
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != item.file_sha256:
         raise HTTPException(status_code=409, detail="Released report integrity check failed")
@@ -1191,12 +1319,15 @@ def backup_run_inventory(db: Session = Depends(get_db),
 
 
 @app.post("/api/admin/backups")
+@rate_limit("backup")
 def create_backup(passphrase: str = Form(...), destination: str = Form(""), db: Session = Depends(get_db),
                   user: User = Depends(require_roles("admin", "ict"))) -> dict:
     run = run_managed_backup(db, passphrase, "Manual", user, destination)
     add_audit(db, user, "Backup", "BackupRun", run.id, f"Manual backup {run.status.lower()}", {},
               model_snapshot(run), commit=True)
     if run.status == "Failed":
+        if run.error == quota_detail("Backup"):
+            raise StorageQuotaExceeded("Backup")
         raise HTTPException(
             status_code=500, detail=run.error or "Backup failed")
     return {"created": True, "run_id": run.id, "filename": run.filename,
@@ -1205,6 +1336,7 @@ def create_backup(passphrase: str = Form(...), destination: str = Form(""), db: 
 
 
 @app.get("/api/admin/backups/{filename}")
+@rate_limit("backup")
 def download_backup(filename: str, _: User = Depends(require_roles("admin", "ict"))):
     if Path(filename).name != filename or not filename.endswith(".edubak"):
         raise HTTPException(status_code=404, detail="Backup was not found")
@@ -1215,6 +1347,7 @@ def download_backup(filename: str, _: User = Depends(require_roles("admin", "ict
 
 
 @app.post("/api/admin/backups/restore")
+@rate_limit("backup")
 async def restore_backup(file: UploadFile = File(...), passphrase: str = Form(...),
                          confirmation: str = Form(...), db: Session = Depends(get_db),
                          user: User = Depends(require_roles("admin", "ict"))) -> dict:
@@ -1224,11 +1357,8 @@ async def restore_backup(file: UploadFile = File(...), passphrase: str = Form(..
     if not (file.filename or "").lower().endswith(".edubak"):
         raise HTTPException(
             status_code=422, detail="Upload an EduScan .edubak file")
-    data = await file.read(251 * 1024 * 1024)
-    if len(data) > 250 * 1024 * 1024:
-        raise HTTPException(
-            status_code=413, detail="Backup exceeds the 250 MB recovery limit")
-    result = stage_secure_restore(data, passphrase)
+    data = await read_bounded_upload(file, MAX_BACKUP_ARCHIVE_BYTES, "Backup exceeds the 250 MB recovery limit")
+    result = await run_in_threadpool(stage_secure_restore, data, passphrase)
     add_audit(db, user, "Stage Restore", "BackupRestore", file.filename,
               "Integrity-checked restore package staged for controlled application", {}, result, commit=True)
     return result
@@ -1261,6 +1391,7 @@ def save_backup_schedule(payload: BackupSchedulePayload, db: Session = Depends(g
 
 
 @app.post("/api/biometrics/register")
+@rate_limit("camera")
 async def register_and_enroll(background_tasks: BackgroundTasks, person: str = Form(...),
                               frames: list[UploadFile] = File(...),
                               reason: str = Form('Initial facial enrollment at gate station'),
@@ -1268,7 +1399,7 @@ async def register_and_enroll(background_tasks: BackgroundTasks, person: str = F
     try:
         payload = PersonCreate.model_validate_json(person)
     except ValidationError as error:
-        raise HTTPException(status_code=422, detail=error.errors(include_context=False)) from error
+        raise HTTPException(status_code=422, detail=error.errors(include_context=False, include_input=False, include_url=False)) from error
     contents = await read_recognition_uploads(frames, 40)
     try:
         record = _new_person_record(payload, db, user)
@@ -1284,6 +1415,7 @@ async def register_and_enroll(background_tasks: BackgroundTasks, person: str = F
 
 
 @app.post("/api/biometrics/enroll/{person_id}")
+@rate_limit("camera")
 async def enroll(person_id: int, background_tasks: BackgroundTasks, frames: list[UploadFile] = File(...),
                  reason: str = Form("Initial facial enrollment"), db: Session = Depends(get_db),
                  user: User = Depends(require_roles("admin"))) -> dict:
@@ -1293,7 +1425,7 @@ async def enroll(person_id: int, background_tasks: BackgroundTasks, frames: list
     if len(frames) > 40:
         raise HTTPException(
             status_code=422, detail="Enrollment accepts at most 40 frames")
-    contents = [await frame.read() for frame in frames]
+    contents = await read_recognition_uploads(frames, 40)
     return _enroll_with_sms(db, person, contents, user, reason, background_tasks)
 
 
@@ -1341,6 +1473,7 @@ def biometric_enrollment(person_id: int, db: Session = Depends(get_db),
 
 
 @app.post("/api/biometrics/enrollments/{person_id}")
+@rate_limit("camera")
 async def create_biometric_enrollment(person_id: int, background_tasks: BackgroundTasks, frames: list[UploadFile] = File(...),
                                       reason: str = Form(
                                           "Initial facial enrollment"),
@@ -1352,11 +1485,13 @@ async def create_biometric_enrollment(person_id: int, background_tasks: Backgrou
     if len(frames) > 40:
         raise HTTPException(
             status_code=422, detail="Enrollment accepts at most 40 frames")
-    return _enroll_with_sms(db, person, [await frame.read() for frame in frames], user, reason, background_tasks,
+    contents = await read_recognition_uploads(frames, 40)
+    return _enroll_with_sms(db, person, contents, user, reason, background_tasks,
                                     require_existing=False)
 
 
 @app.put("/api/biometrics/enrollments/{person_id}")
+@rate_limit("camera")
 async def update_biometric_enrollment(person_id: int, background_tasks: BackgroundTasks, frames: list[UploadFile] = File(...),
                                       reason: str = Form(...), db: Session = Depends(get_db),
                                       user: User = Depends(require_roles("admin"))) -> dict:
@@ -1366,7 +1501,8 @@ async def update_biometric_enrollment(person_id: int, background_tasks: Backgrou
     if len(frames) > 40:
         raise HTTPException(
             status_code=422, detail="Enrollment accepts at most 40 frames")
-    return _enroll_with_sms(db, person, [await frame.read() for frame in frames], user, reason, background_tasks,
+    contents = await read_recognition_uploads(frames, 40)
+    return _enroll_with_sms(db, person, contents, user, reason, background_tasks,
                                     require_existing=True)
 
 
@@ -1386,7 +1522,7 @@ def train(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"
 
 
 @app.get("/api/biometrics/status")
-def biometric_status(db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
+def biometric_status(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))) -> dict:
     active = db.scalar(select(BiometricModel).where(
         BiometricModel.active.is_(True)).order_by(BiometricModel.id.desc()))
     runtime = biometric_service.runtime_config(db)
@@ -1470,11 +1606,10 @@ def station_health(db: Session = Depends(get_db),
 
 
 @app.post("/api/biometrics/recognize", response_model=RecognitionResult)
+@rate_limit("camera")
 async def recognize(background_tasks: BackgroundTasks, frame: UploadFile = File(...), db: Session = Depends(get_db),
                     user: User = Depends(require_roles("admin", "scanner")), station_id: str = Form(default='legacy', max_length=120)) -> RecognitionResult:
-    data = await frame.read(8 * 1024 * 1024 + 1)
-    if len(data) > 8 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail='Recognition frame exceeds 8 MB')
+    data = await read_bounded_upload(frame, MAX_CAMERA_UPLOAD_BYTES, 'Recognition frame exceeds 8 MB')
     result = await run_in_threadpool(process_gate_frames, background_tasks, [data], station_id, db, True)
     return RecognitionResult(**result['results'][0])
 
@@ -1530,6 +1665,7 @@ def process_gate_frames(background_tasks: BackgroundTasks, frame_data: list[byte
 
 
 @app.post('/api/biometrics/recognize-many')
+@rate_limit("camera")
 async def recognize_many(background_tasks: BackgroundTasks, frame: UploadFile | None = File(default=None),
                          frames: list[UploadFile] = File(default=[]), station_id: str = Form(default='default', max_length=120),
                          db: Session = Depends(get_db), user: User = Depends(require_roles('admin', 'scanner'))) -> dict:
@@ -1545,10 +1681,9 @@ async def read_recognition_uploads(uploads: list[UploadFile], limit: int) -> lis
     frame_data = []
     total_bytes = 0
     for upload in uploads:
-        data = await upload.read(8 * 1024 * 1024 + 1)
+        data = await read_bounded_upload(upload, MAX_CAMERA_UPLOAD_BYTES - total_bytes,
+                                         'Recognition burst exceeds 8 MB; reduce camera frame size')
         total_bytes += len(data)
-        if total_bytes > 8 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail='Recognition burst exceeds 8 MB; reduce camera frame size')
         frame_data.append(data)
     return frame_data
 
@@ -1605,6 +1740,7 @@ def test_camera_frames(frame_data: list[bytes], bind, mode: str = 'recognition')
 
 
 @app.post('/api/biometrics/recognize-preview')
+@rate_limit("camera")
 async def recognize_preview(frames: list[UploadFile] = File(default=[]), db: Session = Depends(get_db),
                             _: User = Depends(require_roles('admin'))) -> dict:
     frame_data = await read_recognition_uploads(frames, 40)
@@ -1613,6 +1749,7 @@ async def recognize_preview(frames: list[UploadFile] = File(default=[]), db: Ses
 
 
 @app.post('/api/biometrics/test')
+@rate_limit("camera")
 async def test_camera(frames: list[UploadFile] = File(default=[]), db: Session = Depends(get_db),
                       mode: str = Form(default='recognition', pattern='^(recognition|enrollment|sface)$'),
                       _: User = Depends(require_roles('admin'))) -> dict:
@@ -1625,15 +1762,10 @@ def attendance(day: date = Query(alias="date"), grade: str | None = None, sectio
                scope: str = "advisory",
                db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> list[dict]:
     if user.role == "teacher":
-        sections = teacher_roster_sections(db, user) if scope == "assigned" else adviser_sections(db, user)
-        allowed = {(item.grade_level.name, item.name)
-                   for item in sections}
-        if grade and section:
-            if (grade, section) not in allowed:
-                raise HTTPException(
-                    status_code=403, detail="This section is not assigned to the signed-in teacher")
-            return list_rows(db, day, grade, section, students_only=True)
-        return [row for row in list_rows(db, day, students_only=True) if (row["grade"], row["section"]) in allowed]
+        sections = teacher_roster_scope(user, scope, day)
+        if grade and section and db.scalar(sections.where(GradeLevel.name == grade, SchoolSection.name == section)) is None:
+            raise HTTPException(status_code=403, detail="This section is not assigned to the signed-in teacher")
+        return list_rows(db, day, grade, section, students_only=True, person_scope=person_in_sections(sections))
     return list_rows(db, day, grade, section, students_only=bool(grade or section))
 
 
@@ -1662,37 +1794,51 @@ def attendance_close(background_tasks: BackgroundTasks, day: date = Query(alias=
             raise HTTPException(
                 status_code=422, detail="Teachers must select their assigned grade and section")
         ensure_adviser_access(db, user, grade, section, current_school_year_id(db, day) or -1)
-    created = close_day(db, day, grade, section)
-    refresh_temporary_log_pdf(db, day)
+    scope = advised_people(user.id, school_year_for_date(day)) if user.role == "teacher" else None
+    created = close_day(db, day, grade, section, person_scope=scope)
     background_tasks.add_task(dispatch_outbox)
-    return {"created": created}
+    return {"created": created, **_refresh_attendance_export(db, day)}
+
+
+def _refresh_attendance_export(db: Session, day: date) -> dict:
+    try:
+        refresh_temporary_log_pdf(db, day)
+    except StorageQuotaExceeded as error:
+        return {"export_warning": error.detail}
+    return {}
+
+
+def attendance_person(db: Session, user: User, person_id: int, day: date, *, students_only: bool = False):
+    query = select(Person).where(Person.id == person_id)
+    if students_only:
+        query = query.where(Person.role == "Student")
+    if user.role == "teacher":
+        return scoped_record(db, query, and_(Person.role == "Student", advised_people(user.id, school_year_for_date(day))),
+                             Person.id, "This section is not assigned to the signed-in adviser")
+    return db.scalar(query)
 
 
 @app.get("/api/attendance/corrections")
 def corrections(db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "teacher"))) -> list[dict]:
-    items = db.scalars(select(AttendanceCorrection).order_by(
-        AttendanceCorrection.created_at.desc()).limit(500)).all()
+    query = select(AttendanceCorrection)
     if user.role == "teacher":
-        items = [item for item in items if (item.person.grade, item.person.section) in {
-            (section.grade_level.name, section.name) for section in adviser_sections(db, user, current_school_year_id(db, item.attendance_date) or -1)}]
+        query = query.join(Person).where(Person.role == "Student",
+            advised_people(user.id, school_year_for_date(AttendanceCorrection.attendance_date)))
+    items = db.scalars(query.order_by(AttendanceCorrection.created_at.desc()).limit(500)).all()
     return [correction_json(item) for item in items]
 
 
 @app.post("/api/attendance/corrections")
 def correct(payload: AttendanceCorrectionPayload, db: Session = Depends(get_db),
             user: User = Depends(require_roles("admin", "teacher"))) -> dict:
-    person = db.get(Person, payload.person_id)
+    person = attendance_person(db, user, payload.person_id, payload.attendance_date)
     if not person:
         raise HTTPException(status_code=404, detail="Person was not found")
-    if user.role == "teacher":
-        ensure_adviser_access(
-            db, user, person.grade or "", person.section or "", current_school_year_id(db, payload.attendance_date) or -1)
     with gate_presence.lock:
-        item = save_correction(db, payload, user)
+        item = save_correction(db, payload, user, person=person)
         if payload.status == "No scan":
             gate_presence.forget_person(person.id)
-    refresh_temporary_log_pdf(db, payload.attendance_date)
-    return correction_json(item)
+    return {**correction_json(item), **_refresh_attendance_export(db, payload.attendance_date)}
 
 
 ReportFormat = Literal["pdf", "xlsx"]
@@ -1707,6 +1853,7 @@ def report_path_format(request: Request) -> ReportFormat:
 
 
 @app.get("/api/attendance/temporary-log")
+@rate_limit("report")
 def temporary_log(day: date = Query(alias="date"), grade: str | None = None, section: str | None = None,
                   db: Session = Depends(get_db), user: User = Depends(require_roles("admin")),
                   file_format: Annotated[ReportFormat, Query(alias="format")] = "pdf") -> FileResponse:
@@ -1721,6 +1868,7 @@ def temporary_log(day: date = Query(alias="date"), grade: str | None = None, sec
 
 @app.get("/api/attendance/report.xlsx")
 @app.get("/api/attendance/report.pdf")
+@rate_limit("report")
 def attendance_report_pdf(starts_on: date, ends_on: date, role: str | None = None, grade: str | None = None,
                            section: str | None = None, person_id: int | None = None,
                            db: Session = Depends(get_db),
@@ -1737,6 +1885,7 @@ def attendance_report_pdf(starts_on: date, ends_on: date, role: str | None = Non
 
 
 @app.get("/api/attendance/report/print")
+@rate_limit("report")
 def attendance_report_print(starts_on: date, ends_on: date, role: str | None = None, grade: str | None = None,
                             section: str | None = None, person_id: int | None = None,
                             db: Session = Depends(get_db),
@@ -1754,8 +1903,7 @@ def attendance_reset(payload: AttendanceResetPayload, db: Session = Depends(get_
             status_code=422, detail="Type the attendance date exactly to confirm the clean slate")
     audit = reset_day(db, payload.attendance_date, payload.reason, user)
     gate_presence.clear()
-    refresh_temporary_log_pdf(db, payload.attendance_date)
-    return reset_json(audit)
+    return {**reset_json(audit), **_refresh_attendance_export(db, payload.attendance_date)}
 
 
 @app.get("/api/attendance/resets")
@@ -1967,11 +2115,11 @@ def delete_calendar_exception(exception_id: str, db: Session = Depends(get_db),
 @app.get("/api/attendance/excused")
 def excused_absences(db: Session = Depends(get_db),
                      user: User = Depends(require_roles("admin", "teacher"))) -> list[dict]:
-    items = db.scalars(select(ExcusedAbsence).order_by(
-        ExcusedAbsence.event_date.desc(), ExcusedAbsence.created_at.desc())).all()
+    query = select(ExcusedAbsence)
     if user.role == "teacher":
-        items = [item for item in items if (item.person.grade, item.person.section) in {
-            (section.grade_level.name, section.name) for section in adviser_sections(db, user, current_school_year_id(db, item.event_date) or -1)}]
+        query = query.join(Person).where(Person.role == "Student",
+            advised_people(user.id, school_year_for_date(ExcusedAbsence.event_date)))
+    items = db.scalars(query.order_by(ExcusedAbsence.event_date.desc(), ExcusedAbsence.created_at.desc())).all()
     return [{"id": item.id, "person_id": item.person_id, "person_name": item.person.full_name,
              "event_date": item.event_date, "reason": item.reason, "actor_name": item.actor_name,
              "created_at": item.created_at} for item in items]
@@ -1980,12 +2128,9 @@ def excused_absences(db: Session = Depends(get_db),
 @app.post("/api/attendance/excused")
 def save_excused_absence(payload: ExcusedAbsencePayload, db: Session = Depends(get_db),
                          user: User = Depends(require_roles("admin", "teacher"))) -> dict:
-    person = db.get(Person, payload.person_id)
-    if not person or person.role != "Student":
+    person = attendance_person(db, user, payload.person_id, payload.event_date, students_only=True)
+    if not person:
         raise HTTPException(status_code=404, detail="Student was not found")
-    if user.role == "teacher":
-        ensure_adviser_access(
-            db, user, person.grade or "", person.section or "", current_school_year_id(db, payload.event_date) or -1)
     item = db.scalar(select(ExcusedAbsence).where(
         ExcusedAbsence.person_id == payload.person_id, ExcusedAbsence.event_date == payload.event_date,
     ))
@@ -2001,13 +2146,16 @@ def save_excused_absence(payload: ExcusedAbsencePayload, db: Session = Depends(g
 @app.delete("/api/attendance/excused/{excused_id}")
 def delete_excused_absence(excused_id: str, db: Session = Depends(get_db),
                            user: User = Depends(require_roles("admin", "teacher"))) -> dict:
-    item = db.get(ExcusedAbsence, excused_id)
+    query = select(ExcusedAbsence).where(ExcusedAbsence.id == excused_id)
+    if user.role == "teacher":
+        item = scoped_record(db, query.join(Person), and_(Person.role == "Student",
+            advised_people(user.id, school_year_for_date(ExcusedAbsence.event_date))), ExcusedAbsence.id,
+            "This section is not assigned to the signed-in adviser")
+    else:
+        item = db.scalar(query)
     if not item:
         raise HTTPException(
             status_code=404, detail="Excused absence was not found")
-    if user.role == "teacher":
-        ensure_adviser_access(
-            db, user, item.person.grade or "", item.person.section or "", current_school_year_id(db, item.event_date) or -1)
     db.delete(item)
     db.commit()
     return {"deleted": True}
@@ -2020,11 +2168,19 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
     periods = db.scalars(select(GradingPeriod).join(SchoolYear).where(
         GradingPeriod.deleted_at.is_(None), SchoolYear.deleted_at.is_(None)).order_by(
         GradingPeriod.school_year_id.desc(), GradingPeriod.term_order)).all()
-    grades = db.scalars(select(GradeLevel).where(GradeLevel.deleted_at.is_(None)).order_by(
-        GradeLevel.name)).all()
-    sections = db.scalars(select(SchoolSection).join(GradeLevel).where(
-        SchoolSection.deleted_at.is_(None), GradeLevel.deleted_at.is_(None)).order_by(
-        SchoolSection.grade_level_id, SchoolSection.name)).all()
+    grade_query = select(GradeLevel).where(GradeLevel.deleted_at.is_(None))
+    section_statement = select(SchoolSection).join(GradeLevel).where(
+        SchoolSection.deleted_at.is_(None), GradeLevel.deleted_at.is_(None))
+    if user.role == "teacher":
+        section_scope = grading_service.teacher_grading_sections(user) if context == 'grading' else (
+            adviser_sections_query(user, school_year_for_date(date.today())).with_only_columns(SchoolSection.id)
+        )
+        section_statement = section_statement.where(SchoolSection.id.in_(section_scope))
+        grade_query = grade_query.where(GradeLevel.id.in_(
+            section_statement.with_only_columns(SchoolSection.grade_level_id).correlate(None),
+        ))
+    grades = db.scalars(grade_query.order_by(GradeLevel.name)).all()
+    sections = db.scalars(section_statement.order_by(SchoolSection.grade_level_id, SchoolSection.name)).all()
     subjects = db.scalars(select(Subject).where(Subject.deleted_at.is_(None)).order_by(Subject.name)).all()
     assignments = db.scalars(select(SubjectTeachingAssignment).where(
         SubjectTeachingAssignment.active.is_(True),
@@ -2034,17 +2190,16 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
     ).order_by(SubjectTeachingAssignment.school_year_id,
                SubjectTeachingAssignment.subject_id,
                SubjectTeachingAssignment.section_id)).all()
-    annual_advisers = {row.section_id: row.teacher_user_id for row in db.scalars(select(SectionAdviserAssignment).where(SectionAdviserAssignment.school_year_id == (current_school_year_id(db) or -1))).all()}
+    annual_advisers = {row.section_id: row.teacher_user_id for row in db.scalars(select(SectionAdviserAssignment).where(
+        SectionAdviserAssignment.school_year_id == school_year_for_date(date.today()),
+        SectionAdviserAssignment.section_id.in_([item.id for item in sections]),
+    ))}
     adviser_names = {item.id: item.full_name for item in db.scalars(select(User).where(User.id.in_(set(annual_advisers.values()) or {-1}))).all()}
+    adviser_query = select(SectionAdviserAssignment)
     if user.role == "teacher":
-        allowed_sections = adviser_sections(db, user)
-        allowed_section_ids = {item.id for item in allowed_sections}
-        if context == 'grading':
-            allowed_section_ids = grading_service.teacher_grading_section_ids(db, user)
-        allowed_grade_ids = {item.grade_level_id for item in sections if item.id in allowed_section_ids}
-        sections = [item for item in sections if item.id in allowed_section_ids]
-        grades = [item for item in grades if item.id in allowed_grade_ids]
-        assignments = [item for item in assignments if item.section_id in allowed_section_ids]
+        adviser_query = adviser_query.where(SectionAdviserAssignment.teacher_user_id == user.id)
+    subject_keys = db.execute(select(SubjectTeachingAssignment.school_year_id, SubjectTeachingAssignment.subject_id)
+                              .where(SubjectTeachingAssignment.active.is_(True)).distinct()).all()
     return {
         "school_years": [{"id": item.id, "name": item.name, "starts_on": item.starts_on, "ends_on": item.ends_on, "active": item.active} for item in years],
         "grading_periods": [{"id": item.id, "school_year_id": item.school_year_id, "school_year": item.school_year.name,
@@ -2056,8 +2211,7 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
                       "adviser_name": adviser_names.get(annual_advisers.get(item.id)),
                       "track": item.track, "track_cluster": item.track_cluster, "active": item.active} for item in sections],
         "adviser_assignments": [{"school_year_id": item.school_year_id, "section_id": item.section_id, "teacher_user_id": item.teacher_user_id,
-            "adviser_name": db.get(User, item.teacher_user_id).full_name} for item in db.scalars(select(SectionAdviserAssignment)).all()
-            if user.role != 'teacher' or item.teacher_user_id == user.id],
+            "adviser_name": db.get(User, item.teacher_user_id).full_name} for item in db.scalars(adviser_query)],
         "subjects": [{"id": item.id, "code": item.code, "name": item.name, "category": item.category,
                       "is_elective": item.is_elective,
                       "allowed_grades": item.allowed_grades,
@@ -2071,11 +2225,7 @@ def academic_structure(context: str = "", db: Session = Depends(get_db), user: U
             "section_id": item.section_id, "section_name": item.section.name,
             "grade": item.section.grade_level.name,
         } for item in assignments],
-        "subject_assignment_subjects": sorted({
-            (item.school_year_id, item.subject_id) for item in db.scalars(select(SubjectTeachingAssignment).where(
-                SubjectTeachingAssignment.active.is_(True),
-            )).all()
-        }),
+        "subject_assignment_subjects": sorted((year_id, subject_id) for year_id, subject_id in subject_keys),
         "current_user_id": user.id,
         "current_user_name": user.full_name,
     }
@@ -2739,17 +2889,20 @@ def outbox(db: Session = Depends(get_db), _: User = Depends(require_roles("admin
 
 
 @app.get("/api/sms/gateway/check")
+@rate_limit("SMS")
 def check_sms_gateway(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))) -> dict:
     return gateway_diagnostics(db)
 
 
 @app.post("/api/sms/dispatch")
+@rate_limit("SMS")
 def dispatch(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))) -> dict:
     records = dispatch_queued(db)
     return {"processed": len(records), "accepted": sum(record.status == "accepted" for record in records)}
 
 
 @app.post("/api/sms/reconcile")
+@rate_limit("SMS")
 def reconcile_sms(db: Session = Depends(get_db),
                   user: User = Depends(require_roles("admin", "records_officer"))) -> dict:
     records = reconcile_outbox(db)
@@ -2763,6 +2916,7 @@ def reconcile_sms(db: Session = Depends(get_db),
 
 
 @app.post("/api/sms/outbox/{record_id}/requeue")
+@rate_limit("SMS")
 def requeue_sms(record_id: str, db: Session = Depends(get_db),
                 user: User = Depends(require_roles("admin", "records_officer"))) -> dict:
     record = db.get(SmsOutbox, record_id)
@@ -2777,6 +2931,7 @@ def requeue_sms(record_id: str, db: Session = Depends(get_db),
 
 
 @app.post("/api/sms/outbox/{record_id}/cancel")
+@rate_limit("SMS cancellation")
 def cancel_sms(record_id: str, db: Session = Depends(get_db),
                user: User = Depends(require_roles("admin", "records_officer"))) -> dict:
     record = db.get(SmsOutbox, record_id)
@@ -2792,6 +2947,7 @@ def cancel_sms(record_id: str, db: Session = Depends(get_db),
 
 @app.get("/api/sms/outbox.csv", include_in_schema=False)
 @app.get("/api/sms/outbox.pdf")
+@rate_limit("report")
 def export_sms_outbox(db: Session = Depends(get_db),
                       _: User = Depends(require_roles("admin", "records_officer"))) -> Response:
     items = db.scalars(select(SmsOutbox).order_by(
@@ -2808,6 +2964,7 @@ def export_sms_outbox(db: Session = Depends(get_db),
 
 
 @app.post("/api/sms/test")
+@rate_limit("SMS")
 def test_sms(phone: str = Form(...), message: str = Form("EduScan Android gateway connection test."),
              db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))) -> dict:
     config = sms_config(db)
@@ -2834,10 +2991,13 @@ def sf2_status(_: User = Depends(require_roles("admin", "teacher", "records_offi
 
 @app.post("/api/sf2/template")
 async def upload_sf2(file: UploadFile = File(...), _: User = Depends(require_roles("admin"))) -> dict:
-    if not file.filename.lower().endswith(".xlsx"):
+    if not (file.filename or "").lower().endswith(".xlsx"):
         raise HTTPException(
             status_code=422, detail="Upload an .xlsx SF2 workbook")
-    path = save_template(await file.read())
+    data = await read_bounded_upload(file, MAX_SF2_TEMPLATE_BYTES, "SF2 template exceeds the 20 MB limit")
+    if not data.startswith(b"PK\x03\x04"):
+        raise HTTPException(status_code=422, detail="Uploaded file signature does not match an Excel workbook (.xlsx)")
+    path = await run_in_threadpool(save_template, data)
     return {"configured": True, "filename": path.name}
 
 
@@ -2857,6 +3017,7 @@ def sf2_preview(year: int, month: int, grade: str, section: str, attendance_date
 
 
 @app.get("/api/sf2/export")
+@rate_limit("report")
 def sf2_export(year: int, month: int, grade: str, section: str, school_id: str = "",
                school_year: str = "", school_name: str = "SAN JOSE NATIONAL HIGH SCHOOL",
                db: Session = Depends(get_db), user: User = Depends(require_roles("admin")),
@@ -2898,20 +3059,14 @@ def report_json(item: GeneratedReport) -> dict:
             "reviewed_at": item.reviewed_at, "created_at": item.created_at}
 
 
-def teacher_can_view_report(db: Session, user: User, item: GeneratedReport) -> bool:
-    return (item.report_type == "Official SF2" and item.generated_by_role == "admin"
-            and item.status not in {"Rejected", "Superseded"}
-            and report_parameters_allowed(db, user, json.loads(item.parameters_json)))
-
-
 @app.get("/api/reports/history/{report_id}/preview")
 def preview_generated_report(report_id: str, db: Session = Depends(get_db),
                              user: User = Depends(require_roles("admin", "teacher", "records_officer", "school_head"))) -> dict:
-    item = db.get(GeneratedReport, report_id)
+    query = select(GeneratedReport).where(GeneratedReport.id == report_id)
+    item = scoped_record(db, query, teacher_sf2_scope(db, user), GeneratedReport.id,
+                         "Only administrator-generated official SF2s for your classes are available") if user.role == "teacher" else db.scalar(query)
     if not item:
         raise HTTPException(status_code=404, detail="Report was not found")
-    if user.role == "teacher" and not teacher_can_view_report(db, user, item):
-        raise HTTPException(status_code=403, detail="Only administrator-generated official SF2s for your classes are available")
     path = Path(item.file_path)
     if item.report_type != "Official SF2" or not path.is_file():
         raise HTTPException(status_code=404, detail="Official SF2 file was not found")
@@ -2930,22 +3085,29 @@ def report_history(db: Session = Depends(get_db),
     if user.role != "admin":
         query = query.where(GeneratedReport.report_type != DTR_REPORT_TYPE)
     if user.role == "teacher":
-        query = query.where(GeneratedReport.report_type == "Official SF2", GeneratedReport.generated_by_role == "admin",
-                            GeneratedReport.status.not_in(["Rejected", "Superseded"]))
+        query = query.where(teacher_sf2_scope(db, user)).add_columns(teacher_sf2_scope(db, user, download=True))
+        return [{**report_json(item), "can_download": bool(can_download)} for item, can_download in db.execute(
+            query.order_by(GeneratedReport.created_at.desc()).limit(1000)
+        )]
     items = db.scalars(query.order_by(GeneratedReport.created_at.desc()).limit(1000)).all()
-    if user.role == "teacher":
-        items = [item for item in items if teacher_can_view_report(db, user, item)]
     return [report_json(item) for item in items]
 
 
 @app.get("/api/reports/history/{report_id}/download")
 def download_generated_report(report_id: str, db: Session = Depends(get_db),
-                              user: User = Depends(require_roles("admin", "records_officer", "school_head"))) -> FileResponse:
-    item = db.get(GeneratedReport, report_id)
-    if not item or (item.report_type == DTR_REPORT_TYPE and user.role != "admin") or not Path(item.file_path).is_file():
+                              user: User = Depends(require_roles("admin", "teacher", "records_officer", "school_head"))) -> FileResponse:
+    query = select(GeneratedReport).where(GeneratedReport.id == report_id)
+    if user.role != "admin":
+        query = query.where(GeneratedReport.report_type != DTR_REPORT_TYPE)
+    item = scoped_record(db, query, teacher_sf2_scope(db, user, download=True), GeneratedReport.id,
+                         "You can only download official SF2 reports for your advisory class") if user.role == "teacher" else db.scalar(query)
+    if not item:
         raise HTTPException(
             status_code=404, detail="Generated report file was not found")
-    if hashlib.sha256(Path(item.file_path).read_bytes()).hexdigest() != item.file_sha256:
+    path = Path(item.file_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Generated report file was not found")
+    if hashlib.sha256(path.read_bytes()).hexdigest() != item.file_sha256:
         raise HTTPException(status_code=409, detail="Report integrity check failed")
     return FileResponse(item.file_path, filename=item.filename, headers={"Cache-Control": "private, no-store"})
 
@@ -2969,21 +3131,36 @@ def review_generated_report(report_id: str, payload: ReportReviewPayload, db: Se
     return report_json(item)
 
 
+def legacy_class_scope(user, grade, section, school_year):
+    year = select(SchoolYear.id).where(SchoolYear.name == school_year, SchoolYear.deleted_at.is_(None)
+                                      ).correlate(GradebookState, SystemSetting).scalar_subquery()
+    return section_query(SchoolSection.id).where(
+        GradeLevel.name == grade, SchoolSection.name == section,
+        adviser_assignment(user.id, year, SchoolSection.id),
+    ).correlate(GradebookState, SystemSetting).exists()
+
+
+def legacy_gradebook_state(db: Session, user: User, class_key: str):
+    query = select(GradebookState).where(GradebookState.class_key == class_key)
+    if user.role != "teacher":
+        return db.scalar(query)
+    return scoped_record(db, query, legacy_class_scope(user, GradebookState.grade, GradebookState.section, GradebookState.school_year),
+                         GradebookState.class_key, "This section is not assigned to the signed-in adviser")
+
+
 def ensure_legacy_gradebook_access(db: Session, user: User, class_key: str,
                                  grade: str = "", section: str = "", school_year: str = "") -> None:
-    if user.role != "teacher":
+    if user.role != "teacher" or legacy_gradebook_state(db, user, class_key):
         return
-    state = db.get(GradebookState, class_key)
-    rules = get_json(db, f"gradebook:{class_key}:rules", {}) if not state else {}
-    stored_grade = state.grade if state else rules.get("grade")
-    stored_section = state.section if state else rules.get("section")
-    if stored_grade and stored_section:
-        year_name = state.school_year if state else rules.get("school_year")
-        year_id = db.scalar(select(SchoolYear.id).where(SchoolYear.name == year_name, SchoolYear.deleted_at.is_(None)))
-        ensure_adviser_access(db, user, stored_grade, stored_section, year_id or -1)
+    rules = json_columns(db, SystemSetting.value)
+    query = select(SystemSetting.key).where(SystemSetting.key == f"gradebook:{class_key}:rules",
+                                            SystemSetting.value.not_in(("", "{}", "null")))
+    if scoped_record(db, query, legacy_class_scope(user, rules["grade"].as_string(), rules["section"].as_string(),
+                                                   rules["school_year"].as_string()), SystemSetting.key,
+                     "This legacy record has no verified class assignment"):
         return
     # Records without trusted class metadata must not inherit the caller's scope.
-    if state or rules or db.scalar(select(GradeComponent.id).where(GradeComponent.class_key == class_key).limit(1)) or db.scalar(
+    if db.scalar(select(GradeComponent.id).where(GradeComponent.class_key == class_key).limit(1)) or db.scalar(
         select(GradeChangeAudit.id).where(GradeChangeAudit.class_key == class_key).limit(1)
     ):
         raise HTTPException(status_code=403, detail="This legacy record has no verified class assignment")
@@ -3037,7 +3214,7 @@ def read_gradebook(class_key: str, grade: str = "", section: str = "", db: Sessi
 @app.put("/api/gradebook/{class_key}")
 def save_gradebook(class_key: str, payload: GradebookPayload, db: Session = Depends(get_db),
                    user: User = Depends(require_roles("teacher"))) -> dict:
-    linked = db.scalar(select(Gradebook).where(Gradebook.class_key == class_key))
+    linked = db.execute(select(Gradebook.is_legacy_readonly, Gradebook.learning_area).where(Gradebook.class_key == class_key)).first()
     if linked and (linked.is_legacy_readonly or linked.learning_area):
         raise HTTPException(409, 'Use the learning-area workspace. Legacy MAPEH records are read-only.')
     if payload.class_key != class_key:
@@ -3046,10 +3223,10 @@ def save_gradebook(class_key: str, payload: GradebookPayload, db: Session = Depe
     ensure_legacy_gradebook_access(db, user, class_key, payload.grade, payload.section, payload.school_year)
     payload_year_id = db.scalar(select(SchoolYear.id).where(SchoolYear.name == payload.school_year, SchoolYear.deleted_at.is_(None)))
     ensure_adviser_access(db, user, payload.grade, payload.section, payload_year_id or -1)
-    existing_state = db.get(GradebookState, class_key)
+    existing_state = legacy_gradebook_state(db, user, class_key)
     if existing_state and existing_state.status == "Finalized":
         raise HTTPException(
-            status_code=409, detail="This gradebook is finalized. An administrator or records officer must reopen it with a reason before changes are allowed")
+            status_code=409, detail="This gradebook is finalized. Reopen it with a reason before making changes")
     year = db.scalar(select(SchoolYear).where(
         SchoolYear.name == payload.school_year, SchoolYear.active.is_(True), SchoolYear.deleted_at.is_(None)))
     if not year or not db.scalar(select(GradingPeriod.id).where(
@@ -3087,7 +3264,7 @@ def save_gradebook(class_key: str, payload: GradebookPayload, db: Session = Depe
     allowed_people = set(db.scalars(select(Person.id).where(
         Person.role == "Student", Person.active.is_(
             True), Person.grade == payload.grade,
-        Person.section == payload.section,
+        Person.section == payload.section, advised_people(user.id, year.id),
     )).all())
     submitted_people = {int(person_id) for person_id in payload.scores}
     if not submitted_people.issubset(allowed_people):
@@ -3160,14 +3337,13 @@ def save_gradebook(class_key: str, payload: GradebookPayload, db: Session = Depe
 @app.post("/api/gradebook/{class_key}/finalize")
 def finalize_gradebook(class_key: str, payload: GradebookActionPayload, db: Session = Depends(get_db),
                        user: User = Depends(require_roles("teacher"))) -> dict:
-    linked = db.scalar(select(Gradebook).where(Gradebook.class_key == class_key))
+    linked = db.execute(select(Gradebook.is_legacy_readonly, Gradebook.learning_area).where(Gradebook.class_key == class_key)).first()
     if linked and (linked.is_legacy_readonly or linked.learning_area):
         raise HTTPException(409, 'Use the learning-area workspace. Legacy MAPEH records are read-only.')
-    state = db.get(GradebookState, class_key)
+    state = legacy_gradebook_state(db, user, class_key)
     if not state:
         raise HTTPException(
             status_code=404, detail="Save the gradebook before finalizing it")
-    ensure_legacy_gradebook_access(db, user, class_key)
     if state.status == "Finalized":
         return {"finalized": True, "already_finalized": True}
     summary = gradebook_summary(db, class_key)
@@ -3190,37 +3366,40 @@ def finalize_gradebook(class_key: str, payload: GradebookActionPayload, db: Sess
 
 @app.post("/api/gradebook/{class_key}/reopen")
 def reopen_gradebook(class_key: str, payload: GradebookActionPayload, db: Session = Depends(get_db),
-                     user: User = Depends(require_roles("records_officer"))) -> dict:
-    linked = db.scalar(select(Gradebook).where(Gradebook.class_key == class_key))
+                     user: User = Depends(require_roles("teacher", "records_officer"))) -> dict:
+    linked = db.execute(select(Gradebook.is_legacy_readonly, Gradebook.learning_area).where(Gradebook.class_key == class_key)).first()
     if linked and (linked.is_legacy_readonly or linked.learning_area):
         raise HTTPException(409, 'Use the learning-area workspace. Legacy MAPEH records are read-only.')
-    state = db.get(GradebookState, class_key)
+    state = legacy_gradebook_state(db, user, class_key)
     if not state:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
     if state.status != "Finalized":
         raise HTTPException(
             status_code=409, detail="Only a finalized gradebook can be reopened")
+    reason = payload.reason.strip()
+    if len(reason) < 8:
+        raise HTTPException(status_code=422, detail="A specific reason (minimum 8 characters) is required to reopen")
     before = model_snapshot(state)
     state.status = "Draft"
     state.reopened_by = user.id
     state.reopened_by_name = user.full_name
     state.reopened_at = datetime.utcnow()
-    state.reopen_reason = payload.reason.strip()
+    state.reopen_reason = reason
     add_audit(db, user, "Reopen", "Gradebook", class_key,
-              payload.reason, before, model_snapshot(state))
+              reason, before, model_snapshot(state))
     db.commit()
     return {"reopened": True}
 
 
 @app.get("/api/gradebook/{class_key}/report.xlsx")
 @app.get("/api/gradebook/{class_key}/report.pdf")
+@rate_limit("report")
 def gradebook_report_pdf(class_key: str, grade: str = "", section: str = "", db: Session = Depends(get_db),
                           user: User = Depends(require_roles("teacher", "records_officer")),
                           file_format: Annotated[ReportFormat, Depends(report_path_format)] = "pdf") -> FileResponse:
-    state = db.get(GradebookState, class_key)
+    state = legacy_gradebook_state(db, user, class_key)
     if not state:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
-    ensure_legacy_gradebook_access(db, user, class_key)
     path = generate_grade_report_xlsx(db, class_key)
     report = register_workbook_report(db, path, "Grading Summary", {"class_key": class_key, "grade": state.grade, "section": state.section,
                                                            "school_year": state.school_year, "term_order": state.term_order,
@@ -3230,6 +3409,7 @@ def gradebook_report_pdf(class_key: str, grade: str = "", section: str = "", db:
 
 
 @app.get("/api/gradebook/{class_key}/report/print")
+@rate_limit("report")
 def gradebook_report_print(class_key: str, grade: str = "", section: str = "", db: Session = Depends(get_db),
                            user: User = Depends(require_roles("admin", "records_officer"))) -> FileResponse:
     response = gradebook_report_pdf(class_key, grade, section, db, user)
@@ -3253,11 +3433,13 @@ def gradebook_audit(class_key: str, grade: str = "", section: str = "", db: Sess
 # Policy-Configurable Grading Endpoints
 # ---------------------------------------------------------------------------
 
-def ensure_gradebook_access(db: Session, user: User, book: Gradebook) -> None:
-    if user.role == 'teacher' and not grading_service.teacher_can_access_gradebook_context(
-        db, user, book.school_year_id, book.section_id, book.subject_id,
-    ):
-        raise HTTPException(status_code=403, detail='This subject and section are not assigned to your teacher account')
+def gradebook_for_user(db: Session, user: User, query, *, for_export=False):
+    if user.role != "teacher":
+        return db.scalar(query)
+    scope = grading_service.teacher_gradebook_scope(user.id)
+    if for_export:
+        scope = and_(scope, Gradebook.teacher_user_id == user.id)
+    return scoped_record(db, query, scope, Gradebook.id, "This subject and section are not assigned to your teacher account")
 
 
 @app.get("/api/grading-policies")
@@ -3468,11 +3650,9 @@ def list_gradebooks(
     if subject:
         query = query.where(Gradebook.subject_name == subject)
 
-    books = db.scalars(query).all()
     if user.role == "teacher":
-        books = [b for b in books if grading_service.teacher_can_access_gradebook_context(
-            db, user, b.school_year_id, b.section_id, b.subject_id,
-        )]
+        query = query.where(grading_service.teacher_gradebook_scope(user.id))
+    books = db.scalars(query).all()
 
     results = []
     for b in books:
@@ -3516,7 +3696,7 @@ def lookup_gradebook_endpoint(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles('admin', 'teacher', 'records_officer')),
 ):
-    book = db.scalar(select(Gradebook).where(
+    book = gradebook_for_user(db, user, select(Gradebook).where(
         Gradebook.school_year_id == school_year_id,
         Gradebook.grading_period_id == grading_period_id,
         Gradebook.grade_level_id == grade_level_id,
@@ -3526,7 +3706,6 @@ def lookup_gradebook_endpoint(
     ))
     if not book:
         return {'id': None}
-    ensure_gradebook_access(db, user, book)
     return {'id': book.id, 'status': book.status, 'class_key': book.class_key}
 
 
@@ -3559,12 +3738,10 @@ def get_gradebook_endpoint(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("admin", "teacher", "records_officer", "school_head")),
 ):
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
+    book = gradebook_for_user(db, user, select(Gradebook).where(Gradebook.id == gradebook_id))
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook not found")
-    full = grading_service.get_gradebook_full(db, gradebook_id)
+    full = grading_service.get_gradebook_full(db, gradebook_id, teacher_id=user.id if user.role == "teacher" else None)
     if not full:
         raise HTTPException(
             status_code=404, detail="Gradebook details could not be loaded")
@@ -3578,9 +3755,7 @@ def update_components_endpoint(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("teacher")),
 ):
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
+    book = gradebook_for_user(db, user, select(Gradebook).where(Gradebook.id == gradebook_id))
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook not found")
     try:
@@ -3599,9 +3774,7 @@ def save_scores_endpoint(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("teacher")),
 ):
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
+    book = gradebook_for_user(db, user, select(Gradebook).where(Gradebook.id == gradebook_id))
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook not found")
     try:
@@ -3623,13 +3796,11 @@ def get_student_calculation_endpoint(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("admin", "teacher", "records_officer", "school_head")),
 ):
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
+    book = gradebook_for_user(db, user, select(Gradebook).where(Gradebook.id == gradebook_id))
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook not found")
     breakdown = grading_service.get_student_breakdown(
-        db, gradebook_id, person_id)
+        db, gradebook_id, person_id, teacher_id=user.id if user.role == "teacher" else None)
     if not breakdown:
         raise HTTPException(
             status_code=404, detail="Student calculation breakdown not found")
@@ -3642,12 +3813,10 @@ def validate_gradebook_endpoint(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("admin", "teacher", "records_officer", "school_head")),
 ):
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
+    book = gradebook_for_user(db, user, select(Gradebook).where(Gradebook.id == gradebook_id))
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook not found")
-    full = grading_service.get_gradebook_full(db, gradebook_id)
+    full = grading_service.get_gradebook_full(db, gradebook_id, teacher_id=user.id if user.role == "teacher" else None)
     if not full:
         raise HTTPException(
             status_code=404, detail="Gradebook could not be loaded")
@@ -3685,9 +3854,7 @@ def submit_gradebook_endpoint(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("teacher")),
 ):
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
+    book = gradebook_for_user(db, user, select(Gradebook).where(Gradebook.id == gradebook_id))
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook not found")
     try:
@@ -3705,9 +3872,7 @@ def finalize_gradebook_new_endpoint(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("teacher")),
 ):
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
+    book = gradebook_for_user(db, user, select(Gradebook).where(Gradebook.id == gradebook_id))
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook not found")
     try:
@@ -3738,8 +3903,10 @@ def reopen_gradebook_new_endpoint(
     gradebook_id: int,
     payload: GradebookWorkflowPayload,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("records_officer")),
+    user: User = Depends(require_roles("teacher", "records_officer")),
 ):
+    if user.role == "teacher":
+        gradebook_for_user(db, user, select(Gradebook).where(Gradebook.id == gradebook_id))
     try:
         grading_service.reopen_gradebook(
             db, gradebook_id, user, payload.reason)
@@ -3754,9 +3921,7 @@ def gradebook_audit_new_endpoint(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("admin", "teacher", "records_officer", "school_head")),
 ):
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
+    book = gradebook_for_user(db, user, select(Gradebook).where(Gradebook.id == gradebook_id))
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook not found")
     entries = db.scalars(
@@ -3782,6 +3947,7 @@ def gradebook_audit_new_endpoint(
 
 @app.get("/api/gradebooks/{gradebook_id}/report.xlsx")
 @app.get("/api/gradebooks/{gradebook_id}/report.pdf")
+@rate_limit("report")
 def gradebook_report_pdf_new(
     gradebook_id: int,
     region: str = "",
@@ -3796,9 +3962,7 @@ def gradebook_report_pdf_new(
 ):
     if (all_terms or through_term) and user.role not in {'teacher', 'records_officer'}:
         raise HTTPException(status_code=403, detail="Only the assigned teacher or records officer can export multiple terms")
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
+    book = gradebook_for_user(db, user, select(Gradebook).where(Gradebook.id == gradebook_id), for_export=True)
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
     path = generate_gradebook_report_xlsx(db, book.id, region=region, division=division, school_id=school_id,
@@ -3831,9 +3995,7 @@ def gradebook_report_validation(
 ):
     if (all_terms or through_term) and user.role not in {'teacher', 'records_officer'}:
         raise HTTPException(status_code=403, detail="Only the assigned teacher or records officer can validate multiple terms")
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
+    book = gradebook_for_user(db, user, select(Gradebook).where(Gradebook.id == gradebook_id), for_export=True)
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
     from .services.reports import validate_gradebook_report_xlsx
@@ -3846,14 +4008,13 @@ def gradebook_report_validation(
 
 
 @app.get("/api/gradebooks/{gradebook_id}/report/print")
+@rate_limit("report")
 def gradebook_report_print_new(
     gradebook_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("admin", "records_officer", "school_head")),
 ):
-    book = db.get(Gradebook, gradebook_id)
-    if book:
-        ensure_gradebook_access(db, user, book)
+    book = gradebook_for_user(db, user, select(Gradebook).where(Gradebook.id == gradebook_id))
     if not book:
         raise HTTPException(status_code=404, detail="Gradebook was not found")
     report = register_workbook_report(db, generate_gradebook_summary_workbook(db, book.id), "Grading Summary", {
@@ -3888,13 +4049,10 @@ def interventions(days: int = 90, threshold: int = 5, db: Session = Depends(get_
     if not 1 <= days <= 366 or not 1 <= threshold <= 100:
         raise HTTPException(
             status_code=422, detail="Intervention range is invalid")
-    students = db.scalars(select(Person).where(Person.active.is_(
-        True), Person.role == "Student").order_by(Person.full_name)).all()
+    query = select(Person).where(Person.active.is_(True), Person.role == "Student")
     if user.role == "teacher":
-        allowed = {(item.grade_level.name, item.name)
-                   for item in adviser_sections(db, user)}
-        students = [person for person in students if (
-            person.grade, person.section) in allowed]
+        query = query.where(advised_people(user.id, school_year_for_date(date.today())))
+    students = db.scalars(query.order_by(Person.full_name)).all()
     end = date.today()
     start = end - timedelta(days=days - 1)
     absence_dates: dict[int, list[date]] = {
@@ -3902,7 +4060,8 @@ def interventions(days: int = 90, threshold: int = 5, db: Session = Depends(get_
     cursor = start
     while cursor <= end:
         if cursor.weekday() < 5:
-            for row in list_rows(db, cursor):
+            scope = advised_people(user.id, school_year_for_date(cursor)) if user.role == "teacher" else None
+            for row in list_rows(db, cursor, person_scope=scope):
                 if row["person_id"] in absence_dates and row["status"] == "Absent":
                     absence_dates[row["person_id"]].append(cursor)
         cursor += timedelta(days=1)
@@ -3922,12 +4081,9 @@ def interventions(days: int = 90, threshold: int = 5, db: Session = Depends(get_
 @app.post("/api/interventions")
 def add_intervention(payload: InterventionPayload, db: Session = Depends(get_db),
                      user: User = Depends(require_roles("admin", "teacher"))) -> dict:
-    person = db.get(Person, payload.person_id)
-    if not person or person.role != "Student":
+    person = attendance_person(db, user, payload.person_id, date.today(), students_only=True)
+    if not person:
         raise HTTPException(status_code=404, detail="Student was not found")
-    if user.role == "teacher":
-        ensure_adviser_access(
-            db, user, person.grade or "", person.section or "")
     import uuid
     item = Intervention(id=str(uuid.uuid4()), person_id=person.id, intervention_type=payload.intervention_type.strip(),
                         note=payload.note.strip(), actor_user_id=user.id, actor_name=user.full_name)

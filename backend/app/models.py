@@ -31,6 +31,18 @@ class User(Base):
         DateTime, default=datetime.utcnow)
 
 
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Ephemeral sessions must not block restoring an older backup that predates this table.
+    user_id: Mapped[int] = mapped_column(index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    provider: Mapped[str] = mapped_column(String(30))
+    google_sub: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    password_stamp: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 class DepedPasswordReset(Base):
     __tablename__ = "deped_password_resets"
 

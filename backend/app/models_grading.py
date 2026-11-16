@@ -56,7 +56,7 @@ class Gradebook(Base):
     """A single gradebook for one teacher's subject-section-term combination.
 
     Status lifecycle: Draft → Submitted → Finalized → Locked.
-    Reopening (by admin/records_officer) returns to Draft with a reason.
+    The assigned teacher or a records officer can reopen it to Draft with a reason.
     """
     __tablename__ = "gradebooks"
     __table_args__ = (

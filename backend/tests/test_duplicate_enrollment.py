@@ -362,6 +362,20 @@ class DuplicateEnrollmentTest(unittest.TestCase):
         self.assertEqual(result["action"], "updated")
         self.assertEqual(len(self.samples(self.first)), 15)
 
+    def test_existing_enrollment_can_be_replaced_at_the_storage_quota(self):
+        frames = face_set()
+        self.enroll(self.first, frames)
+        previous = {Path(sample.encrypted_path) for sample in self.samples(self.first)}
+        padding = biometrics.BIOMETRIC_DIR / "retained.enc"
+        padding.write_bytes(bytes(1024 * 1024 - sum(path.stat().st_size for path in previous)))
+
+        with patch.object(biometrics, "settings", replace(biometrics.settings, biometric_storage_mib=1)):
+            result = self.enroll(self.first, frames, replacement=True)
+
+        self.assertEqual(result["action"], "updated")
+        self.assertTrue(all(not path.exists() for path in previous))
+        self.assertEqual(sum(path.stat().st_size for path in biometrics.BIOMETRIC_DIR.rglob("*.enc")), 1024 * 1024)
+
     def test_gate_model_still_recognizes_distinct_enrolled_identities(self):
         first_frames, second_frames = face_set(), face_set(horizontal=True)
         self.enroll(self.first, first_frames)

@@ -452,7 +452,7 @@ class AnnexGImportTests(unittest.TestCase):
         self.assertEqual(learner["general_average"], round((math["final_grade"] + mapeh["final_grade"]) / 2))
 
     def test_teacher_can_save_adviser_comment_but_cannot_edit_other_section(self):
-        from app.main import _annex_g_access, save_annex_g_comment
+        from app.main import save_annex_g_comment
         enrollment = self.add_enrollment()
         other_section = SchoolSection(grade_level_id=self.grade.id, name="Other")
         self.db.add(other_section)
@@ -467,7 +467,8 @@ class AnnexGImportTests(unittest.TestCase):
             term_order=1, comment="Shows consistent effort."), self.db, self.teacher)
         self.assertEqual(saved["comment"], "Shows consistent effort.")
         with self.assertRaises(HTTPException) as denied:
-            _annex_g_access(self.db, self.teacher, other_enrollment)
+            save_annex_g_comment(AnnexGCommentPayload(enrollment_id=other_enrollment.id,
+                term_order=1, comment="Shows consistent effort."), self.db, self.teacher)
         self.assertEqual(denied.exception.status_code, 403)
 
     def test_only_records_officer_can_release_and_incomplete_report_is_blocked(self):

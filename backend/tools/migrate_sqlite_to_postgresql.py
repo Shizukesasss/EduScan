@@ -19,7 +19,6 @@ Safety guarantees
 Usage
 ─────
   python backend/tools/migrate_sqlite_to_postgresql.py \
-      --pg-url "postgresql+psycopg2://eduscan_app:eduscan@127.0.0.1:5432/eduscan" \
       --confirm "MIGRATE TO POSTGRESQL"
 
   Optional:
@@ -29,6 +28,8 @@ Usage
 from __future__ import annotations
 
 import argparse
+import os
+from getpass import getpass
 import sys
 from pathlib import Path
 
@@ -68,8 +69,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--pg-url",
-        required=True,
-        help='PostgreSQL SQLAlchemy URL, e.g. postgresql+psycopg2://eduscan_app:eduscan@127.0.0.1:5432/eduscan',
+        help="PostgreSQL maintenance URL. Prefer the hidden prompt or EDUSCAN_MIGRATION_DATABASE_URL.",
     )
     p.add_argument(
         "--confirm",
@@ -107,7 +107,8 @@ def main() -> int:
     if args.confirm != CONFIRM_PHRASE:
         raise SystemExit(f"Confirmation text must be exactly: {CONFIRM_PHRASE}")
 
-    if not args.pg_url.startswith("postgresql"):
+    target_url = args.pg_url or os.environ.get("EDUSCAN_MIGRATION_DATABASE_URL") or getpass("PostgreSQL maintenance URL: ")
+    if not target_url.startswith("postgresql"):
         raise SystemExit("--pg-url must be a PostgreSQL SQLAlchemy URL (postgresql+psycopg2://...)")
 
     sqlite_path = Path(args.sqlite).resolve()
@@ -116,12 +117,12 @@ def main() -> int:
 
     sqlite_url = f"sqlite:///{sqlite_path}"
     print(f"\nSource  : {sqlite_path}")
-    print(f"Target  : {args.pg_url.split('@')[-1]}")
+    print("Target  : PostgreSQL maintenance connection")
     print()
 
     # ── engines ──────────────────────────────────────────────────────────────
     src_engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
-    pg_engine  = create_engine(args.pg_url, pool_pre_ping=True)
+    pg_engine  = create_engine(target_url, pool_pre_ping=True)
 
     # ── apply / verify schema on both ends ───────────────────────────────────
     print("Applying schema migrations to source (SQLite)…")
@@ -203,13 +204,8 @@ def main() -> int:
     print(f"  {total} total row(s) across {len(tables)} tables copied.")
     print("  SQLite source was NOT modified.")
     print()
-    print("Next step: update backend/.env with the new DATABASE_URL:")
-    pg_display = args.pg_url.replace(
-        args.pg_url.split("@")[0].split(":")[-1], "****"
-    ) if "@" in args.pg_url else args.pg_url
-    print(f"  DATABASE_URL={pg_display}")
-    print()
-    print("Then restart EduScan:  .\\scripts\\start.ps1")
+    print("Set the restricted runtime DATABASE_URL in backend/.env.")
+    print("Run backend/tools/postgres_access.py migrate before restarting EduScan.")
     return 0
 
 

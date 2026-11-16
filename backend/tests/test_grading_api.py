@@ -10,6 +10,8 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 from pypdf import PdfReader
+from sqlalchemy import event
+from sqlalchemy.orm import Session
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
@@ -21,8 +23,9 @@ os.environ["EDUSCAN_SECRET_KEY"] = "grading-test-secret-key-2026"
 os.environ["SMS_GATEWAY_ENABLED"] = "false"
 os.environ["ATTENDANCE_SCHEDULER_ENABLED"] = "false"
 
-from fastapi.testclient import TestClient  # noqa: E402
+from browser_test_client import BrowserTestClient, response_session_headers
 from app.main import app  # noqa: E402
+from app.models_grading import Gradebook
 from api_test_database import isolated_app_database  # noqa: E402
 
 
@@ -33,23 +36,26 @@ class GradingApiTest(unittest.TestCase):
         cls.database_context = isolated_app_database(database_path, Path(TEST_DIR.name))
         cls.database_context.__enter__()
         cls.addClassCleanup(cls.database_context.__exit__, None, None, None)
-        cls.client_context = TestClient(app)
+        cls.client_context = BrowserTestClient(app)
         cls.client = cls.client_context.__enter__()
         cls.addClassCleanup(cls.client_context.__exit__, None, None, None)
         # Login admin
         resp = cls.client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
         assert resp.status_code == 200, resp.text
-        cls.admin_headers = {"Authorization": f"Bearer {resp.json()['access_token']}"}
+        cls.admin_headers = response_session_headers(resp)
         # Change password to satisfy security requirement
-        cls.client.post("/api/auth/change-password", headers=cls.admin_headers, json={
+        changed = cls.client.post("/api/auth/change-password", headers=cls.admin_headers, json={
             "current_password": "admin123", "new_password": "Grading-Admin-Pass-2026!",
         })
+        assert changed.status_code == 200, changed.text
+        cls.admin_headers = response_session_headers(changed)
         teacher_login = cls.client.post('/api/auth/login', json={'username': 'teacher', 'password': 'teacher123'})
         assert teacher_login.status_code == 200, teacher_login.text
-        cls.teacher_headers = {'Authorization': f"Bearer {teacher_login.json()['access_token']}"}
+        cls.teacher_headers = response_session_headers(teacher_login)
         changed = cls.client.post('/api/auth/change-password', headers=cls.teacher_headers,
                                   json={'current_password': 'teacher123', 'new_password': 'Teacher-Grading-Pass-2026!'})
         assert changed.status_code == 200, changed.text
+        cls.teacher_headers = response_session_headers(changed)
         cls.teacher = next(row for row in cls.client.get('/api/admin/users', headers=cls.admin_headers).json() if row['username'] == 'teacher')
         structure = cls.client.get('/api/admin/academic-structure', headers=cls.admin_headers).json()
         first_section = structure['sections'][0]
@@ -74,11 +80,11 @@ class GradingApiTest(unittest.TestCase):
             assert created.status_code == 200, created.text
             login = cls.client.post('/api/auth/login', json={'username': username, 'password': 'Initial-Grading-Pass-2026!'})
             assert login.status_code == 200, login.text
-            headers = {'Authorization': f"Bearer {login.json()['access_token']}"}
+            headers = response_session_headers(login)
             changed = cls.client.post('/api/auth/change-password', headers=headers,
                                       json={'current_password': 'Initial-Grading-Pass-2026!', 'new_password': 'Updated-Grading-Pass-2026!'})
             assert changed.status_code == 200, changed.text
-            setattr(cls, target, headers)
+            setattr(cls, target, response_session_headers(changed))
 
     def assert_exports_match_gradebook(self, gb_id):
         snapshot = self.client.get(f'/api/gradebooks/{gb_id}', headers=self.teacher_headers).json()
@@ -92,7 +98,22 @@ class GradingApiTest(unittest.TestCase):
             self.assertTrue(workbook.sheetnames)
         finally:
             workbook.close()
-        self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.xlsx', headers=self.other_teacher_headers).status_code, 403)
+        loaded = []
+        def observe(_session, item):
+            if isinstance(item, Gradebook):
+                loaded.append(item.id)
+
+        event.listen(Session, 'loaded_as_persistent', observe)
+        try:
+            history = self.client.get('/api/gradebooks', headers=self.other_teacher_headers)
+            self.assertEqual(history.status_code, 200, history.text)
+            self.assertNotIn(gb_id, [item['id'] for item in history.json()])
+            for suffix in ('', '/report.xlsx'):
+                response = self.client.get(f'/api/gradebooks/{gb_id}{suffix}', headers=self.other_teacher_headers)
+                self.assertEqual(response.status_code, 403, response.text)
+        finally:
+            event.remove(Session, 'loaded_as_persistent', observe)
+        self.assertNotIn(gb_id, loaded)
         for headers in (self.other_teacher_headers, self.admin_headers):
             self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}/report.pdf?all_terms=true', headers=headers).status_code, 403)
         self.assertEqual(self.client.get(f'/api/gradebooks/{gb_id}', headers=self.admin_headers).json(), snapshot)
@@ -398,14 +419,15 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(lock_resp.status_code, 200)
         self.assertEqual(lock_resp.json()["status"], "Locked")
 
-        # 12. Reopen with reason
-        denied_reopen = self.client.post(f"/api/gradebooks/{gb_id}/reopen", headers=self.admin_headers, json={
-            "reason": "Correcting student score following parent conference",
-        })
-        self.assertEqual(denied_reopen.status_code, 403, denied_reopen.text)
-        reopen_resp = self.client.post(f"/api/gradebooks/{gb_id}/reopen", headers=self.records_headers, json={
-            "reason": "Correcting student score following parent conference",
-        })
+        # 12. The assigned teacher can reopen the gradebook directly.
+        reopen_url = f"/api/gradebooks/{gb_id}/reopen"
+        reopen_reason = "Correcting student score following parent conference"
+        for headers in (self.admin_headers, self.other_teacher_headers):
+            denied_reopen = self.client.post(reopen_url, headers=headers, json={"reason": reopen_reason})
+            self.assertEqual(denied_reopen.status_code, 403, denied_reopen.text)
+        missing_reason = self.client.post(reopen_url, headers=self.teacher_headers, json={"reason": "        "})
+        self.assertEqual(missing_reason.status_code, 409, missing_reason.text)
+        reopen_resp = self.client.post(reopen_url, headers=self.teacher_headers, json={"reason": reopen_reason})
         self.assertEqual(reopen_resp.status_code, 200)
         self.assertEqual(reopen_resp.json()["status"], "Draft")
         reopened = self.client.get(f"/api/gradebooks/{gb_id}", headers=self.teacher_headers).json()
@@ -414,7 +436,7 @@ class GradingApiTest(unittest.TestCase):
         self.assertEqual(reopened_student['scores'][str(q1_id)], 20.0)
         edit_after_reopen = self.client.put(f"/api/gradebooks/{gb_id}/scores", headers=self.teacher_headers, json={
             "scores": {str(s1_id): [{"assessment_item_id": q1_id, "score": 19.0, "status": "Scored"}]},
-            "change_reason": "Corrected after administrator reopened the record",
+            "change_reason": "Corrected after reopening the record",
         })
         self.assertEqual(edit_after_reopen.status_code, 200, edit_after_reopen.text)
 
@@ -428,7 +450,10 @@ class GradingApiTest(unittest.TestCase):
         self.assertNotIn("Submit", actions)
         self.assertIn("Finalize", actions)
         self.assertIn("Lock", actions)
-        self.assertIn("Reopen", actions)
+        reopen_entry = next(entry for entry in audit_list if entry["action"] == "Reopen")
+        self.assertEqual(reopen_entry["actor_role"], "teacher")
+        self.assertEqual(reopen_entry["actor_name"], self.teacher["full_name"])
+        self.assertEqual(reopen_entry["reason"], reopen_reason)
 
     def test_04_grade_change_request_routes_are_retired(self):
         for method, path, headers in (

@@ -16,11 +16,14 @@ import cv2
 import numpy as np
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException
+from PIL import Image, ImageOps
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..config import BIOMETRIC_DIR, MODEL_DIR, settings
 from ..models import BiometricAuditEvent, BiometricModel, BiometricSample, Person, RecognitionReview, User
+from ..request_limits import MIB
+from ..storage_quota import require_capacity, storage_lock
 from .settings_store import get_json
 from .face_identity import embedding, feature_from_detection, MIN_SIMILARITY
 
@@ -29,6 +32,9 @@ FACE_SIZE = (200, 200)
 MIN_BLUR_VARIANCE = 45.0
 MIN_BRIGHTNESS = 35.0
 MAX_BRIGHTNESS = 220.0
+MAX_CAMERA_WIDTH = 3840
+MAX_CAMERA_HEIGHT = 2160
+MAX_CAMERA_DECODED_BYTES = 32 * MIB
 # Enrollment frames are a controlled single-person capture. Require stronger
 # agreement than the cross-person gate cutoff before saving any face samples.
 MIN_ENROLLMENT_SIMILARITY = 0.65
@@ -71,13 +77,30 @@ class BiometricService:
         self._identity_lock = threading.RLock()
 
     def _decode(self, data: bytes) -> np.ndarray:
-        array = np.frombuffer(data, dtype=np.uint8)
-        image = cv2.imdecode(array, cv2.IMREAD_COLOR)
-        if image is None:
-            raise HTTPException(status_code=422, detail="The uploaded frame is not a valid image")
-        if image.shape[0] > 2160 or image.shape[1] > 3840:
-            raise HTTPException(status_code=422, detail="Frame resolution is too large")
-        return image
+        resolution_error = "Frame resolution exceeds the 3840 × 2160 limit"
+        try:
+            # Use the same reader for dimensions and pixels. Image.open reads JPEG and PNG headers lazily.
+            with Image.open(io.BytesIO(data), formats=("JPEG", "PNG")) as frame:
+                width, height = frame.size
+                if max(width, height) > MAX_CAMERA_WIDTH or min(width, height) > MAX_CAMERA_HEIGHT:
+                    raise HTTPException(413, resolution_error)
+                # Pillow can use four bytes per pixel even for an RGB image.
+                if width * height * 4 > MAX_CAMERA_DECODED_BYTES:
+                    raise HTTPException(413, "Frame exceeds the 32 MiB decoded image limit")
+                # PNG's override can load pixels while looking for EXIF after the pixel data.
+                if Image.Image.getexif(frame).get(274) in (5, 6, 7, 8):
+                    width, height = height, width
+                if width > MAX_CAMERA_WIDTH or height > MAX_CAMERA_HEIGHT:
+                    raise HTTPException(413, resolution_error)
+                ImageOps.exif_transpose(frame, in_place=True)
+                if frame.width > MAX_CAMERA_WIDTH or frame.height > MAX_CAMERA_HEIGHT:
+                    raise HTTPException(413, resolution_error)
+                with frame.convert("RGB") as rgb:
+                    return cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
+        except Image.DecompressionBombError as error:
+            raise HTTPException(413, resolution_error) from error
+        except (OSError, ValueError, SyntaxError) as error:
+            raise HTTPException(422, "Upload a valid JPEG or PNG camera frame") from error
 
     def _processed_face(self, gray: np.ndarray, box: tuple[int, int, int, int], strict: bool) -> ProcessedFace:
         x, y, width, height = box
@@ -290,7 +313,8 @@ class BiometricService:
             if db.get_bind().dialect.name == "postgresql":
                 if not db.scalar(select(func.pg_try_advisory_xact_lock(1950508110))):
                     raise HTTPException(status_code=409, detail="Another facial enrollment is in progress; try again when it finishes")
-            return self._enroll(db, person, frames, actor, reason, require_existing)
+            with storage_lock(BIOMETRIC_DIR):
+                return self._enroll(db, person, frames, actor, reason, require_existing)
 
     def _identity_feature(self, image):
         return embedding(image, self)
@@ -441,7 +465,7 @@ class BiometricService:
                 hashes.add(digest)
                 accepted.append(processed)
             except HTTPException as exc:
-                if exc.status_code >= 500:
+                if exc.status_code == 413 or exc.status_code >= 500:
                     raise
                 detail = exc.detail.get("message", str(exc.detail)) if isinstance(exc.detail, dict) else exc.detail
                 rejected.append(f"Frame {index + 1}: {detail}")
@@ -510,9 +534,12 @@ class BiometricService:
         duplicate_check = self._check_duplicate_enrollment(db, person, accepted)
         before = self.enrollment_snapshot(db, person)
         action = "updated" if existing else "created"
+        old_paths = [self._sample_path(sample) for sample in existing]
+        encrypted_frames = [self.fernet.encrypt(processed.encoded) for processed in accepted]
+        require_capacity(BIOMETRIC_DIR, "Biometric", settings.biometric_storage_mib,
+                         sum(map(len, encrypted_frames)), replacing=old_paths)
         person_dir = BIOMETRIC_DIR / f"person_{person.id}"
         person_dir.mkdir(parents=True, exist_ok=True)
-        old_paths = [Path(sample.encrypted_path) for sample in existing]
         new_paths: list[Path] = []
         obsolete_model_paths: list[Path] = []
         model = None
@@ -520,12 +547,11 @@ class BiometricService:
             for old in existing:
                 db.delete(old)
             db.flush()
-            for processed in accepted:
+            for processed, encrypted in zip(accepted, encrypted_frames):
                 sample_id = str(uuid.uuid4())
-                encrypted = self.fernet.encrypt(processed.encoded)
                 target = person_dir / f"{sample_id}.enc"
-                target.write_bytes(encrypted)
                 new_paths.append(target)
+                target.write_bytes(encrypted)
                 db.add(BiometricSample(
                     id=sample_id,
                     person_id=person.id,
