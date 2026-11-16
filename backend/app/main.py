@@ -162,12 +162,16 @@ async def request_validation_error(request: Request, error: RequestValidationErr
 
 @app.on_event("startup")
 def startup() -> None:
-    initialize_database(engine)
-    with SessionLocal() as db:
-        if settings.seed_demo_accounts:
-            seed_users(db)
-        seed_reference_data(db)
-        configure_fast_gate(db)
+    try:
+        initialize_database(engine)
+        with SessionLocal() as db:
+            if settings.seed_demo_accounts:
+                seed_users(db)
+            seed_reference_data(db)
+            configure_fast_gate(db)
+    except Exception as exc:
+        import logging
+        logging.getLogger("uvicorn.error").error("EduScan startup initialization error: %s", exc)
     if settings.attendance_scheduler_enabled:
         attendance_scheduler.start()
 

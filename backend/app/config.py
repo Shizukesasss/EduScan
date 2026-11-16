@@ -12,7 +12,9 @@ from cryptography.fernet import Fernet
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = Path(os.getenv("EDUSCAN_DATA_DIR", str(BASE_DIR / "data"))).resolve()
+_is_serverless = bool(os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+_default_data_dir = "/tmp/eduscan_data" if _is_serverless else str(BASE_DIR / "data")
+DATA_DIR = Path(os.getenv("EDUSCAN_DATA_DIR", _default_data_dir)).resolve()
 BIOMETRIC_DIR = DATA_DIR / "biometrics"
 MODEL_DIR = DATA_DIR / "models"
 TEMPLATE_DIR = DATA_DIR / "templates"
@@ -75,11 +77,17 @@ def _encryption_key() -> bytes:
     if supplied:
         return supplied.encode()
     key_path = DATA_DIR / ".encryption_key"
-    if key_path.exists():
-        return key_path.read_bytes().strip()
+    try:
+        if key_path.exists():
+            return key_path.read_bytes().strip()
+    except OSError:
+        pass
     key = Fernet.generate_key()
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    key_path.write_bytes(key)
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        key_path.write_bytes(key)
+    except OSError:
+        pass
     return key
 
 
@@ -88,21 +96,36 @@ def _application_secret() -> str:
     if supplied and supplied != "eduscan-development-secret-change-before-production":
         return supplied
     secret_path = DATA_DIR / ".app_secret"
-    if secret_path.exists():
-        existing = secret_path.read_text(encoding="utf-8").strip()
-        if len(existing) >= 48:
-            return existing
+    try:
+        if secret_path.exists():
+            existing = secret_path.read_text(encoding="utf-8").strip()
+            if len(existing) >= 48:
+                return existing
+    except OSError:
+        pass
     generated = secrets.token_urlsafe(64)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    secret_path.write_text(generated, encoding="utf-8")
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        secret_path.write_text(generated, encoding="utf-8")
+    except OSError:
+        pass
     return generated
 
 
 _load_dotenv()
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-_apply_pending_restore()
-for directory in (DATA_DIR, BIOMETRIC_DIR, MODEL_DIR, TEMPLATE_DIR, EXPORT_DIR):
-    directory.mkdir(parents=True, exist_ok=True)
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _apply_pending_restore()
+    for directory in (DATA_DIR, BIOMETRIC_DIR, MODEL_DIR, TEMPLATE_DIR, EXPORT_DIR):
+        directory.mkdir(parents=True, exist_ok=True)
+except OSError:
+    DATA_DIR = Path("/tmp/eduscan_data").resolve()
+    BIOMETRIC_DIR = DATA_DIR / "biometrics"
+    MODEL_DIR = DATA_DIR / "models"
+    TEMPLATE_DIR = DATA_DIR / "templates"
+    EXPORT_DIR = DATA_DIR / "exports"
+    for directory in (DATA_DIR, BIOMETRIC_DIR, MODEL_DIR, TEMPLATE_DIR, EXPORT_DIR):
+        directory.mkdir(parents=True, exist_ok=True)
 
 
 def _positive_int(name: str, default: int) -> int:
@@ -124,7 +147,7 @@ class Settings:
     smtp_username: str = os.getenv("SMTP_USERNAME", "")
     smtp_password: str = os.getenv("SMTP_PASSWORD", "")
     smtp_from: str = os.getenv("SMTP_FROM", "").strip()
-    database_url: str = os.getenv("DATABASE_URL", "sqlite:///./data/eduscan.db")
+    database_url: str = os.getenv("DATABASE_URL", "sqlite:////tmp/eduscan_data/eduscan.db" if _is_serverless else "sqlite:///./data/eduscan.db")
     seed_demo_accounts: bool = os.getenv(
         "EDUSCAN_SEED_DEMO_ACCOUNTS", "true" if database_url.startswith("sqlite") else "false"
     ).lower() == "true"
@@ -142,7 +165,7 @@ class Settings:
     sms_gateway_url: str = os.getenv("SMS_GATEWAY_URL", "http://192.168.1.100:8080")
     sms_gateway_username: str = os.getenv("SMS_GATEWAY_USERNAME", "")
     sms_gateway_password: str = os.getenv("SMS_GATEWAY_PASSWORD", "")
-    attendance_scheduler_enabled: bool = os.getenv("ATTENDANCE_SCHEDULER_ENABLED", "true").lower() == "true"
+    attendance_scheduler_enabled: bool = os.getenv("ATTENDANCE_SCHEDULER_ENABLED", "false" if _is_serverless else "true").lower() == "true"
     biometric_storage_mib: int = _positive_int("EDUSCAN_BIOMETRIC_STORAGE_MIB", 1024)
     report_storage_mib: int = _positive_int("EDUSCAN_REPORT_STORAGE_MIB", 2048)
     backup_storage_mib: int = _positive_int("EDUSCAN_BACKUP_STORAGE_MIB", 4096)
