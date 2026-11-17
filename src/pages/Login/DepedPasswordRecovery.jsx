@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { api } from '../../api/client';
 
-export default function DepedPasswordRecovery({ enabled, onReset }) {
-  const [email, setEmail] = useState('');
+export default function DepedPasswordRecovery({ enabled, adminEnabled, onReset }) {
+  const [useAdmin, setUseAdmin] = useState(false);
+  const [identifier, setIdentifier] = useState('');
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
   const [confirmation, setConfirmation] = useState('');
@@ -11,13 +12,17 @@ export default function DepedPasswordRecovery({ enabled, onReset }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const available = enabled || adminEnabled;
+  const admin = adminEnabled && (!enabled || useAdmin);
+  const account = admin ? { username: identifier.trim() } : { email: identifier.trim() };
+  const identifierLabel = admin ? 'Administrator username' : 'DepEd email';
 
   async function sendCode() {
     setBusy(true);
     setError('');
     setMessage('');
     try {
-      const result = await api.post('/auth/password-reset/request', { email });
+      const result = await api.post('/auth/password-reset/request', account);
       setCodeRequested(true);
       setCode('');
       setMessage(result.message);
@@ -39,13 +44,13 @@ export default function DepedPasswordRecovery({ enabled, onReset }) {
     setBusy(true);
     setError('');
     try {
-      const result = await api.post('/auth/password-reset/confirm', { email, code, new_password: password });
+      const result = await api.post('/auth/password-reset/confirm', { ...account, code, new_password: password });
       setPassword('');
       setConfirmation('');
       setCode('');
       setComplete(true);
       setMessage(result.message);
-      onReset(email.trim());
+      onReset(identifier.trim());
     } catch (err) {
       setError(err.message);
     } finally {
@@ -56,17 +61,31 @@ export default function DepedPasswordRecovery({ enabled, onReset }) {
   return (
     <details className="login-legacy login-recovery">
       <summary>Forgot password?</summary>
-      <p className="section-copy">{enabled
-        ? 'Enter the DepEd email you’ve already used to sign in with Google. We’ll email you a code to reset your EduScan password.'
-        : 'Contact your school administrator for help resetting your EduScan password.'}</p>
-      {enabled && error && <p className="login-error" role="alert">{error}</p>}
-      {enabled && message && <p className="section-copy" role="status">{message}</p>}
-      {enabled && !complete && (
+      <p className="section-copy">{admin
+        ? 'Enter your administrator username. We’ll send a reset code to the recovery email set up for the account.'
+        : enabled ? 'Enter the DepEd email you’ve already used to sign in with Google. We’ll email you a code to reset your EduScan password.'
+          : 'Contact your school administrator for help resetting your EduScan password.'}</p>
+      {available && error && <p className="login-error" role="alert">{error}</p>}
+      {available && message && <p className="section-copy" role="status">{message}</p>}
+      {available && !complete && (
         <form className="login-form" onSubmit={submit} aria-busy={busy}>
+          {enabled && adminEnabled && <label>
+            Account type
+            <select className="input-field" value={admin ? 'admin' : 'deped'} disabled={busy || codeRequested}
+              onChange={(event) => {
+                setUseAdmin(event.target.value === 'admin');
+                setIdentifier('');
+                setError('');
+              }}>
+              <option value="deped">DepEd account</option>
+              <option value="admin">Administrator with username</option>
+            </select>
+          </label>}
           <label>
-            DepEd email
-            <input className="input-field" type="email" autoComplete="email" maxLength={254}
-              value={email} onChange={(event) => setEmail(event.target.value)} readOnly={codeRequested} required />
+            {identifierLabel}
+            <input className="input-field" type={admin ? 'text' : 'email'} autoComplete={admin ? 'username' : 'email'}
+              maxLength={admin ? 80 : 254} value={identifier} onChange={(event) => setIdentifier(event.target.value)}
+              readOnly={codeRequested || busy} required />
           </label>
           {codeRequested && <>
             <label>
@@ -97,7 +116,7 @@ export default function DepedPasswordRecovery({ enabled, onReset }) {
               setError('');
               setPassword('');
               setConfirmation('');
-            }}>Use a different email</button>
+            }}>Use a different {admin ? 'username' : 'email'}</button>
           </div>}
         </form>
       )}

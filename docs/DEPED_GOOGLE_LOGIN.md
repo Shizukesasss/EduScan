@@ -64,6 +64,12 @@ Port 587 uses STARTTLS. For a relay that uses implicit TLS, set `SMTP_USE_SSL=tr
 
 An active user signs in with DepEd Google at least once, then selects **Forgot password?** on the login page. EduScan sends an eight-digit, single-use code to the verified mailbox. After entering the code and choosing a password, the user can sign in to EduScan with their DepEd email and the new password. In DepEd-only mode, this setting enables the EduScan password option for verified DepEd accounts.
 
+### Administrator accounts that sign in with a username
+
+When `EDUSCAN_DEPED_ONLY=false`, set `EDUSCAN_ADMIN_RECOVERY_USERNAME` to the username of an existing active administrator who signs in with a username. Set `EDUSCAN_ADMIN_RECOVERY_EMAIL` to a mailbox controlled by that administrator. Configure the same SMTP settings shown above. On Vercel, set these as server environment variables and redeploy. Use the same `EDUSCAN_SECRET_KEY` across backend instances so a code issued by one instance works on another.
+
+On the login page, open **Forgot password?** and enter the administrator username. If both recovery methods are enabled, select **Administrator with username** first. EduScan sends the code only to the configured mailbox. Resetting the password signs the account out of its existing sessions. Administrators who already sign in through DepEd can use the verified DepEd email flow.
+
 ## Account security and verification
 
 Google manages the DepEd Google account password. The optional SMTP flow manages a separate EduScan password. Administrators can deactivate accounts and change their EduScan roles.

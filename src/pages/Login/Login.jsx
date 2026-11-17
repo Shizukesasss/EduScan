@@ -165,8 +165,9 @@ export default function Login() {
               </form>
             </details>}
 
-            {config && <DepedPasswordRecovery enabled={config.deped_password_recovery} onReset={(email) => {
-              setUsername(email);
+            {config && <DepedPasswordRecovery enabled={config.deped_password_recovery}
+              adminEnabled={config.admin_password_recovery} onReset={(identifier) => {
+              setUsername(identifier);
               setPassword('');
               setError('');
             }} />}

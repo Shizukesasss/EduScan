@@ -180,7 +180,7 @@ def test_missing_configuration_fails_closed_and_exposes_setup_state(school, monk
     response = school.client.get("/api/auth/config")
     assert response.status_code == 200
     assert response.json() == {"google_client_id": "", "deped_only": True, "allowed_domain": "deped.gov.ph",
-                               "deped_password_recovery": False}
+                               "deped_password_recovery": False, "admin_password_recovery": False}
     assert google_sign_in(school).status_code == 503
 
 

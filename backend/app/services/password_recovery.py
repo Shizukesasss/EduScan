@@ -1,4 +1,4 @@
-"""Recover an EduScan password through a previously verified DepEd mailbox."""
+"""Recover EduScan passwords through a verified or operator-configured mailbox."""
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 import hashlib
@@ -9,7 +9,7 @@ import smtplib
 import ssl
 
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -17,7 +17,7 @@ from ..auth import DEPED_PASSWORD_PREFIX, hash_password, revoke_user_sessions
 from ..config import settings
 from ..models import DepedPasswordReset, User
 from .audit import add_audit
-from .google_login import deped_email
+from .google_login import DOMAIN, deped_email
 
 
 logger = logging.getLogger(__name__)
@@ -26,8 +26,17 @@ REQUEST_COOLDOWN = timedelta(minutes=1)
 MAX_ATTEMPTS = 5
 
 
-def require_recovery_configuration():
-    if not (settings.deped_password_recovery and settings.smtp_host and settings.smtp_from):
+def admin_recovery_enabled() -> bool:
+    username = settings.admin_recovery_username
+    return bool(not settings.deped_only and username and settings.admin_recovery_email
+                and settings.smtp_host and settings.smtp_from
+                and not (settings.deped_password_recovery and username.endswith(f"@{DOMAIN}")))
+
+
+def require_recovery_configuration(*, admin: bool = False):
+    enabled = admin_recovery_enabled() if admin else (
+        settings.deped_password_recovery and settings.smtp_host and settings.smtp_from)
+    if not enabled:
         raise HTTPException(503, "Password recovery is unavailable. Contact your school administrator.")
 
 
@@ -61,19 +70,32 @@ def _verified_user(db: Session, address: str) -> User | None:
     return db.scalar(select(User).where(User.google_email == email, User.google_sub != "", User.active.is_(True)))
 
 
-def _digest(user: User, code: str) -> str:
-    message = f"deped-password-reset:{user.id}:{user.google_sub}:{user.google_email}:{user.password_hash}:{code}"
+def _admin_user(db: Session, username: str) -> User | None:
+    username = username.strip().lower()
+    if not admin_recovery_enabled() or username != settings.admin_recovery_username:
+        return None
+    return db.scalar(select(User).where(func.lower(User.username) == username,
+                                        User.role == "admin", User.active.is_(True),
+                                        User.google_email.is_(None), User.google_sub.is_(None)))
+
+
+def _digest(user: User, code: str, *, admin: bool) -> str:
+    if admin:
+        message = f"admin-password-reset:{user.id}:{user.username}:{settings.admin_recovery_email}:{user.password_hash}:{code}"
+    else:
+        message = f"deped-password-reset:{user.id}:{user.google_sub}:{user.google_email}:{user.password_hash}:{code}"
     return hmac.new(settings.secret_key.encode(), message.encode(), hashlib.sha256).hexdigest()
 
 
-def issue_code(db: Session, address: str) -> tuple[str, str] | None:
-    user = _verified_user(db, address)
+def issue_code(db: Session, identifier: str, *, admin: bool = False) -> tuple[str, str] | None:
+    user = _admin_user(db, identifier) if admin else _verified_user(db, identifier)
     if not user:
         return None
-    user_id, email = user.id, user.google_email
+    user_id = user.id
+    email = settings.admin_recovery_email if admin else user.google_email
     now = datetime.utcnow()
     code = f"{secrets.randbelow(100_000_000):08d}"
-    values = {"requested_at": now, "code_digest": _digest(user, code), "attempts": 0}
+    values = {"requested_at": now, "code_digest": _digest(user, code, admin=admin), "attempts": 0}
     if db.get(DepedPasswordReset, user_id) is None:
         db.add(DepedPasswordReset(user_id=user_id, **values))
         try:
@@ -92,14 +114,14 @@ def issue_code(db: Session, address: str) -> tuple[str, str] | None:
     return email, code
 
 
-def reset_password(db: Session, address: str, code: str, new_password: str) -> str:
+def reset_password(db: Session, identifier: str, code: str, new_password: str, *, admin: bool = False) -> str:
     invalid = HTTPException(400, "The code is invalid or expired. Request a new code and try again.")
-    user = _verified_user(db, address)
+    user = _admin_user(db, identifier) if admin else _verified_user(db, identifier)
     challenge = db.get(DepedPasswordReset, user.id) if user else None
     if not challenge or not challenge.code_digest:
         raise invalid
 
-    valid = hmac.compare_digest(challenge.code_digest, _digest(user, code))
+    valid = hmac.compare_digest(challenge.code_digest, _digest(user, code, admin=admin))
     now = datetime.utcnow()
     claimed = db.execute(update(DepedPasswordReset).where(
         DepedPasswordReset.user_id == user.id,
@@ -115,17 +137,22 @@ def reset_password(db: Session, address: str, code: str, new_password: str) -> s
         db.commit()
         raise invalid
 
-    changed = db.execute(update(User).where(
+    account = update(User).where(
         User.id == user.id, User.active.is_(True),
         User.google_sub == user.google_sub, User.google_email == user.google_email,
         User.password_hash == user.password_hash,
-    ).values(password_hash=DEPED_PASSWORD_PREFIX + hash_password(new_password),
+    )
+    if admin:
+        account = account.where(User.role == "admin", User.username == user.username)
+    prefix = "" if admin else DEPED_PASSWORD_PREFIX
+    changed = db.execute(account.values(password_hash=prefix + hash_password(new_password),
              password_changed_at=now, must_change_password=False, failed_login_count=0,
              locked_until=None).execution_options(synchronize_session=False))
     if changed.rowcount != 1:
         db.rollback()
         raise invalid
     revoke_user_sessions(db, user.id)
-    add_audit(db, user, "PasswordReset", "User", user.id, "EduScan password reset through a verified DepEd mailbox")
+    mailbox = "the configured administrator mailbox" if admin else "a verified DepEd mailbox"
+    add_audit(db, user, "PasswordReset", "User", user.id, f"EduScan password reset through {mailbox}")
     db.commit()
-    return user.google_email
+    return settings.admin_recovery_email if admin else user.google_email

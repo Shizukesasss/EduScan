@@ -141,6 +141,8 @@ class Settings:
     # Enable after explicitly linking existing privileged accounts; see the rollout guide.
     deped_only: bool = os.getenv("EDUSCAN_DEPED_ONLY", "false").lower() == "true"
     deped_password_recovery: bool = os.getenv("EDUSCAN_DEPED_PASSWORD_RECOVERY", "false").lower() == "true"
+    admin_recovery_username: str = os.getenv("EDUSCAN_ADMIN_RECOVERY_USERNAME", "").strip().lower()
+    admin_recovery_email: str = os.getenv("EDUSCAN_ADMIN_RECOVERY_EMAIL", "").strip()
     smtp_host: str = os.getenv("SMTP_HOST", "").strip()
     smtp_port: int = int(os.getenv("SMTP_PORT") or "587")
     smtp_use_ssl: bool = os.getenv("SMTP_USE_SSL", "false").lower() == "true"

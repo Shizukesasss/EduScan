@@ -30,7 +30,7 @@ from .auth import (DEPED_PASSWORD_PREFIX, DEPED_PASSWORD_PROVIDER, SESSION_COOKI
                    require_roles, revoke_session, revoke_user_sessions, secure_session_transport, seed_users,
                    set_session_cookie, verify_password)
 from .services.google_login import DOMAIN, google_user, verify_google_credential
-from .schemas import DepedRecoveryConfirm, DepedRecoveryRequest, GoogleLoginRequest
+from .schemas import GoogleLoginRequest, PasswordRecoveryConfirm, PasswordRecoveryRequest
 from .services import password_recovery
 from .config import settings
 from .database import SessionLocal, engine, get_db
@@ -415,7 +415,8 @@ def health(db: Session = Depends(get_db)) -> dict:
 @app.get("/api/auth/config")
 def auth_config() -> dict:
     return {"google_client_id": settings.google_client_id, "deped_only": settings.deped_only, "allowed_domain": DOMAIN,
-            "deped_password_recovery": settings.deped_password_recovery}
+            "deped_password_recovery": settings.deped_password_recovery,
+            "admin_password_recovery": password_recovery.admin_recovery_enabled()}
 
 
 def sign_in_response(db: Session, user: User, provider: str, request: Request, response: Response,
@@ -492,27 +493,31 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
 @app.post("/api/auth/password-reset/request", status_code=202,
           dependencies=[Depends(require_app_request), Depends(secure_session_transport)])
 @rate_limit("password recovery request")
-def request_password_reset(payload: DepedRecoveryRequest, background: BackgroundTasks,
+def request_password_reset(payload: PasswordRecoveryRequest, background: BackgroundTasks,
                            db: Session = Depends(get_db)) -> dict:
+    result = {"message": "If this account is eligible, a reset code will be sent to its recovery email."}
     if payload.website:
-        return {"message": "If this DepEd account is eligible, a reset code will be sent to its inbox."}
-    password_recovery.require_recovery_configuration()
-    challenge = password_recovery.issue_code(db, payload.email)
+        return result
+    admin = payload.username is not None
+    password_recovery.require_recovery_configuration(admin=admin)
+    challenge = password_recovery.issue_code(db, payload.username or payload.email, admin=admin)
     if challenge:
         email, code = challenge
         background.add_task(password_recovery.send_email, email, "EduScan password reset code",
                             f"Your EduScan reset code is {code}. It expires in 10 minutes. "
                             "If you did not request this code, you can ignore this email.")
-    return {"message": "If this DepEd account is eligible, a reset code will be sent to its inbox."}
+    return result
 
 
 @app.post("/api/auth/password-reset/confirm",
           dependencies=[Depends(require_app_request), Depends(secure_session_transport)])
 @rate_limit("password recovery confirmation")
-def confirm_password_reset(payload: DepedRecoveryConfirm, background: BackgroundTasks,
+def confirm_password_reset(payload: PasswordRecoveryConfirm, background: BackgroundTasks,
                            db: Session = Depends(get_db)) -> dict:
-    password_recovery.require_recovery_configuration()
-    email = password_recovery.reset_password(db, payload.email, payload.code, payload.new_password)
+    admin = payload.username is not None
+    password_recovery.require_recovery_configuration(admin=admin)
+    email = password_recovery.reset_password(db, payload.username or payload.email, payload.code, payload.new_password,
+                                             admin=admin)
     background.add_task(password_recovery.send_email, email, "EduScan password changed",
                         "Your EduScan password was reset. If you did not make this change, contact your school administrator.")
     return {"message": "Your EduScan password was updated. You can now sign in."}

@@ -3,19 +3,27 @@ import re
 from dataclasses import replace
 from datetime import datetime, timedelta
 
+import pytest
 from sqlalchemy import text
 
 from test_google_login import claims, school
 from browser_test_client import response_session_headers
 from app import auth, main
+from app.rate_limits import RequestRateLimiter
 from app.services import google_login
 
 
-def enable(monkeypatch):
+@pytest.fixture(autouse=True)
+def isolated_request_limits(monkeypatch):
+    limiter = main.app.state.request_limiter
+    monkeypatch.setattr(limiter, 'buckets', RequestRateLimiter(limiter.policies).buckets)
+
+
+def enable(monkeypatch, **overrides):
     from app.services import password_recovery
 
-    config = replace(main.settings, deped_password_recovery=True, smtp_host='smtp.example.test',
-                     smtp_from='school@example.test')
+    values = dict(deped_password_recovery=True, smtp_host='smtp.example.test', smtp_from='school@example.test')
+    config = replace(main.settings, **(values | overrides))
     for module in (auth, main, password_recovery):
         monkeypatch.setattr(module, 'settings', config)
     messages = []
@@ -38,6 +46,39 @@ def code_from(messages):
 
 def test_recovery_is_disabled_by_default(school):
     assert request_code(school, 'teacher@deped.gov.ph').status_code == 503
+
+
+def test_local_admin_can_reset_password_through_configured_mailbox(school, monkeypatch):
+    messages = enable(monkeypatch, deped_only=False, deped_password_recovery=False,
+                      admin_recovery_username='admin', admin_recovery_email='recovery@example.test')
+    assert school.client.get('/api/auth/config').json()['admin_password_recovery']
+    path = '/api/auth/password-reset'
+    missing = school.client.post(f'{path}/request', json={'username': 'teacher'})
+    requested = school.client.post(f'{path}/request', json={'username': ' ADMIN '})
+    assert requested.status_code == missing.status_code == 202
+    assert requested.json() == missing.json()
+    assert [message[0] for message in messages] == ['recovery@example.test']
+    payload = {'username': 'admin', 'code': code_from(messages), 'new_password': 'Admin-new-password-2026!'}
+    assert school.client.post(f'{path}/confirm', json=payload).status_code == 200
+    assert school.client.post(f'{path}/confirm', json=payload).status_code == 400
+    assert school.client.get('/api/auth/me', headers=school.admin_headers).status_code == 401
+    login = school.client.post('/api/auth/login', json={'username': 'admin', 'password': payload['new_password']})
+    assert login.status_code == 200
+    assert login.json()['role'] == 'admin'
+
+
+def test_local_admin_recovery_respects_account_role_and_deped_only_mode(school, monkeypatch):
+    messages = enable(monkeypatch, deped_only=True,
+                      admin_recovery_username='admin', admin_recovery_email='recovery@example.test')
+    path = '/api/auth/password-reset/request'
+    assert not school.client.get('/api/auth/config').json()['admin_password_recovery']
+    assert school.client.post(path, json={'username': 'admin'}).status_code == 503
+    assert not messages
+
+    messages = enable(monkeypatch, deped_only=False,
+                      admin_recovery_username='teacher', admin_recovery_email='recovery@example.test')
+    assert school.client.post(path, json={'username': 'teacher'}).status_code == 202
+    assert not messages
 
 
 def test_verified_mailbox_can_reset_eduscan_password_and_sign_in(school, monkeypatch):

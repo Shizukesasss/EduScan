@@ -28,12 +28,19 @@ class LoginRequest(BaseModel):
     website: str | None = None
 
 
-class DepedRecoveryRequest(BaseModel):
-    email: str = Field(min_length=1, max_length=254)
+class PasswordRecoveryRequest(BaseModel):
+    email: str | None = Field(default=None, min_length=1, max_length=254)
+    username: str | None = Field(default=None, min_length=1, max_length=80)
     website: str | None = None
 
+    @model_validator(mode="after")
+    def require_one_identifier(self):
+        if (self.email is None) == (self.username is None):
+            raise ValueError("Enter a DepEd email or an administrator username")
+        return self
 
-class DepedRecoveryConfirm(DepedRecoveryRequest):
+
+class PasswordRecoveryConfirm(PasswordRecoveryRequest):
     code: str = Field(pattern=r"^[0-9]{8}$")
     new_password: str = Field(min_length=12, max_length=200)
 
