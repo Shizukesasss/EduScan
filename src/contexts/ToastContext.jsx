@@ -11,11 +11,10 @@ export function ToastProvider({ children }) {
     setToasts((prev) => prev.some(toast => toast.type === type && toast.message === message)
       ? prev : [...prev, { id, message, type }]);
 
-    // Errors stay available until dismissed; success messages allow time to read.
-    if (type === 'success') timers.current.set(id, setTimeout(() => {
+    timers.current.set(id, setTimeout(() => {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
       timers.current.delete(id);
-    }, 6000));
+    }, 2000));
   }, []);
 
   const showSuccess = useCallback((message) => {
@@ -37,7 +36,7 @@ export function ToastProvider({ children }) {
       {children}
       <div className="toast-container">
         {toasts.map((toast) => (
-          <div key={toast.id} className={`toast toast-${toast.type} animate-slide-in`} role={toast.type === 'danger' ? 'alert' : 'status'} aria-atomic="true" onFocus={() => { clearTimeout(timers.current.get(toast.id)); timers.current.delete(toast.id); }} onMouseEnter={() => { clearTimeout(timers.current.get(toast.id)); timers.current.delete(toast.id); }}>
+          <div key={toast.id} className={`toast toast-${toast.type} animate-slide-in`} role={toast.type === 'danger' ? 'alert' : 'status'} aria-atomic="true">
             <div className="toast-message"><strong>{toast.type === 'success' ? 'Success' : toast.type === 'danger' ? 'Error' : toast.type === 'warning' ? 'Attention' : 'Notice'}</strong><div>{toast.message}</div></div>
             <button type="button" className="toast-close" aria-label="Dismiss notification" onClick={() => dismissToast(toast.id)}>
               <span className="control-label">Dismiss</span>
