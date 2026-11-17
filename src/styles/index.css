@@ -5659,6 +5659,12 @@ input[type='radio'] {
   margin-bottom: 8px;
 }
 
+.login-recovery > summary {
+  display: inline-flex;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
 .login-legacy .section-copy {
   font-size: 13px;
   margin-bottom: 20px;

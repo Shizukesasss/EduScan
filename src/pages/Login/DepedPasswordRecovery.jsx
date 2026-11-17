@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../../api/client';
 
-export default function DepedPasswordRecovery({ onReset }) {
+export default function DepedPasswordRecovery({ enabled, onReset }) {
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
@@ -54,12 +54,14 @@ export default function DepedPasswordRecovery({ onReset }) {
   }
 
   return (
-    <details className="login-legacy">
-      <summary>Set or reset your DepEd EduScan password</summary>
-      <p className="section-copy">Use the DepEd email you’ve already used to sign in with Google. The code lets you set a password for EduScan.</p>
-      {error && <p className="login-error" role="alert">{error}</p>}
-      {message && <p className="section-copy" role="status">{message}</p>}
-      {!complete && (
+    <details className="login-legacy login-recovery">
+      <summary>Forgot password?</summary>
+      <p className="section-copy">{enabled
+        ? 'Enter the DepEd email you’ve already used to sign in with Google. We’ll email you a code to reset your EduScan password.'
+        : 'Contact your school administrator for help resetting your EduScan password.'}</p>
+      {enabled && error && <p className="login-error" role="alert">{error}</p>}
+      {enabled && message && <p className="section-copy" role="status">{message}</p>}
+      {enabled && !complete && (
         <form className="login-form" onSubmit={submit} aria-busy={busy}>
           <label>
             DepEd email

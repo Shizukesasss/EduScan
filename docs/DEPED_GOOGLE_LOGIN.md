@@ -62,7 +62,7 @@ SMTP_PASSWORD=
 
 Port 587 uses STARTTLS. For a relay that uses implicit TLS, set `SMTP_USE_SSL=true` and use its port, commonly 465. Fill in the username and password if the relay requires authentication. Keep SMTP credentials in the local environment file.
 
-An active user signs in with DepEd Google at least once, then selects **Set or reset your DepEd EduScan password** on the login page. EduScan sends an eight-digit, single-use code to the verified mailbox. After entering the code and choosing a password, the user can sign in to EduScan with their DepEd email and the new password. In DepEd-only mode, this setting enables the EduScan password option for verified DepEd accounts.
+An active user signs in with DepEd Google at least once, then selects **Forgot password?** on the login page. EduScan sends an eight-digit, single-use code to the verified mailbox. After entering the code and choosing a password, the user can sign in to EduScan with their DepEd email and the new password. In DepEd-only mode, this setting enables the EduScan password option for verified DepEd accounts.
 
 ## Account security and verification
 
