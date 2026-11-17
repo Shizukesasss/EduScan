@@ -70,14 +70,15 @@ def _layout(sheet):
     return widths, rows, merges
 
 
-def _draw_sheet(canvas, sheet, title):
+def _draw_sheet(canvas, sheet, title, *, page_orientation='landscape'):
     layout = _layout(sheet)
     if not layout:
         return
     widths, heights, merges = layout
     if not widths or not heights:
         return
-    page_width, page_height = landscape(A3 if sum(widths.values()) > 1000 else A4)
+    page_size = A3 if sum(widths.values()) > 1000 else A4
+    page_width, page_height = landscape(page_size) if page_orientation == 'landscape' else page_size
     width_scale = min(1, (page_width - 48) / sum(widths.values()))
     x = {}
     position = 0
@@ -178,6 +179,40 @@ def gate_log_pdf(source: Path) -> bytes:
     workbook = load_workbook(source, data_only=True)
     try:
         _draw_sheet(canvas, workbook.active, source.stem)
+    finally:
+        workbook.close()
+    canvas.save()
+    return buffer.getvalue()
+
+
+def workbook_report_pdf(source: Path, *, terms: tuple[int, ...] = (), draft: bool = False,
+                        landscape_pages: bool = False) -> bytes:
+    """Render workbook sheets directly for deployments without desktop Excel."""
+    _fonts()
+    buffer = io.BytesIO()
+    canvas = Canvas(buffer, pageCompression=1, encrypt=report_encryption())
+    canvas.setTitle(source.stem)
+    workbook = load_workbook(source, data_only=True)
+    try:
+        visible_sheets = [sheet for sheet in workbook.worksheets if sheet.sheet_state == 'visible']
+        if terms:
+            included_terms = set(terms)
+            term_sheets = []
+            for sheet in visible_sheets:
+                match = re.match(r'^TERM\s+(\d+)\b', sheet.title, re.IGNORECASE)
+                if match and int(match.group(1)) in included_terms:
+                    term_sheets.append(sheet)
+            include_summary = len(included_terms) > 1 or len(term_sheets) > 1
+            visible_sheets = [
+                sheet for sheet in visible_sheets
+                if sheet in term_sheets or (include_summary and sheet.title == 'FINAL GRADES')
+            ]
+        if not visible_sheets:
+            raise ValueError('The workbook has no printable sheets for the selected terms.')
+        for sheet in visible_sheets:
+            title = f'{source.stem} · DRAFT PREVIEW — NOT FINAL' if draft else source.stem
+            _draw_sheet(canvas, sheet, title,
+                        page_orientation='landscape' if landscape_pages else 'portrait')
     finally:
         workbook.close()
     canvas.save()

@@ -7,7 +7,7 @@ This guide is for a Windows laptop used as an EduScan server or gate station. De
 - Git for Windows
 - Python 3.12 (the `py -3.12` command is recommended)
 - Node.js 22.12+ (or 20.19+) with npm
-- Microsoft Excel with PDF export on the Windows host for downloads that use an Excel report template
+- Microsoft Excel with PDF export on the Windows host is optional. Hosted Linux deployments render workbook PDFs directly.
 - A webcam
 - Optional: MySQL Community Server 8.x and its command-line client tools
 - Optional: an Android phone with a SIM and SMS Gateway for Android in Local Server mode

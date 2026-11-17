@@ -7,7 +7,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
 
-from fastapi import HTTPException
 from pypdf import PdfWriter
 from pypdf.constants import UserAccessPermissions
 
@@ -18,7 +17,8 @@ _excel_lock = Lock()
 def excel_report_pdf(source: Path, *, terms: tuple[int, ...] = (), draft: bool = False,
                      landscape: bool = False) -> bytes:
     if os.name != 'nt':
-        raise HTTPException(503, 'Template PDF export requires Microsoft Excel on the Windows EduScan host.')
+        from .report_pdf import workbook_report_pdf
+        return workbook_report_pdf(source, terms=terms, draft=draft, landscape_pages=landscape)
 
     with TemporaryDirectory(dir=source.parent) as directory:
         command = [
@@ -37,12 +37,15 @@ def excel_report_pdf(source: Path, *, terms: tuple[int, ...] = (), draft: bool =
                 subprocess.run(command, check=True, capture_output=True, timeout=90,
                                creationflags=subprocess.CREATE_NO_WINDOW)
         except subprocess.TimeoutExpired as error:
+            from fastapi import HTTPException
             raise HTTPException(503, 'Excel took too long to export the report. Try generating it again.') from error
         except (OSError, subprocess.CalledProcessError) as error:
+            from fastapi import HTTPException
             raise HTTPException(503, 'Excel could not export the report template. Check that Microsoft Excel can open and print the template on the EduScan host.') from error
 
         parts = sorted(Path(directory).glob('sheet-*.pdf'))
         if not parts:
+            from fastapi import HTTPException
             raise HTTPException(409, 'The report template has no printable sheets for the selected terms.')
         with PdfWriter() as writer:
             for part in parts:
