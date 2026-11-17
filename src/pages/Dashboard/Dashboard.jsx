@@ -2,11 +2,13 @@ import PaginatedBody from '../../components/Common/PaginatedBody';
 import { SkeletonBar, SkeletonRows } from '../../components/Common/Skeleton';
 import useSlowLoading from '../../hooks/useSlowLoading';
 import { useCallback, useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api, displayTime, localDate } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 import './Dashboard.css';
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const [data, setData] = useState({ rows: [], events: [], sms: {} });
   const [snapshot, setSnapshot] = useState({ loading: true, error: '', updatedAt: null });
   const { showError } = useToast();
@@ -70,7 +72,7 @@ export default function Dashboard() {
               : <>Updated <time dateTime={snapshot.updatedAt.toISOString()}>{snapshot.updatedAt.toLocaleTimeString('en-PH')}</time> · Refreshes every 15 seconds</>}
           </span>
         </p>
-        <button className="btn-primary" type="button" onClick={() => window.open('/scanner', '_blank')}>
+        <button className="btn-primary" type="button" onClick={() => navigate('/scanner')}>
            Open gate station
         </button>
       </div>

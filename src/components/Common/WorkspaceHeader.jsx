@@ -168,7 +168,7 @@ export default function WorkspaceHeader({
             <button
               type="button"
               className="btn-primary header-scanner-btn"
-              onClick={() => window.open('/scanner', '_blank')}
+              onClick={() => navigate('/scanner')}
             >
               <span>Scanner</span>
             </button>
