@@ -10,6 +10,7 @@ import shutil
 import uuid
 from collections import Counter, defaultdict
 from datetime import date, timedelta
+from os import name as os_name
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 from xml.etree import ElementTree as ET
@@ -29,6 +30,7 @@ from .academic_context import is_junior_high, is_senior_high
 from .grading_engine import round_value
 from .export_files import new_report_path
 from .excel_pdf import excel_report_pdf
+from .report_pdf import gate_log_pdf
 from .settings_store import get_json
 
 
@@ -96,7 +98,10 @@ def register_workbook_report(db: Session, source: Path, report_type: str, parame
             parameters = {**parameters, '_sf2_preview': official_sf2_preview(source, tardy=tardy)}
         if file_format == "xlsx":
             return register_report(db, source, report_type, parameters, actor)
-        pdf.write_bytes(excel_report_pdf(source, terms=terms, draft=draft, landscape=report_type == "Grading Summary"))
+        if report_type == "Temporary Attendance Log" and os_name != "nt":
+            pdf.write_bytes(gate_log_pdf(source))
+        else:
+            pdf.write_bytes(excel_report_pdf(source, terms=terms, draft=draft, landscape=report_type == "Grading Summary"))
         return register_report(db, pdf, report_type, parameters, actor)
     finally:
         pdf.unlink(missing_ok=True)

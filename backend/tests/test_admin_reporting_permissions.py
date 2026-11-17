@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import date, time, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from io import BytesIO
 
@@ -15,7 +16,7 @@ from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 from app import main
 from app.models import AttendanceEvent, ClassSchedule, GeneratedReport, SchoolYear, SectionAdviserAssignment, SchoolSection, Subject, User
-from app.services import reports, sf2
+from app.services import excel_pdf, reports, sf2
 from browser_test_client import issued_session_headers
 
 
@@ -213,6 +214,22 @@ class AdminReportingPermissionsTest(unittest.TestCase):
                 self.assertTrue(pdf.is_encrypted)
                 self.assertFalse(int(pdf.trailer['/Encrypt']['/P']) & 8)
                 self.assertTrue(pdf.pages[0].extract_text())
+
+    def test_temporary_attendance_pdf_download_works_on_linux(self):
+        with patch.object(reports, 'os_name', 'posix'), \
+                patch.object(excel_pdf, 'os', SimpleNamespace(name='posix')):
+            response = self.client.get('/api/attendance/temporary-log?date=2026-10-01',
+                                       headers=self.admin_headers)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers['content-type'], 'application/pdf')
+        pdf = PdfReader(BytesIO(response.content))
+        self.assertTrue(pdf.is_encrypted)
+        self.assertTrue(pdf.decrypt(''))
+        self.assertFalse(int(pdf.trailer['/Encrypt']['/P']) & 8)
+        self.assertIn('All-School Attendance', pdf.pages[0].extract_text())
+        item = self.db.scalar(select(GeneratedReport).where(GeneratedReport.report_type == 'Temporary Attendance Log'))
+        self.assertEqual(item.file_sha256, hashlib.sha256(response.content).hexdigest())
 
     def test_excel_exports_are_registered_workbooks_and_keep_pdf_permissions(self):
         from openpyxl import load_workbook
