@@ -1463,6 +1463,12 @@ button:disabled {
   font-size: 26px;
 }
 
+.account-recovery-email {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border-color);
+}
+
 .scan-feedback {
   border-radius: 17px;
   padding: 16px 18px;

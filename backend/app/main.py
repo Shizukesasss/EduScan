@@ -30,7 +30,8 @@ from .auth import (DEPED_PASSWORD_PREFIX, DEPED_PASSWORD_PROVIDER, SESSION_COOKI
                    require_roles, revoke_session, revoke_user_sessions, secure_session_transport, seed_users,
                    set_session_cookie, verify_password)
 from .services.google_login import DOMAIN, google_user, verify_google_credential
-from .schemas import GoogleLoginRequest, PasswordRecoveryConfirm, PasswordRecoveryRequest
+from .schemas import (GoogleLoginRequest, PasswordRecoveryConfirm, PasswordRecoveryRequest,
+                      RecoveryEmailConfirm, RecoveryEmailRequest)
 from .services import password_recovery
 from .config import settings
 from .database import SessionLocal, engine, get_db
@@ -521,6 +522,32 @@ def confirm_password_reset(payload: PasswordRecoveryConfirm, background: Backgro
     background.add_task(password_recovery.send_email, email, "EduScan password changed",
                         "Your EduScan password was reset. If you did not make this change, contact your school administrator.")
     return {"message": "Your EduScan password was updated. You can now sign in."}
+
+
+@app.get("/api/auth/recovery-email")
+def recovery_email_status(user: User = Depends(require_roles("admin"))) -> dict:
+    password_recovery.require_local_admin(user)
+    return {"enabled": password_recovery.admin_recovery_enabled(), "email": user.recovery_email}
+
+
+@app.post("/api/auth/recovery-email/request", status_code=202,
+          dependencies=[Depends(require_app_request), Depends(secure_session_transport)])
+@rate_limit("password recovery request")
+def request_recovery_email(payload: RecoveryEmailRequest, background: BackgroundTasks,
+                           db: Session = Depends(get_db), user: User = Depends(require_roles("admin"))) -> dict:
+    code = password_recovery.issue_email_verification(db, user, payload.email, payload.current_password)
+    background.add_task(password_recovery.send_email, payload.email, "Verify your EduScan recovery email",
+                        f"Your EduScan verification code is {code}. It expires in 10 minutes. "
+                        "If you did not request this code, you can ignore this email.")
+    return {"message": "A verification code was requested. Check your email."}
+
+
+@app.post("/api/auth/recovery-email/confirm",
+          dependencies=[Depends(require_app_request), Depends(secure_session_transport)])
+@rate_limit("password recovery confirmation")
+def confirm_recovery_email(payload: RecoveryEmailConfirm, db: Session = Depends(get_db),
+                           user: User = Depends(require_roles("admin"))) -> dict:
+    return {"email": password_recovery.verify_recovery_email(db, user, payload.code)}
 
 
 @app.get("/api/auth/me")

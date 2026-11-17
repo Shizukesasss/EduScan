@@ -14,6 +14,7 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     google_sub: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True, index=True)
     google_email: Mapped[str | None] = mapped_column(String(254), nullable=True, unique=True, index=True)
+    recovery_email: Mapped[str | None] = mapped_column(String(254), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(30), index=True)
     full_name: Mapped[str] = mapped_column(String(160))
@@ -43,13 +44,21 @@ class AuthSession(Base):
     password_stamp: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
-class DepedPasswordReset(Base):
-    __tablename__ = "deped_password_resets"
-
+class EmailChallenge:
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     code_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     requested_at: Mapped[datetime] = mapped_column(DateTime)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class DepedPasswordReset(EmailChallenge, Base):
+    __tablename__ = "deped_password_resets"
+
+
+class RecoveryEmailVerification(EmailChallenge, Base):
+    __tablename__ = "recovery_email_verifications"
+
+    email: Mapped[str] = mapped_column(String(254))
 
 
 class Person(Base):

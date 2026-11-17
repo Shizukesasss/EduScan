@@ -47,6 +47,15 @@ class PasswordRecoveryConfirm(PasswordRecoveryRequest):
     _strong_password = field_validator("new_password")(strong_password)
 
 
+class RecoveryEmailRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254, pattern=r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+$")
+    current_password: str = Field(min_length=1, max_length=200)
+
+
+class RecoveryEmailConfirm(BaseModel):
+    code: str = Field(pattern=r"^[0-9]{8}$")
+
+
 class GoogleLoginRequest(BaseModel):
     credential: str = Field(min_length=1, max_length=16384)
     nonce: str = Field(min_length=32, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")

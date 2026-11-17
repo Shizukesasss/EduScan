@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { api, auth } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 import { workspaceFor } from '../../services/googleIdentity';
+import AdminRecoveryEmail from './AdminRecoveryEmail';
 
 function destination() {
   return workspaceFor(auth.role());
@@ -71,6 +72,7 @@ export default function AccountSecurity() {
         <label><span className="field-label">Confirm new password</span><input placeholder="Enter your password" className="input-field" type="password" autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label>
         <div className="modal-actions"><button type="button" className="btn-secondary" onClick={logout}> Sign out</button><button className="btn-primary" disabled={busy}> {busy ? 'Changing password…' : 'Change password and continue'}</button></div>
       </form>
+      {auth.role() === 'admin' && auth.provider() === 'password' && !auth.mustChangePassword() && <AdminRecoveryEmail />}
     </section>
   </div>;
 }

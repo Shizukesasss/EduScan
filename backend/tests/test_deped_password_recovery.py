@@ -81,6 +81,38 @@ def test_local_admin_recovery_respects_account_role_and_deped_only_mode(school, 
     assert not messages
 
 
+def test_admin_enrolls_own_mailbox_and_recovers_without_per_user_environment(school, monkeypatch):
+    messages = enable(monkeypatch, deped_only=False, deped_password_recovery=False,
+                      admin_recovery_username='', admin_recovery_email='')
+    school.admin.password_hash = auth.hash_password('Current-admin-password-2026!')
+    school.db.commit()
+    school.admin_headers = response_session_headers(school.client.post('/api/auth/login', json={
+        'username': 'admin', 'password': 'Current-admin-password-2026!',
+    }))
+    reset_request = '/api/auth/password-reset/request'
+    path = '/api/auth/recovery-email'
+    assert school.client.get('/api/auth/config').json()['admin_password_recovery']
+    assert school.client.post(reset_request, json={'username': 'admin'}).status_code == 202
+    assert not messages
+    payload = {'email': 'recovery@example.test', 'current_password': 'Current-admin-password-2026!'}
+    assert school.client.post(f'{path}/request', json=payload, headers=school.teacher_headers).status_code == 403
+    assert school.client.post(f'{path}/request', json={**payload, 'current_password': 'wrong'},
+                              headers=school.admin_headers).status_code == 422
+    assert school.client.post(f'{path}/request', json=payload, headers=school.admin_headers).status_code == 202
+    assert messages[-1][0] == payload['email']
+    assert school.client.get(path, headers=school.admin_headers).json()['email'] is None
+    assert school.client.post(reset_request, json={'username': 'admin'}).status_code == 202
+    assert len(messages) == 1
+    confirm = {'code': code_from(messages)}
+    assert school.client.post(f'{path}/confirm', json=confirm, headers=school.admin_headers).status_code == 200
+    assert school.client.post(f'{path}/confirm', json=confirm, headers=school.admin_headers).status_code == 400
+    assert school.client.get(path, headers=school.admin_headers).json()['email'] == payload['email']
+    assert school.client.post(reset_request, json={'username': 'admin'}).status_code == 202
+    assert messages[-1][0] == payload['email'] and len(messages) == 2
+    assert school.client.post('/api/auth/password-reset/confirm', json={
+        'username': 'admin', 'code': code_from(messages), 'new_password': 'Admin-recovered-password-2026!',
+    }).status_code == 200
+
 def test_verified_mailbox_can_reset_eduscan_password_and_sign_in(school, monkeypatch):
     messages = enable(monkeypatch)
     user = google_login.google_user(school.db, claims())

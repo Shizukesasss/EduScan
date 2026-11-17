@@ -66,9 +66,11 @@ An active user signs in with DepEd Google at least once, then selects **Forgot p
 
 ### Administrator accounts that sign in with a username
 
-When `EDUSCAN_DEPED_ONLY=false`, set `EDUSCAN_ADMIN_RECOVERY_USERNAME` to the username of an existing active administrator who signs in with a username. Set `EDUSCAN_ADMIN_RECOVERY_EMAIL` to a mailbox controlled by that administrator. Configure the same SMTP settings shown above. On Vercel, set these as server environment variables and redeploy. Use the same `EDUSCAN_SECRET_KEY` across backend instances so a code issued by one instance works on another.
+When `EDUSCAN_DEPED_ONLY=false`, configure the SMTP settings shown above once for the app. On Vercel, set those variables on the backend project for Production and redeploy. Use the same `EDUSCAN_SECRET_KEY` across backend instances so a code issued by one instance works on another. The `0037_admin_recovery_email` migration must be applied before deploying to a PostgreSQL installation.
 
-On the login page, open **Forgot admin password?** and enter the administrator username. EduScan sends the code only to the configured mailbox. Resetting the password signs the account out of its existing sessions. If email recovery hasn’t been set up, the login page directs administrators to school ICT staff. Administrators who already sign in through DepEd can use the verified DepEd email flow under **Forgot password?**.
+Each administrator using a username can sign in and open **Account Security → Recovery email**. Enter an email address you control and your current password, then enter the code sent to that address. EduScan stores the verified address on your account. If you forget your password later, select **Forgot admin password?** and enter your EduScan username. Resetting the password signs the account out of its existing sessions. If you are already locked out and haven’t verified a mailbox, contact school ICT staff.
+
+Existing deployments with `EDUSCAN_ADMIN_RECOVERY_USERNAME` and `EDUSCAN_ADMIN_RECOVERY_EMAIL` retain that mailbox as a fallback for the configured account until that administrator verifies an address in Account Security. Administrators who sign in through DepEd can use the verified DepEd email flow under **Forgot password?** when DepEd password recovery is enabled.
 
 ## Account security and verification
 

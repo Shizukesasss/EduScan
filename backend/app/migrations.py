@@ -48,6 +48,7 @@ MIGRATIONS = (
     ("0034_monthly_dtr_duty_hours", "Store per-employee recurring duty hours for Form 48"),
     ("0035_attendance_status_override", "Preserve verified arrival status corrections"),
     ("0036_browser_sessions", "Store revocable browser sessions"),
+    ("0037_admin_recovery_email", "Store verified administrator recovery email addresses and verification challenges"),
 )
 
 
@@ -424,6 +425,9 @@ def run_migrations(engine: Engine, *, after=None) -> list[str]:
                                        "BOOLEAN NOT NULL DEFAULT FALSE")
             elif version == "0036_browser_sessions":
                 _models.AuthSession.__table__.create(bind=connection, checkfirst=True)
+            elif version == "0037_admin_recovery_email":
+                _add_column_if_missing(connection, "users", "recovery_email", "VARCHAR(254) NULL")
+                _models.RecoveryEmailVerification.__table__.create(bind=connection, checkfirst=True)
             elif version == "0018_grade_criteria_adjustment_requests":
                 from .models_grading import GradeCriteriaAdjustmentRequest
                 GradeCriteriaAdjustmentRequest.__table__.create(bind=connection, checkfirst=True)

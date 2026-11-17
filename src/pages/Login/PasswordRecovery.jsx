@@ -59,7 +59,7 @@ export default function PasswordRecovery({ enabled, admin = false, onReset }) {
     <details className="login-legacy login-recovery">
       <summary>{admin ? 'Forgot admin password?' : 'Forgot password?'}</summary>
       {!codeRequested && <p className="section-copy">{enabled
-        ? admin ? 'Enter your administrator username. We’ll send a reset code to the configured recovery email.'
+        ? admin ? 'Enter your administrator username. If you’ve verified a recovery email in Account Security, we’ll send a reset code there.'
           : 'Enter the DepEd email you’ve already used to sign in with Google. We’ll email you a code to reset your EduScan password.'
         : admin ? 'Contact your school ICT staff to reset your administrator password or set up email recovery.'
           : 'Contact your school administrator for help resetting your EduScan password.'}</p>}

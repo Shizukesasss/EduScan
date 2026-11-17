@@ -34,7 +34,7 @@ def model_snapshot(item: Any) -> dict:
     return {
         column.key: json_value(getattr(item, column.key))
         for column in sqlalchemy_inspect(item).mapper.column_attrs
-        if column.key not in {"password_hash", "encrypted_value"}
+        if column.key not in {"password_hash", "encrypted_value", "recovery_email"}
     }
 
 

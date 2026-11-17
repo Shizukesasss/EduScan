@@ -111,20 +111,22 @@ def test_reservation_rejects_duplicates_relinking_and_wrong_domain(school):
             google_login.reserve_google_email(school.db, username, email)
 
 
-def test_identity_migration_preserves_legacy_users_and_runs_once():
+def test_identity_and_recovery_migrations_preserve_legacy_users_and_run_once():
     engine = create_engine("sqlite://")
     with engine.begin() as connection:
         connection.execute(text("CREATE TABLE schema_migrations (version VARCHAR(80) PRIMARY KEY, description VARCHAR(255), applied_at TIMESTAMP)"))
         for version, description in MIGRATIONS:
-            if version != "0032_google_identity":
+            if version not in {"0032_google_identity", "0037_admin_recovery_email"}:
                 connection.execute(text("INSERT INTO schema_migrations VALUES (:v,:d,CURRENT_TIMESTAMP)"), {"v": version, "d": description})
         connection.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY, username VARCHAR(80))"))
         connection.execute(text("INSERT INTO users VALUES (1,'admin')"))
-    assert run_migrations(engine) == ["0032_google_identity"]
+    assert run_migrations(engine) == ["0032_google_identity", "0037_admin_recovery_email"]
     assert run_migrations(engine) == []
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT username,google_sub,google_email FROM users")).one() == ("admin", None, None)
-        assert {c["name"] for c in inspect(connection).get_columns("users")} >= {"google_sub", "google_email"}
+        assert connection.execute(text("SELECT username,google_sub,google_email,recovery_email FROM users")).one() == (
+            "admin", None, None, None,
+        )
+        assert inspect(connection).has_table("recovery_email_verifications")
     engine.dispose()
 
 
