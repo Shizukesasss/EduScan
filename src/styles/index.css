@@ -5682,28 +5682,53 @@ input[type='radio'] {
   margin-bottom: 8px;
 }
 
-.login-recovery > summary {
+.login-recovery-trigger {
   display: inline-flex;
   min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
   text-decoration: underline;
   text-underline-offset: 0.2em;
   color: var(--accent-blue);
+  cursor: pointer;
 }
 
-.login-recovery[open] > summary {
-  margin-bottom: 6px;
+.login-recovery-trigger:hover,
+.login-recovery-back:hover {
+  color: var(--text-primary);
 }
 
-.login-recovery-panel {
-  padding: 10px 12px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-  background: #f8faff;
+.login-recovery-trigger:focus-visible,
+.login-recovery-back:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+  border-radius: 4px;
 }
 
-.login-recovery-panel > .section-copy,
-.login-recovery-panel > .login-error {
-  margin: 0 0 10px;
+.login-recovery-view > .login-recovery-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  margin: 0 0 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-blue);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.login-recovery-view > h2 {
+  margin-bottom: 8px;
+}
+
+.login-recovery-view > .section-copy,
+.login-recovery-view > .login-error {
+  margin: 0 0 16px;
 }
 
 .login-recovery-form {
@@ -5751,6 +5776,10 @@ input[type='radio'] {
 
 .login-recovery-actions > .btn-secondary {
   min-height: 38px;
+}
+
+.login-recovery-view > .login-error {
+  margin-top: 12px;
 }
 
 .login-legacy .section-copy {

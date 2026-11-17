@@ -19,6 +19,7 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
+  const [recoveryMode, setRecoveryMode] = useState(null);
 
   const [busy, setBusy] = useState(false);
   const [config, setConfig] = useState(null);
@@ -101,6 +102,11 @@ export default function Login() {
     setError('');
   };
 
+  const openPasswordRecovery = (mode) => {
+    setError('');
+    setRecoveryMode(mode);
+  };
+
   return (
     <div className="login-shell">
       <div className="card animate-fade-in login-card">
@@ -131,6 +137,16 @@ export default function Login() {
         {/* Right Side: Login Form */}
         <div className="login-form-panel">
           <div className="login-form-inner">
+            {recoveryMode ? (
+              <PasswordRecovery
+                key={recoveryMode}
+                active
+                admin={recoveryMode === 'admin'}
+                enabled={recoveryMode === 'admin' ? config.admin_password_recovery : config.deped_password_recovery}
+                onReset={handlePasswordReset}
+                onBack={() => setRecoveryMode(null)}
+              />
+            ) : <>
             <h2>Welcome back</h2>
             <p className="login-intro">{config?.deped_only && !config.deped_password_recovery
               ? 'Sign in with your DepEd Google account.'
@@ -172,10 +188,12 @@ export default function Login() {
             </details>}
 
             {config && !config.deped_only && (
-              <PasswordRecovery admin enabled={config.admin_password_recovery} onReset={handlePasswordReset} />
+              <PasswordRecovery admin enabled={config.admin_password_recovery} onReset={handlePasswordReset}
+                onOpen={() => openPasswordRecovery('admin')} />
             )}
             {config && (config.deped_password_recovery || !config.admin_password_recovery) && (
-              <PasswordRecovery enabled={config.deped_password_recovery} onReset={handlePasswordReset} />
+              <PasswordRecovery enabled={config.deped_password_recovery} onReset={handlePasswordReset}
+                onOpen={() => openPasswordRecovery('deped')} />
             )}
 
             <div className="login-google">
@@ -194,6 +212,7 @@ export default function Login() {
                 {error && <button type="button" className="btn-secondary" disabled={busy || loading} onClick={() => setAttempt((value) => value + 1)}>Retry Google sign-in</button>}
               </div>
             </div>
+            </>}
           </div>
         </div>
 

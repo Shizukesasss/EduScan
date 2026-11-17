@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../../api/client';
 
-export default function PasswordRecovery({ enabled, admin = false, onReset }) {
+export default function PasswordRecovery({ enabled, admin = false, onReset, active = false, onOpen, onBack }) {
   const [identifier, setIdentifier] = useState('');
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
@@ -55,18 +55,29 @@ export default function PasswordRecovery({ enabled, admin = false, onReset }) {
     }
   }
 
+  if (!active) {
+    return (
+      <button type="button" className="login-recovery-trigger" onClick={onOpen}>
+        {admin ? 'Forgot admin password?' : 'Forgot password?'}
+      </button>
+    );
+  }
+
   return (
-    <details className="login-legacy login-recovery">
-      <summary>{admin ? 'Forgot admin password?' : 'Forgot password?'}</summary>
-      <div className="login-recovery-panel">
-        <p className="section-copy">{complete ? 'Your password has been updated.' : enabled
-          ? admin ? 'Enter your administrator username. We’ll send a reset code to your verified recovery email.'
-            : 'Enter the DepEd email you use to sign in. We’ll send a code to reset your EduScan password.'
-          : admin ? 'Contact your school ICT staff to reset your administrator password or set up email recovery.'
-            : 'Contact your school administrator for help resetting your EduScan password.'}</p>
-        {error && <p className="login-error" role="alert">{error}</p>}
-        {message && <p className="section-copy" role="status">{message}</p>}
-        {enabled && !complete && <form className="login-form login-recovery-form" onSubmit={submit} aria-busy={busy}>
+    <section className="login-recovery-view" aria-labelledby="login-recovery-title">
+      <button type="button" className="login-recovery-back" onClick={onBack} disabled={busy}>
+        <span aria-hidden="true">←</span> Back to login
+      </button>
+      <h2 id="login-recovery-title">{complete ? 'Password updated' : admin ? 'Forgot admin password?' : 'Forgot password?'}</h2>
+      {!complete && !codeRequested && <p className="section-copy">{enabled
+        ? admin ? 'Enter your administrator username. We’ll send a reset code to your verified recovery email.'
+          : 'Enter the DepEd email you use to sign in. We’ll send a code to reset your EduScan password.'
+        : admin ? 'Contact your school ICT staff to reset your administrator password or set up email recovery.'
+          : 'Contact your school administrator for help resetting your EduScan password.'}</p>}
+      {error && <p className="login-error" role="alert">{error}</p>}
+      {message && <p className="section-copy" role="status">{message}</p>}
+      {complete && !message && <p className="section-copy" role="status">Your password has been updated.</p>}
+      {enabled && !complete && <form className="login-form login-recovery-form" onSubmit={submit} aria-busy={busy}>
           <label className="login-recovery-identifier">
             {identifierLabel}
             <input className="input-field" type={admin ? 'text' : 'email'} autoComplete={admin ? 'username' : 'email'}
@@ -107,8 +118,7 @@ export default function PasswordRecovery({ enabled, admin = false, onReset }) {
               }}>Use a different {admin ? 'username' : 'email'}</button>
             </>}
           </div>
-        </form>}
-      </div>
-    </details>
+      </form>}
+    </section>
   );
 }
