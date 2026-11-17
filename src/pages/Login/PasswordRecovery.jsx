@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { api } from '../../api/client';
 
-export default function DepedPasswordRecovery({ enabled, adminEnabled, onReset }) {
-  const [useAdmin, setUseAdmin] = useState(false);
+export default function PasswordRecovery({ enabled, admin = false, onReset }) {
   const [identifier, setIdentifier] = useState('');
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
@@ -12,8 +11,6 @@ export default function DepedPasswordRecovery({ enabled, adminEnabled, onReset }
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  const available = enabled || adminEnabled;
-  const admin = adminEnabled && (!enabled || useAdmin);
   const account = admin ? { username: identifier.trim() } : { email: identifier.trim() };
   const identifierLabel = admin ? 'Administrator username' : 'DepEd email';
 
@@ -60,27 +57,16 @@ export default function DepedPasswordRecovery({ enabled, adminEnabled, onReset }
 
   return (
     <details className="login-legacy login-recovery">
-      <summary>Forgot password?</summary>
-      <p className="section-copy">{admin
-        ? 'Enter your administrator username. We’ll send a reset code to the recovery email set up for the account.'
-        : enabled ? 'Enter the DepEd email you’ve already used to sign in with Google. We’ll email you a code to reset your EduScan password.'
-          : 'Contact your school administrator for help resetting your EduScan password.'}</p>
-      {available && error && <p className="login-error" role="alert">{error}</p>}
-      {available && message && <p className="section-copy" role="status">{message}</p>}
-      {available && !complete && (
+      <summary>{admin ? 'Forgot admin password?' : 'Forgot password?'}</summary>
+      {!codeRequested && <p className="section-copy">{enabled
+        ? admin ? 'Enter your administrator username. We’ll send a reset code to the configured recovery email.'
+          : 'Enter the DepEd email you’ve already used to sign in with Google. We’ll email you a code to reset your EduScan password.'
+        : admin ? 'Contact your school ICT staff to reset your administrator password or set up email recovery.'
+          : 'Contact your school administrator for help resetting your EduScan password.'}</p>}
+      {error && <p className="login-error" role="alert">{error}</p>}
+      {message && <p className="section-copy" role="status">{message}</p>}
+      {enabled && !complete && (
         <form className="login-form" onSubmit={submit} aria-busy={busy}>
-          {enabled && adminEnabled && <label>
-            Account type
-            <select className="input-field" value={admin ? 'admin' : 'deped'} disabled={busy || codeRequested}
-              onChange={(event) => {
-                setUseAdmin(event.target.value === 'admin');
-                setIdentifier('');
-                setError('');
-              }}>
-              <option value="deped">DepEd account</option>
-              <option value="admin">Administrator with username</option>
-            </select>
-          </label>}
           <label>
             {identifierLabel}
             <input className="input-field" type={admin ? 'text' : 'email'} autoComplete={admin ? 'username' : 'email'}

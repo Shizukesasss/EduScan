@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, auth } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 import { loadGoogleIdentity, renderGoogleSignIn, workspaceFor } from '../../services/googleIdentity';
-import DepedPasswordRecovery from './DepedPasswordRecovery';
+import PasswordRecovery from './PasswordRecovery';
 
 function formatTeacherGreeting(rawName) {
   const trimmed = String(rawName || '').trim();
@@ -95,6 +95,12 @@ export default function Login() {
     }
   };
 
+  const handlePasswordReset = (identifier) => {
+    setUsername(identifier);
+    setPassword('');
+    setError('');
+  };
+
   return (
     <div className="login-shell">
       <div className="card animate-fade-in login-card">
@@ -165,12 +171,12 @@ export default function Login() {
               </form>
             </details>}
 
-            {config && <DepedPasswordRecovery enabled={config.deped_password_recovery}
-              adminEnabled={config.admin_password_recovery} onReset={(identifier) => {
-              setUsername(identifier);
-              setPassword('');
-              setError('');
-            }} />}
+            {config && !config.deped_only && (
+              <PasswordRecovery admin enabled={config.admin_password_recovery} onReset={handlePasswordReset} />
+            )}
+            {config && (config.deped_password_recovery || !config.admin_password_recovery) && (
+              <PasswordRecovery enabled={config.deped_password_recovery} onReset={handlePasswordReset} />
+            )}
 
             <div className="login-google">
               <div className="login-access-note">

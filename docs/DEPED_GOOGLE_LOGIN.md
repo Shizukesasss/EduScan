@@ -68,7 +68,7 @@ An active user signs in with DepEd Google at least once, then selects **Forgot p
 
 When `EDUSCAN_DEPED_ONLY=false`, set `EDUSCAN_ADMIN_RECOVERY_USERNAME` to the username of an existing active administrator who signs in with a username. Set `EDUSCAN_ADMIN_RECOVERY_EMAIL` to a mailbox controlled by that administrator. Configure the same SMTP settings shown above. On Vercel, set these as server environment variables and redeploy. Use the same `EDUSCAN_SECRET_KEY` across backend instances so a code issued by one instance works on another.
 
-On the login page, open **Forgot password?** and enter the administrator username. If both recovery methods are enabled, select **Administrator with username** first. EduScan sends the code only to the configured mailbox. Resetting the password signs the account out of its existing sessions. Administrators who already sign in through DepEd can use the verified DepEd email flow.
+On the login page, open **Forgot admin password?** and enter the administrator username. EduScan sends the code only to the configured mailbox. Resetting the password signs the account out of its existing sessions. If email recovery hasn’t been set up, the login page directs administrators to school ICT staff. Administrators who already sign in through DepEd can use the verified DepEd email flow under **Forgot password?**.
 
 ## Account security and verification
 
