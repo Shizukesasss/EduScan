@@ -889,8 +889,11 @@ button:disabled {
 
 .enrollment-modal {
   width: min(980px, 100%);
-  max-height: 94vh;
-  overflow: auto;
+  max-height: calc(100dvh - 32px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .enrollment-modal h2 {
@@ -904,6 +907,20 @@ button:disabled {
   grid-template-columns: minmax(0, 1fr) 340px;
   gap: 28px;
   margin-top: 20px;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.enrollment-modal > .modal-actions {
+  position: sticky;
+  bottom: 0;
+  flex: 0 0 auto;
+  margin: 12px -24px -24px;
+  padding: 12px 24px 24px;
+  background: var(--card-bg);
+  border-top: 1px solid var(--border-color);
 }
 
 .enrollment-fields .full-field {
@@ -5875,6 +5892,11 @@ input[type='radio'] {
 
   .modal-card:has(> .modal-body) {
     padding: 0;
+  }
+
+  .enrollment-modal > .modal-actions {
+    margin-inline: -20px;
+    padding: 12px 20px 20px;
   }
 
   .modal-header,
