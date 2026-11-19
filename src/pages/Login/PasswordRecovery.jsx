@@ -12,7 +12,7 @@ export default function PasswordRecovery({ enabled, admin = false, onReset, acti
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const account = admin ? { username: identifier.trim() } : { email: identifier.trim() };
-  const identifierLabel = admin ? 'Administrator username' : 'DepEd email';
+  const identifierLabel = admin ? 'Administrator email or username' : 'DepEd email';
 
   async function sendCode() {
     setBusy(true);
@@ -70,7 +70,7 @@ export default function PasswordRecovery({ enabled, admin = false, onReset, acti
       </button>
       <h2 id="login-recovery-title">{complete ? 'Password updated' : admin ? 'Forgot admin password?' : 'Forgot password?'}</h2>
       {!complete && !codeRequested && <p className="section-copy">{enabled
-        ? admin ? 'Enter your administrator username. We’ll send a reset code to your verified recovery email.'
+        ? admin ? 'Enter your administrator sign-in email or username. We’ll send a reset code to your verified recovery email.'
           : 'Enter the DepEd email you use to sign in. We’ll send a code to reset your EduScan password.'
         : admin ? 'Contact your school ICT staff to reset your administrator password or set up email recovery.'
           : 'Contact your school administrator for help resetting your EduScan password.'}</p>}
@@ -115,7 +115,7 @@ export default function PasswordRecovery({ enabled, admin = false, onReset, acti
                 setPassword('');
                 setConfirmation('');
                 setCode('');
-              }}>Use a different {admin ? 'username' : 'email'}</button>
+              }}>Use a different {admin ? 'account' : 'email'}</button>
             </>}
           </div>
       </form>}

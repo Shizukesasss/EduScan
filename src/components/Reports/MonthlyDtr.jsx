@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import ActionMenu from '../Common/ActionMenu';
 import { api, localDate } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 import PaginatedBody from '../Common/PaginatedBody';
@@ -146,8 +147,10 @@ function DtrPreview({ base, month, onDownload, saving }) {
       </tr>)}</PaginatedBody>
     </table></div>}
     <div className="action-row dtr-downloads">
-      <button className="btn-primary" disabled={!days || downloading || saving} onClick={() => download('pdf')}>Download Form 48 PDF</button>
-      <button className="btn-secondary" disabled={!days || downloading || saving} onClick={() => download('xlsx')}>Download Form 48 Excel</button>
+      <ActionMenu label="Export Form 48" disabled={!days || downloading || saving}>
+        <button type="button" onClick={() => download('pdf')}>Download PDF</button>
+        <button type="button" onClick={() => download('xlsx')}>Download Excel (.xlsx)</button>
+      </ActionMenu>
     </div>
   </>;
 }

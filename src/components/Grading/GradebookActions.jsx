@@ -4,6 +4,7 @@ import { useToast } from '../../contexts/useToast';
 import { isSeniorHighGrade } from '../../services/academicContext';
 import { getExportReviewCopy, isDraftPreviewAvailable } from '../../services/gradebookExport';
 import FinalizeValidationDialog from './FinalizeValidationDialog';
+import ActionMenu from '../Common/ActionMenu';
 import ValidationIssueGroups from './ValidationIssueGroups';
 import './GradebookActions.css';
 
@@ -78,7 +79,7 @@ export default function GradebookActions({
   };
 
   const openExportReview = (scope, event) => {
-    exportTriggerRef.current = event.currentTarget;
+    exportTriggerRef.current = event.currentTarget.closest('details')?.querySelector('summary') || event.currentTarget;
     setExportRequest(scope);
     setExportValidation({ issues: [], loading: false, error: '', checked: false });
     void runExportValidation(scope);
@@ -281,6 +282,7 @@ export default function GradebookActions({
           <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onToggleValidation} title="Run pre-flight validation checklist">
             <span>Validation</span>
           </button>
+          {(isDraftPreviewAvailable(gradebook, userRole) || userRole !== 'admin') && <ActionMenu label="Export" disabled={disabled || isSaving}>
           {isDraftPreviewAvailable(gradebook, userRole) && <button
             type="button"
             className="btn btn-secondary"
@@ -288,7 +290,7 @@ export default function GradebookActions({
             disabled={disabled || isSaving}
             title="Preview this term using saved scores. The clearly marked Draft file will not change the saved record."
           >
-            <span>Export Draft Preview</span>
+            <span>Draft preview</span>
           </button>}
           {userRole !== 'admin' && <button
             type="button" 
@@ -297,7 +299,7 @@ export default function GradebookActions({
             disabled={disabled || isSaving || (!isFinalized && !isLocked)}
             title={(!isFinalized && !isLocked) ? "Gradebook must be Finalized before exporting" : "Export this term"}
           >
-            <span>Export Term {gradebook?.term_order}</span>
+            <span>Term {gradebook?.term_order}</span>
           </button>}
           {(isRecordsOfficer || userRole === 'teacher') && !gradebook?.is_legacy_readonly && [2, 3].includes(Number(gradebook?.term_order)) && <button
             type="button"
@@ -306,11 +308,12 @@ export default function GradebookActions({
             disabled={disabled || isSaving || (!isFinalized && !isLocked)}
             title={`Export Terms 1 through ${gradebook.term_order} in one file. All included terms must be complete and finalized or locked.`}
           >
-            <span>{Number(gradebook.term_order) === 2 ? 'Export 2 Terms' : 'Export All 3 Terms'}</span>
+            <span>{Number(gradebook.term_order) === 2 ? 'Terms 1–2' : 'Terms 1–3'}</span>
           </button>}
+          </ActionMenu>}
 
           <button type="button" className="btn btn-secondary" disabled={disabled || isSaving} onClick={onOpenAudit} title="View full audit log of all changes">
-            <span>Audit Log</span>
+            <span>View history</span>
           </button>
         </div>
       </div>

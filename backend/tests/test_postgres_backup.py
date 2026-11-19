@@ -95,7 +95,8 @@ class PostgresBackupRoundTripTest(unittest.TestCase):
         with socket.socket() as port_socket:
             port_socket.bind(("127.0.0.1", 0))
             cls.port = port_socket.getsockname()[1]
-        result = subprocess.run([str(initdb), "-D", str(cls.cluster), "-U", "eduscan_test", "--auth=trust", "--no-locale", "--encoding=UTF8"], capture_output=True, timeout=60)
+        result = subprocess.run([str(initdb), "-D", str(cls.cluster), "-U", "eduscan_test", "--auth=trust",
+                                 "--no-locale", "--encoding=UTF8", "--no-sync"], capture_output=True, timeout=300)
         if result.returncode:
             raise RuntimeError("Isolated PostgreSQL initdb failed: " + result.stderr.decode(errors="replace"))
         result = subprocess.run([str(cls.pg_ctl), "-D", str(cls.cluster), "-l", str(cls.log), "-o", f"-h 127.0.0.1 -p {cls.port}", "-w", "start"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)

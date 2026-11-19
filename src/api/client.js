@@ -53,6 +53,12 @@ export const auth = {
   signedIn: () => Boolean(session.user),
   role: () => session.user?.role,
   name: () => session.user?.full_name,
+  displayName: () => session.user?.display_name || session.user?.full_name,
+  updateProfile(profile) {
+    if (session.user?.id !== profile.id) return;
+    setSession({ ...session, user: { ...session.user, display_name: profile.display_name,
+      profile_photo_revision: profile.profile_photo_revision } });
+  },
   provider: () => session.user?.auth_provider || 'password',
   mustChangePassword: () => Boolean(session.user?.must_change_password),
   restore: restoreSession,
@@ -154,7 +160,7 @@ export const api = {
   get,
   post: (path, body, options = {}) => request(path, { ...options, method: 'POST', body: body instanceof FormData ? body : JSON.stringify(body) }),
   put: (path, body) => request(path, { method: 'PUT', body: body instanceof FormData ? body : JSON.stringify(body) }),
-  patch: (path, body) => request(path, { method: 'PATCH', body: JSON.stringify(body) }),
+  patch: (path, body) => request(path, { method: 'PATCH', body: body instanceof FormData ? body : JSON.stringify(body) }),
   delete: (path, body) => request(path, { method: 'DELETE', body: body === undefined ? undefined : JSON.stringify(body) }),
   download: async (path, fallbackName) => {
     const response = await request(path);

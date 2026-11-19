@@ -1,12 +1,14 @@
 param(
     [string]$Action = 'start',
-    [switch]$ShowDatabasePrompt
+    [switch]$ShowDatabasePrompt,
+    [switch]$OpenBrowser,
+    [switch]$Offline
 )
 
 $ErrorActionPreference = 'Stop'
 
-if ($Action -notin @('start', 'restart', 'start-api', 'restart-api')) {
-    Write-Host 'Supported actions: start, restart, start-api, restart-api.' -ForegroundColor Yellow
+if ($Action -notin @('start', 'restart', 'stop', 'start-api', 'restart-api')) {
+    Write-Host 'Supported actions: start, restart, stop, start-api, restart-api.' -ForegroundColor Yellow
     exit 2
 }
 
@@ -15,8 +17,9 @@ $backendRoot = Join-Path $projectRoot 'backend'
 $environmentFile = Join-Path $backendRoot '.env'
 $startScript = Join-Path $PSScriptRoot 'start.ps1'
 $apiPython = Join-Path $backendRoot '.venv\Scripts\python.exe'
+$logDirectory = Join-Path $projectRoot 'logs'
 $apiOnly = $Action -in @('start-api', 'restart-api')
-$ports = if ($apiOnly) { @(8000) } else { @(8000, 5175) }
+. (Join-Path $PSScriptRoot 'eduscan-processes.ps1')
 
 function Test-RemoteDatabaseConfigured {
     $value = [System.Environment]::GetEnvironmentVariable('DATABASE_URL', 'Process')
@@ -51,7 +54,7 @@ function Test-RemoteDatabaseConfigured {
 }
 
 function Confirm-RemoteDatabaseStartup {
-    if (-not (Test-RemoteDatabaseConfigured)) {
+    if ($Offline -or -not (Test-RemoteDatabaseConfigured)) {
         return $true
     }
 
@@ -74,7 +77,9 @@ function Confirm-RemoteDatabaseStartup {
 function Get-ListeningProcessIds {
     param([int]$Port)
 
-    $connections = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
+    try {
+        $connections = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
+    } catch { return }
     return @($connections | Select-Object -ExpandProperty OwningProcess -Unique | Where-Object { $_ -gt 0 })
 }
 
@@ -104,7 +109,9 @@ function Test-EduScanListener {
             return $false
         }
         $basePython = [System.IO.Path]::GetFullPath($basePython.Trim())
-        $matchesCheckoutPython = ($actualPython -ieq $expectedPython) -or ($actualPython -ieq $basePython)
+        $checkoutAppDirectory = '--app-dir\s+"?' + [regex]::Escape($backendRoot) + '(?:"|\s|$)'
+        $matchesCheckoutPython = ($actualPython -ieq $expectedPython) -or
+            (($actualPython -ieq $basePython) -and ($commandLine -match $checkoutAppDirectory))
         return $matchesCheckoutPython -and
             ($commandLine -match '(?i)-m\s+uvicorn\s+app\.main:app') -and
             ($commandLine -match '(?i)--port\s+8000')
@@ -133,69 +140,97 @@ function Test-EduScanListener {
 }
 
 function Stop-EduScanListeners {
+    $ports = @(8000)
+    if (-not $apiOnly) {
+        $ports = @(5175, 8000)
+        foreach ($stateFile in (Get-ChildItem -LiteralPath $logDirectory -Filter 'service-*.json' -File -ErrorAction SilentlyContinue)) {
+            if ($stateFile.BaseName -match '^service-(\d{1,5})$') {
+                $port = [int]$Matches[1]
+                if ($port -notin $ports -and (Get-EduScanProcess -Directory $logDirectory -Port $port)) { $ports += $port }
+            }
+        }
+    }
+
     $owners = @()
     foreach ($port in $ports) {
-        foreach ($ownerId in (Get-ListeningProcessIds -Port $port)) {
+        $record = Get-EduScanProcess -Directory $logDirectory -Port $port
+        if ($record) {
+            $owners += $record.Process
+            continue
+        }
+        $listenerIds = @(Get-ListeningProcessIds -Port $port)
+        if ($listenerIds.Count -eq 0 -and (Test-EduScanPort -Port $port)) {
+            throw "Port $port responds, but this launcher cannot verify the process that owns it. Close it from its original terminal and try again."
+        }
+        foreach ($ownerId in $listenerIds) {
             $process = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $ownerId" -ErrorAction SilentlyContinue
             if (-not (Test-EduScanListener -Port $port -Process $process)) {
                 throw "Port $port is owned by a process that cannot be verified as this EduScan checkout (PID $ownerId). Nothing was stopped."
             }
-            $owners += [pscustomobject]@{ Port = $port; ProcessId = [int]$ownerId }
+            $owners += Get-Process -Id $ownerId -ErrorAction Stop
         }
     }
 
-    $processIds = @($owners | Select-Object -ExpandProperty ProcessId -Unique)
-    if ($processIds.Count -eq 0) {
-        # Some restricted shells can reach a forwarded local service while
-        # denying listener/process enumeration. Never start a second API then.
-        foreach ($port in $ports) {
-            $uri = if ($port -eq 8000) { 'http://127.0.0.1:8000/api/health' } else { 'http://127.0.0.1:5175/' }
-            $reachable = $false
-            try { Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 2 | Out-Null; $reachable = $true }
-            catch { $reachable = $null -ne $_.Exception.Response }
-            if ($reachable) {
-                throw "Port $port responds, but this shell cannot verify its owning EduScan process. Close the existing EduScan instance from its original terminal before restarting."
-            }
-        }
-        Write-Host 'No EduScan listeners are running; starting a fresh instance.'
+    if ($owners.Count -eq 0) {
+        Write-Host 'EduScan is already closed.'
         return
     }
 
-    foreach ($processId in $processIds) {
-        Stop-Process -Id $processId -Force -ErrorAction Stop
+    foreach ($process in ($owners | Sort-Object Id -Unique)) {
+        Stop-EduScanProcess -Process $process
     }
 
     foreach ($port in $ports) {
         $attempt = 0
-        while ((Get-ListeningProcessIds -Port $port).Count -gt 0 -and $attempt -lt 40) {
+        while ($attempt -lt 40 -and (Test-EduScanPort -Port $port)) {
             Start-Sleep -Milliseconds 250
             $attempt++
         }
-        if ((Get-ListeningProcessIds -Port $port).Count -gt 0) {
+        if (Test-EduScanPort -Port $port) {
             throw "Port $port did not become free after stopping EduScan. Check the running process before retrying."
         }
     }
-}
-
-if (-not (Confirm-RemoteDatabaseStartup)) {
-    Write-Host 'Cancelled. No EduScan processes were started or stopped.'
-    exit 0
-}
-
-if ($Action -in @('restart', 'restart-api')) {
-    try {
-        Stop-EduScanListeners
-    } catch {
-        Write-Host $_.Exception.Message -ForegroundColor Red
-        exit 1
-    }
+    Write-Host 'EduScan services stopped.'
 }
 
 try {
-    & $startScript -ApiOnly:$apiOnly
+    if ($Action -eq 'stop') {
+        Stop-EduScanListeners
+        exit 0
+    }
+
+    $webOnly = $false
+    if ($Action -in @('start', 'start-api')) {
+        $runningApi = Get-EduScanProcess -Directory $logDirectory -Port 8000
+        if ($runningApi -and (Test-EduScanPort -Port 8000)) {
+            $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8000/api/health' -TimeoutSec 5
+            if (-not $health.ok) { throw 'The running EduScan API is unhealthy. Choose Restart EduScan.' }
+            if ($runningApi.Offline -ne [bool]$Offline) {
+                throw 'Choose Restart EduScan to switch the running app to the selected database mode.'
+            }
+            if ($apiOnly) {
+                Write-Host 'The EduScan API is already running at http://127.0.0.1:8000/api/health.'
+                exit 0
+            }
+            $runningWeb = Get-EduScanProcess -Directory $logDirectory -Port 5175
+            if ($runningWeb -and (Test-EduScanPort -Port 5175)) {
+                Write-Host 'EduScan is already running at http://127.0.0.1:5175/.'
+                if ($OpenBrowser) { Start-Process 'http://127.0.0.1:5175/' }
+                exit 0
+            }
+            $webOnly = $true
+        }
+    }
+
+    if (-not $webOnly -and -not (Confirm-RemoteDatabaseStartup)) {
+        Write-Host 'Cancelled. No EduScan processes were started or stopped.'
+        exit 0
+    }
+    if ($Action -in @('restart', 'restart-api')) { Stop-EduScanListeners }
+
+    & $startScript -ApiOnly:$apiOnly -WebOnly:$webOnly -Offline:$Offline -OpenBrowser:$OpenBrowser
     exit 0
 } catch {
-    Write-Host 'EduScan did not start.' -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
     exit 1
 }

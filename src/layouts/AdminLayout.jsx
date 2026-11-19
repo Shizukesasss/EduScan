@@ -41,23 +41,6 @@ export default function AdminLayout() {
       end,
     }));
 
-  const notifications = [
-    ...(role === 'admin' || role === 'records_officer' || role === 'privacy_officer'
-      ? [{
-        title: 'Recognition review queue',
-        description: 'Inspect unknown or rejected gate attempts in Attendance.',
-        href: '/dashboard/attendance',
-      }]
-      : []),
-    ...(role === 'admin' || role === 'records_officer'
-      ? [{
-        title: 'SMS delivery reconciliation',
-        description: 'Review queued, delivered, and failed guardian SMS alerts.',
-        href: '/dashboard/setup',
-      }]
-      : []),
-  ];
-
   return (
     <div className="app-container">
       <a className="skip-link" href="#main-content">Skip to main content</a>
@@ -68,8 +51,7 @@ export default function AdminLayout() {
         navAriaLabel="Main"
         items={allowedNavigation}
         showScanner={role === 'admin'}
-        profileHref={role === 'admin' ? '/dashboard/administration?tab=accounts' : '/account/security'}
-        notifications={notifications}
+        showBack
       />
       <main id="main-content" ref={mainRef} className="app-main" tabIndex={-1}><Outlet /></main>
     </div>

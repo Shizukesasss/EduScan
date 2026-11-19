@@ -421,8 +421,8 @@ def rows_for_people_on_days(db: Session, people: list[Person], days: list[date])
                     duty_hours=hours.get((person.id, day))) for person in people] for day in days}
 
 
-def record_gate_match(db: Session, person: Person, distance: float, now: datetime | None = None,
-                      *, identity_matcher: str = 'LBPH') -> dict:
+def record_gate_match(db: Session, person: Person, distance: float | None, now: datetime | None = None,
+                      *, identity_matcher: str = 'LBPH', sync_actor=None, station_id: str | None = None) -> dict:
     now = now or local_now()
     day, clock = now.date(), now.timetz().replace(tzinfo=None)
     blocked = enrollment_block(person, day)
@@ -467,7 +467,6 @@ def record_gate_match(db: Session, person: Person, distance: float, now: datetim
         direction=direction, status=status, recognition_distance=distance, source=f"Gate camera / {identity_matcher}",
     )
     db.add(event)
-    db.commit()
 
     values = {
         "time": now.strftime("%I:%M %p"),
@@ -478,8 +477,19 @@ def record_gate_match(db: Session, person: Person, distance: float, now: datetim
         "classStart": schedule_start.strftime("%I:%M %p") if schedule_start else "not configured",
         "absence_cutoff": closes_at.strftime("%H:%M"), "absenceCutoff": closes_at.strftime("%H:%M"),
     }
-    sms = queue_notice(db, person, event_type, values,
-                       idempotency_key=f"attendance:{event.id}:{event_type}")
+    from . import station_sync
+    pending_sync = bool(sync_actor and station_sync.enabled and db.get_bind().dialect.name == "sqlite")
+    if pending_sync:
+        event.created_at = utc_now
+        station_sync.enqueue(db, "attendance", sync_actor, {
+            "external_id": person.external_id, "lrn": person.lrn, "role": person.role,
+            "date": day.isoformat(), "time": clock.isoformat(), "created_at": utc_now.isoformat(),
+            "direction": direction, "status": status, "distance": distance, "station_id": station_id,
+            "sms_type": event_type, "sms_values": values,
+        }, local_person_id=person.id, operation_id=event.id)
+    sms = None if pending_sync else queue_notice(db, person, event_type, values,
+                                                idempotency_key=f"attendance:{event.id}:{event_type}", commit=False)
+    db.commit()
     return {
         "recorded": True,
         "id": event.id,
@@ -489,6 +499,7 @@ def record_gate_match(db: Session, person: Person, distance: float, now: datetim
         "time": clock.isoformat(timespec="seconds"),
         "sms_status": sms.status if sms else "not-applicable",
         "sms_id": sms.id if sms else None,
+        "pending_sync": pending_sync,
     }
 
 

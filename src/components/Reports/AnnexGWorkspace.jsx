@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, auth } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 import { annexGReportSections, preferredAnnexGYear } from '../../services/annexGSelection';
+import SavedReportActions from './SavedReportActions';
+import ActionMenu from '../Common/ActionMenu';
 import './AnnexGWorkspace.css';
 
 export default function AnnexGWorkspace() {
@@ -308,18 +310,16 @@ export default function AnnexGWorkspace() {
               {learner.placement_verified === false && role === 'teacher' && <p className="muted-small">An administrator must verify this school-year enrollment before comments and official release are available.</p>}
               {learnerReleases.map((item) => <div className="annex-g-release-history" key={item.id}>
                 <span>Released · {item.status} · {new Date(item.created_at).toLocaleString('en-PH')} · {item.generated_by_name}</span>
-                <button type="button" className="btn-link" disabled={Boolean(pendingAction)} onClick={() => runAction(`download-${item.id}`, () => item.filename?.toLowerCase().endsWith('.pdf') ? api.download(`/annex-g/releases/${item.id}`, item.filename) : api.openDocument(`/annex-g/releases/${item.id}`))}>
-                  {pendingAction === `download-${item.id}` ? 'Preparing…' : item.filename?.toLowerCase().endsWith('.pdf') ? 'Download PDF' : 'Open previous report'}
-                </button>
+                <SavedReportActions report={item} disabled={Boolean(pendingAction)}
+                  onPreview={() => api.openDocument(`/annex-g/releases/${item.id}`)}
+                  onDownload={() => api.download(`/annex-g/releases/${item.id}`, item.filename)} />
               </div>)}
             </div>
             <div className="action-row">
-              <button type="button" className="btn-secondary" disabled={Boolean(pendingAction)} onClick={() => runAction(`preview-${learner.enrollment_id}`, () => api.openDocument(draftPdfPath(learner)))}>
-                {pendingAction === `preview-${learner.enrollment_id}` ? 'Preparing PDF…' : 'Preview PDF'}
-              </button>
-              <button type="button" className="btn-secondary" disabled={Boolean(pendingAction)} onClick={() => runAction(`draft-pdf-${learner.enrollment_id}`, () => api.download(draftPdfPath(learner), `Annex-G-DRAFT-${learner.person_id}-Term${selectedTerm}.pdf`))}>
-                {pendingAction === `draft-pdf-${learner.enrollment_id}` ? 'Downloading…' : 'Download draft PDF'}
-              </button>
+              <ActionMenu label="Draft PDF" disabled={Boolean(pendingAction)}>
+                <button type="button" onClick={() => runAction(`preview-${learner.enrollment_id}`, () => api.openDocument(draftPdfPath(learner)))}>Preview</button>
+                <button type="button" onClick={() => runAction(`draft-pdf-${learner.enrollment_id}`, () => api.download(draftPdfPath(learner), `Annex-G-DRAFT-${learner.person_id}-Term${selectedTerm}.pdf`))}>Download</button>
+              </ActionMenu>
               {role === 'teacher' && learner.placement_verified !== false && <button type="button" className="btn-primary" disabled={Boolean(pendingAction) || isCommentSaved} onClick={() => runAction(`comment-${learner.enrollment_id}`, () => saveComment(learner))}>
                 {isCommentSaving ? 'Saving…' : isCommentSaved ? 'SAVED COMMENT' : 'Save term comment'}
               </button>}

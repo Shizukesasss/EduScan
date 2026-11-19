@@ -1,9 +1,10 @@
 import Modal from '../Common/Modal';
+import { ReturnLink } from '../Common/ReturnNavigation';
 import BiometricConsent from './BiometricConsent';
 import EnrollmentFields from './EnrollmentFields';
 import PhoneNumberField from './PhoneNumberField';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { api, captureVideoFrame, enrollmentCapture } from '../../api/client';
+import { api, auth, captureVideoFrame, enrollmentCapture } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 import { normalizeGradeName } from '../../services/academicContext';
 import { buildEnrollmentFeedback } from '../../services/enrollmentFeedback';
@@ -24,6 +25,18 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
   const [saving, setSaving] = useState(false);
   const [assistedRegistration, setAssistedRegistration] = useState(false);
   const [enrollmentError, setEnrollmentError] = useState(null);
+  const [cameraNotice, setCameraNotice] = useState('');
+  const cameraNoticeTimeout = useRef(null);
+  const [lrnError, setLrnError] = useState('');
+  useEffect(() => () => window.clearTimeout(cameraNoticeTimeout.current), []);
+  const showCameraNotice = (message) => {
+    if (cameraNoticeTimeout.current !== null) return;
+    setCameraNotice(message);
+    cameraNoticeTimeout.current = window.setTimeout(() => {
+      setCameraNotice('');
+      cameraNoticeTimeout.current = null;
+    }, 3000);
+  };
   const { showSuccess, showError } = useToast();
   const [personId, setPersonId] = useState(person?.person_id || null);
   const [academicStructure, setAcademicStructure] = useState({ grade_levels: [], sections: [] });
@@ -98,7 +111,10 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
       return showError('Enter names using letters and common name punctuation only. Numbers and other symbols are not allowed.');
     }
     if (!assistedRegistration && !(isExistingPerson ? person.biometric_consent : form.biometric_consent)) return showError('Confirm the documented consent/authorization before biometric enrollment.');
-    if (!isExistingPerson && form.role === 'Student' && !form.lrn.trim()) return showError('Enter the student LRN.');
+    if (!isExistingPerson && form.role === 'Student' && !/^[0-9]{12}$/.test(form.lrn)) {
+      setLrnError('LRN must contain exactly 12 digits (0–9).');
+      return;
+    }
     if (!isExistingPerson && form.role === 'Student' && !form.date_of_birth) return showError('Enter the student’s date of birth.');
     if (!isExistingPerson && form.role !== 'Student' && !form.external_id.trim()) return showError('Enter the employee ID.');
     if (missingStudentPlacement) return showError('Choose the school year, active grade and section, and enrollment start date before enrolling this student.');
@@ -134,14 +150,18 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
       const feedback = buildEnrollmentFeedback(err, isReplacement);
       if (!personId && !assistedRegistration) feedback.note = 'New school records are saved only after face enrollment succeeds.';
       setEnrollmentError(feedback);
-      showError(feedback.message);
+      if (err.code === 'invalid_lrn') setLrnError(err.message);
+      else if (!assistedRegistration && (err.status === 409 || err.status === 422)) {
+        const duplicate = ['duplicate_face', 'possible_duplicate_face'].includes(err.code) || /already (registered|enrolled)/i.test(err.message);
+        showCameraNotice(duplicate ? 'This person is already enrolled.' : 'Center your face in the camera and try again.');
+      } else showError(feedback.message);
     }
     finally { setSaving(false); }
   };
 
   return (
     <Modal onClose={onClose} label="Facial enrollment" busy={saving || isCapturing}><div className="modal-card enrollment-modal">
-      <div className="modal-header"><div><p className="eyebrow">{assistedRegistration ? 'School record' : 'Encrypted local dataset'}</p><h2> {assistedRegistration ? 'Register for staff-assisted attendance' : isReplacement ? 'Replace facial enrollment' : isExistingPerson ? 'Enroll face for registered person' : 'Enroll person & train LBPH'}</h2></div><button onClick={onClose} className="text-control"><span className="control-label">Close</span></button></div>
+      <div className="modal-header"><div><p className="eyebrow">{assistedRegistration ? 'School record' : 'Encrypted local dataset'}</p><h2> {assistedRegistration ? 'Register for staff-assisted attendance' : isReplacement ? 'Update enrollment' : isExistingPerson ? 'Enroll face' : 'Register person'}</h2></div><button onClick={onClose} className="text-control"><span className="control-label">Close</span></button></div>
       <p className="section-copy">Enrollment saves face samples and trains the model. It does not record Time In or Time Out. Start gate recognition separately to record attendance.</p>
       {!isExistingPerson && <label className="checkbox-field"><input type="checkbox" checked={assistedRegistration} disabled={saving || isCapturing} onChange={(event) => {
         setAssistedRegistration(event.target.checked);
@@ -158,7 +178,10 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
           {isReplacement && <label><span className="field-label">Required re-enrollment reason</span><textarea className="text-area" placeholder="Example: Appearance changed and recognition accuracy was verified as poor" value={changeReason} onChange={(event) => setChangeReason(event.target.value)} /></label>}
         </div> : <div className="form-grid two-columns enrollment-fields">
           {form.role === 'Student'
-            ? <label><span className="field-label">LRN</span><input placeholder="e.g. 123456789012" className="input-field" value={form.lrn} onChange={(e) => patch('lrn', e.target.value)} required /></label>
+            ? <label><span className="field-label">LRN</span><input placeholder="e.g. 123456789012" className="input-field" inputMode="numeric" value={form.lrn}
+                aria-invalid={Boolean(lrnError)} aria-describedby={lrnError ? 'scanner-lrn-error' : undefined}
+                onChange={(e) => { patch('lrn', e.target.value); setLrnError(''); }} required />
+                {lrnError && <span id="scanner-lrn-error" className="input-error" role="alert">{lrnError}</span>}</label>
             : <label><span className="field-label">Employee ID</span><input placeholder="e.g. EMP-001" className="input-field" value={form.external_id} onChange={(e) => patch('external_id', e.target.value)} required /></label>}
           <label><span className="field-label">Role</span><select className="input-field" value={form.role} onChange={(e) => patch('role', e.target.value)}><option>Student</option><option>Faculty</option><option>Non-teaching Personnel</option></select></label>
           <label><span className="field-label">Last name</span><input placeholder="e.g. Dela Cruz" className="input-field" pattern={personNamePattern} title="Use letters and common name punctuation only." value={form.surname} onChange={(e) => patch('surname', e.target.value)} required /></label>
@@ -182,11 +205,13 @@ export default function StudentRegistrationModal({ onClose, onSaved, person = nu
         </div>}
         <div className="enrollment-camera">
           {assistedRegistration ? <div className="notice notice-blue"><div><strong>Camera-free registration</strong><p>For anyone who cannot complete face capture or blinking, including people with facial differences. Save their school record here, then use Attendance → Assist to verify their school ID or roster and record an attended visit. No face samples, medical details, or attendance are saved by this option.</p></div></div> : <>
-          <div className="enrollment-video"><video ref={videoRef} playsInline muted />{!cameraOn && <><span className="camera-placeholder-label">Camera is off</span></>}{isCapturing && <div className="capture-indicator">CAPTURING</div>}{frames.length === targetFrames && !isCapturing && <><span className="capture-complete">Captured</span></>}</div>
+          <div className="enrollment-video"><video ref={videoRef} playsInline muted />{!cameraOn && <span className="camera-placeholder-label">Camera is off</span>}{isCapturing && <div className="capture-indicator">CAPTURING</div>}{frames.length === targetFrames && !isCapturing && <span className="capture-complete">Captured</span>}{cameraNotice && <div className="enrollment-camera-notice" role="alert">{cameraNotice}</div>}</div>
           <div><div className="scan-log-top"><strong>Camera frames</strong><span>{frames.length}/{targetFrames}</span></div><div className="weight-meter weight-valid"><span style={{ width: `${frames.length / targetFrames * 100}%` }} /></div><p className="muted-small">Human faces only. Keep one person in view with both eyes, nose, and mouth visible. Capture this person's own face; each face belongs to one enrolled identity. Face forward and move slowly while frames are captured.</p></div>
           {enrollmentError && <div className="notice notice-warning" role="alert"><div><strong>{enrollmentError.title}</strong><p>{enrollmentError.message}</p><p className="muted-small">{enrollmentError.note}</p>{enrollmentError.reasons.length > 0 && <details><summary>Capture details</summary><ul>{enrollmentError.reasons.slice(0, 3).map(reason => <li key={reason}>{reason}</li>)}</ul></details>}</div></div>}
           {!cameraOn ? <button className="btn-primary" onClick={startCamera}> Enable camera</button> : <button className="btn-secondary" onClick={captureDataset} disabled={isCapturing || saving}>{isCapturing ? 'Capturing real frames…' : 'Capture enrollment frames'}</button>}
-          <p className="muted-small">Unable to complete camera verification? Authorized staff can use <a href="/dashboard/attendance">Attendance → Assist</a> after checking the person's school ID or official roster. No medical details are needed.</p>
+          <p className="muted-small">Unable to complete camera verification? {auth.role() === 'admin'
+            ? <>Use <ReturnLink to="/dashboard/attendance">Attendance → Assist</ReturnLink></>
+            : 'Ask an administrator to record an assisted visit'} after checking the person's school ID or official roster. No medical details are needed.</p>
           </>}
         </div>
       </div>

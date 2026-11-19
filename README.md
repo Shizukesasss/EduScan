@@ -2,35 +2,32 @@
 
 EduScan is the local-first attendance, SMS, grading, and SF2 reporting system for San Jose National High School. The browser captures camera frames; the local EduScan API compares faces with SFace references, maintains an LBPH model for diagnostics, and checks liveness. Camera frames are not sent to a cloud recognition provider.
 
-## Clone and run on another Windows computer
+## Quick start on Windows
 
-Install Git, **Python 3.12**, and **Node.js 22.12+** (or 20.19+), then run these commands in PowerShell:
+Install [Git](https://git-scm.com/download/win), [Python 3.12](https://www.python.org/downloads/windows/), and [Node.js 22.12 or newer](https://nodejs.org/en/download). Keep your internet connection available while setup downloads dependencies. Then run the following in PowerShell.
 
 ```powershell
 git clone https://github.com/Shizukesasss/EduScan.git
 Set-Location .\EduScan
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-.\scripts\setup.ps1
-.\scripts\eduscan.ps1 start
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 ```
 
-Open `http://127.0.0.1:5175`. The API health endpoint is `http://127.0.0.1:8000/api/health`. To restart both services in PowerShell, run `.\scripts\eduscan.ps1 restart`. In Command Prompt, use `scripts\eduscan.cmd start` or `scripts\eduscan.cmd restart`. Both launchers ask before applying migrations and seed data to a configured remote database.
+Double-click `Start EduScan.cmd` and click **Start EduScan**. The launcher also has **Restart EduScan**, **Close EduScan**, and **Start API Server**. After installation, the launcher runs independently of Codex.
 
-For development, run `npm run dev` after setup. It starts the API on port 8000 and Vite together, then opens `http://127.0.0.1:5173` in your default browser once both are ready. Press Ctrl+C to stop both services. Startup logs are in `logs/`.
+Open the app at [http://127.0.0.1:5175](http://127.0.0.1:5175). On a fresh local demo, sign in as `admin` with `admin123` and set a new password when prompted. The demo also includes `teacher` / `teacher123` and `scanner` / `scanner123`. Use a webcam for enrollment and gate recognition.
 
-`setup.ps1` creates a Python virtual environment, installs pinned packages from `backend/requirements.txt`, runs `npm ci` from `package-lock.json`, creates `backend/.env` from the example, and seeds a local SQLite demo database when appropriate. It now stops if a dependency installation or local seed fails. The repository includes the official class-record workbooks, an SF2 template, and the public YuNet, SFace, and anti-spoof ONNX files. Node packages and Python wheels are installed during setup rather than committed to Git. PostgreSQL/MySQL servers, a webcam, and an Android SMS gateway are external services or devices; configure them as needed. See [the full installation guide](docs/INSTALLATION.md).
+### Choose your installation
 
-Dependencies installed or supplied outside Git:
+| Use case | What to do |
+| --- | --- |
+| Local demo on one PC | Keep **Configured database** in the launcher. The fresh setup uses SQLite and bundles the report templates and public recognition models. |
+| Offline gate station | Select **Offline (local SQLite)** and restart. This profile has its own database. To sync records and punches, configure the school connection and certificate first. [Managed offline station](docs/INSTALLATION.md#managed-offline-station) |
+| Existing school installation | Configure the school's restricted database login in `backend/.env` and use the matching encrypted backup for the school's face samples, trained model, and keys. [PostgreSQL / Supabase setup](docs/POSTGRESQL_SETUP.md) · [Backup and recovery](docs/DISASTER_RECOVERY.md) |
+| Hosted installation | Build the Vite frontend on Vercel with `VITE_API_URL` pointing to the persistent FastAPI host. [Vercel and persistent API setup](docs/INSTALLATION.md#vercel-frontend-and-persistent-api) |
 
-| Part | Requirement | Where to find exact versions or setup |
-| --- | --- | --- |
-| Web app | React, React DOM, React Router, Lucide; Vite, React plugin, Oxlint for building | `package.json` and locked `package-lock.json`; installed by `npm ci` |
-| API | FastAPI, Uvicorn, SQLAlchemy, PyMySQL, psycopg2, python-multipart, OpenCV, NumPy, Cryptography, HTTPX, openpyxl, Pillow | Pinned `backend/requirements.txt`; installed by `setup.ps1` |
-| Tests | pytest | Optional `backend/requirements-dev.txt` |
-| Devices and services | Webcam; SQLite locally or a configured PostgreSQL/MySQL server; optional Android SMS Gateway phone | `backend/.env.example` and the installation guides |
-| Database recovery | PostgreSQL client/server tools or MySQL client tools, matching the configured database | [Recovery guide](docs/POSTGRES_RECOVERY.md) and [disaster recovery guide](docs/DISASTER_RECOVERY.md) |
+If the app fails to open, check the [local API health endpoint](http://127.0.0.1:8000/api/health) and the `logs/` folder. For terminal controls, run `scripts\eduscan.cmd start` or `scripts\eduscan.cmd restart`. For development, `npm run dev` runs the API and Vite in the foreground on ports 8000 and 5173.
 
-**A clone contains code and bundled public resources, not the current school's private data.** `backend/.env`, the database password, biometric samples, the trained LBPH model, the Fernet encryption key, the application secret, and generated reports are excluded. A new local setup starts with its own database and must enroll authorized people to train its model. To preserve an existing school's enrollment and attendance, an authorized administrator must restore a matching encrypted EduScan backup containing the database, face files, model, and keys through [backup and recovery](docs/DISASTER_RECOVERY.md). Pointing another installation at the same Supabase database alone does not transfer its local biometric files or key. Keep those artifacts in approved private storage, never Git.
+School records, biometric samples, trained models, generated reports, credentials, and encryption keys belong in the school's private installation and backups. Keep them out of Git.
 
 ## Documentation
 
@@ -82,55 +79,22 @@ Dependencies installed or supplied outside Git:
 - Real temporary attendance XLSX and official SF2 XLSX generation using the supplied template and sex-specific row blocks
 - Operational attendance, enrollment, SMS gateway, and personnel schedule controls under System Setup
 
-## Install
-
-Requirements: Windows, Python 3.12, Node.js 22.12+ or 20.19+ with npm, a webcam, and optionally PostgreSQL/MySQL plus a dedicated Android phone for SMS.
-
-From PowerShell in the project directory:
+### Optional custom SF2 template
 
 ```powershell
-.\scripts\setup.ps1 -Sf2Template "C:\path\to\School Form 2 (SF2) Daily Attendance Report of Learners.xlsx"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -Sf2Template "C:\path\to\School Form 2 (SF2) Daily Attendance Report of Learners.xlsx"
 ```
-
-For a fresh clone and future `git pull` instructions, read [docs/INSTALLATION.md](docs/INSTALLATION.md). On a Windows policy that blocks local scripts, first run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force`; this temporary setting ends with the PowerShell process.
-
-The setup creates `backend/.venv`, installs the backend and frontend dependencies, creates `backend/.env`, and optionally copies the official SF2 workbook.
-
-Review `backend/.env` before deployment, keep the generated encryption and application-secret files backed up securely, set allowed origins, and configure SQLite, MySQL, or PostgreSQL/Supabase. If `EDUSCAN_SECRET_KEY` is not supplied, EduScan creates a unique ignored `backend/data/.app_secret` instead of using a shared development secret. Example MySQL URL:
-
-```text
-DATABASE_URL=mysql+pymysql://eduscan:strong-password@127.0.0.1:3306/eduscan?charset=utf8mb4
-```
-
-Create the MySQL database and restricted application account first. After completing MySQL Configurator, close EduScan and run `.\scripts\configure-eduscan-mysql.ps1` for a securely prompted, backed-up, row-count-verified cutover. Versioned startup migrations record every applied schema revision in `schema_migrations`. SQLite creates `backend/data/eduscan.db` automatically and is suitable for one local capstone gate station.
-
-## Run
-
-```powershell
-.\scripts\start.ps1
-```
-
-- Web application: `http://127.0.0.1:5175`
-- API health: `http://127.0.0.1:8000/api/health`
-- API documentation: `http://127.0.0.1:8000/docs`
-- Logs: `logs/`
-
-Initial local accounts are bootstrap credentials only. On the first login after the security migration, EduScan requires each owner to replace the password with at least 12 characters containing uppercase, lowercase, a number, and a symbol:
-
-- Administrator: `admin` / `admin123`
-- Teacher: `teacher` / `teacher123`
-- Gate scanner: `scanner` / `scanner123`
 
 ## First-use sequence
 
 1. Log in as administrator.
 2. In System Setup, create each grade/section class schedule and each applicable faculty/non-teaching duty schedule, then set the late grace periods.
-3. In System Setup > Android SMS, enter the phone gateway URL/credentials, save, and send a test message.
-4. Open Gate Station > Enroll person. Enter the official identity/roster fields, confirm the documented authorization, capture 20 frames, and save/train.
+3. If the school uses SMS, open **System Setup → SMS delivery → Gateway settings**, enter the phone gateway URL and credentials, save, and send a test message.
+4. Open **Gate Station → Station actions → Register person**. Enter the school record, confirm the documented authorization, and follow the camera prompts.
 5. Enroll every authorized student/personnel member. The model is retrained after each enrollment.
 6. Log in with the scanner account on the secured gate laptop, enable the camera, and start recognition. The accepted events alternate automatically between time-in and time-out.
 7. Review Attendance and make corrections with reasons. The server closes absences automatically at the authorized cutoff; administrators can run the same controlled action manually for operational recovery.
-8. Upload the official SF2 template in Reports if it was not supplied during setup, then generate and verify the monthly workbook.
+8. In **Reports → Monthly SF2**, generate the monthly workbook using the bundled or school-supplied template. To compare a saved PDF with a submitted copy, open **Reports → Report history** and select **Verify PDF** beside the original.
 9. Open Administration for accounts, school records, school-year and class setup, activity audit, data management, and backup and recovery according to your role. People & records can create a school record without camera enrollment. Review recognition issues in Attendance, service health in Overview, and SMS delivery and face controls in System Setup.
 
 ### Recognition check before a large school test
@@ -146,8 +110,6 @@ npm run verify
 
 For the automated suites, install the optional test runner (`.\backend\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt`), then run `node --test` and `.\backend\.venv\Scripts\python.exe -m pytest backend\tests`. The backend tests use isolated test databases; physical camera recognition, SMS delivery, and backup restoration still require a controlled device and recovery drill.
 
-Formal acceptance, device-volume, spoof-resistance, security, recovery-drill, and end-user evaluation phases are intentionally scheduled later. Camera hardware and actual Android SMS delivery require their real devices; a successful Local Server test message confirms the configured route but does not replace delivery monitoring.
-
 The tested recovery runbook is in `docs/DISASTER_RECOVERY.md`. Its isolated verification command is:
 
 ```powershell
@@ -162,7 +124,7 @@ Use [SMS Gateway for Android](https://github.com/capcom6/android-sms-gateway) in
 
 Each enrollment frame must contain exactly one clear human face. A bundled OpenCV YuNet detector checks facial landmark geometry and agreement with the LBPH crop before the frame can be saved. Missing or damaged detector files block enrollment. Animals, objects, and unverified frames are rejected by the enrollment checks; camera validation is required because face detection is probabilistic and is not a guarantee against every false positive or photo/video spoof.
 
-Enrollment checks incoming frames against other authorized facial enrollments before saving samples or retraining the gate model. Exact duplicate crops, or a consistent LBPH match confirmed by face-crop structure across most accepted frames, are rejected with the existing person's identity. Re-enrollment excludes that person's own samples, while still rejecting a match to somebody else. Missing or unreadable existing samples must be restored before enrollment can continue. PostgreSQL enrollment transactions are serialized to prevent simultaneous requests from bypassing this check. These are similarity checks, not a guarantee of unique real-world identity; verify them with authorized camera captures under the station's lighting. Existing duplicate enrollments require separate review and are not deleted automatically.
+Enrollment rejects exact duplicate crops and repeated SFace matches against other authorized enrollments. Re-enrollment excludes that person's own samples from the duplicate check. The station can enroll people when older sample files are missing, and it records which enrollments could not be checked. Unreadable files or failed integrity checks block the operation. PostgreSQL enrollment transactions are serialized so simultaneous requests use the same duplicate check. Verify identities with authorized camera captures under the station's lighting. Previously recorded duplicate enrollments require separate review.
 
 LBPH does not produce a reusable single face vector suitable for a document column. EduScan stores quality-checked grayscale face crops as individually Fernet-encrypted files under `backend/data/biometrics`, and stores paths, hashes, consent state, and model metadata in SQL. The trained LBPH YAML is also Fernet-encrypted under `backend/data/models` and is decrypted only to a short-lived local file while OpenCV loads it. This keeps structured records in SQL while treating biometric artifacts as encrypted files. Back up `backend/data/.encryption_key` securely; losing it makes the samples and models unreadable.
 

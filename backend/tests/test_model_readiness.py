@@ -2,13 +2,15 @@
 from pathlib import Path
 import hashlib
 import unittest
+from unittest.mock import patch
 from cryptography.fernet import Fernet
+from fastapi import BackgroundTasks
 import numpy as np
 from sqlalchemy import select
 
 from tests import test_duplicate_enrollment as helpers
-from app.models import BiometricModel
-from app.main import biometric_enrollments
+from app.models import AttendanceEvent, BiometricModel
+from app.main import biometric_enrollments, process_gate_frames
 
 
 class ModelReadinessTest(unittest.TestCase):
@@ -34,14 +36,44 @@ class ModelReadinessTest(unittest.TestCase):
         self.assertFalse(result['available'])
         self.assertEqual(result['code'], 'model_not_trained')
 
-    def test_active_record_without_file_is_unavailable(self):
+    def test_missing_lbph_file_allows_sface_with_verified_local_samples(self):
         model = self.trained_model()
         Path(model.file_path).unlink()
-        # A cached recognizer must not conceal a missing encrypted model file.
+        result = self.service.model_readiness(self.db)
+        self.assertTrue(result['available'])
+        self.assertEqual(result['code'], 'ready_without_lbph_model')
+        faces = helpers.face_set()
+        with patch('app.main.biometric_service', self.service), \
+             patch.object(self.service, 'process_faces', side_effect=[[faces[0]], [faces[6]], [faces[7]]]):
+            response = process_gate_frames(BackgroundTasks(), [b'open', b'blink', b'open'],
+                                           'sface-without-lbph', self.db)
+        match = response['results'][0]
+        self.assertTrue(match['liveness_verified'])
+        self.assertIsNone(match['distance'])
+        self.assertTrue(match['attendance_event']['recorded'])
+        attendance = self.db.scalar(select(AttendanceEvent))
+        self.assertEqual(attendance.source, 'Gate camera / SFace')
+        self.assertIsNone(attendance.recognition_distance)
+        self.assertTrue(model.active)
+
+    def test_missing_lbph_file_and_samples_are_unavailable(self):
+        model = self.trained_model()
+        Path(model.file_path).unlink()
+        for sample in self.fixture.samples(self.fixture.first):
+            Path(sample.encrypted_path).unlink()
         result = self.service.model_readiness(self.db)
         self.assertFalse(result['available'])
         self.assertEqual(result['code'], 'model_file_missing')
         self.assertTrue(model.active)
+
+    def test_verified_local_samples_are_ready_without_an_active_lbph_model(self):
+        model = self.trained_model()
+        model.active = False
+        self.db.commit()
+
+        result = self.service.model_readiness(self.db)
+        self.assertTrue(result['available'])
+        self.assertEqual(result['code'], 'ready_without_lbph_model')
 
     def test_copied_model_resolves_without_rewriting_shared_metadata(self):
         model = self.trained_model()

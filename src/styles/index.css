@@ -813,6 +813,23 @@ button:disabled {
   min-width: 190px;
 }
 
+.saved-report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.report-verification-value,
+.report-verification-hashes dd {
+  overflow-wrap: anywhere;
+}
+
+.report-verification-hashes dt { font-weight: 600; }
+.report-verification-hashes dd { margin: 4px 0 12px; }
+
+.workspace-back { margin-bottom: 12px; }
+
 /* Fix dropdown clipping in tables: open upwards for the last two rows */
 .interactive-table tbody tr:nth-last-child(1):not(:first-child) .action-menu-panel,
 .interactive-table tbody tr:nth-last-child(2):not(:first-child) .action-menu-panel {
@@ -1331,9 +1348,10 @@ button:disabled {
 }
 
 .multi-face-guide {
+  --scanner-state-color: #dc2626;
   position: absolute;
   inset: 5%;
-  border: 2px dashed rgba(52, 211, 153, .92);
+  border: 2px dashed var(--scanner-state-color);
   border-radius: 22px;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .14);
   pointer-events: none;
@@ -1345,7 +1363,7 @@ button:disabled {
   position: absolute;
   width: 44px;
   height: 44px;
-  border-color: #34d399;
+  border-color: var(--scanner-state-color);
   border-style: solid;
 }
 
@@ -1478,6 +1496,37 @@ button:disabled {
 .account-security-card h1 {
   margin: 0;
   font-size: 26px;
+}
+
+.account-security-actions {
+  margin-bottom: 24px;
+}
+
+.account-security-back {
+  margin-bottom: 16px;
+}
+
+.account-credential-form h2 {
+  margin-top: 0;
+}
+
+.profile-avatar {
+  border-radius: 50%;
+  overflow: hidden;
+}
+
+.profile-avatar img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.teacher-profile-avatar {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
 }
 
 .account-recovery-email {
@@ -8317,6 +8366,34 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  max-height: min(420px, 65vh);
+  overflow-y: auto;
+}
+
+.header-notif__entry + .header-notif__entry {
+  border-top: 1px solid var(--border-color);
+}
+
+.header-notif__entry.is-unread {
+  background: var(--surface-muted);
+}
+
+.header-notif__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 0 10px 8px;
+  font-size: 12px;
+}
+
+.header-notif__item time,
+.header-notif__message {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.header-notif__message {
+  padding: 8px 10px;
 }
 
 .header-notif__item {
@@ -9728,10 +9805,6 @@ button.scanner-status-chip:focus-visible {
   transition: box-shadow var(--motion-base) var(--ease-standard), border-color var(--motion-base) var(--ease-standard);
 }
 
-.camera-placeholder.live-camera.is-scanning {
-  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.35), 0 12px 32px rgba(15, 23, 42, 0.12);
-}
-
 .camera-hud-top {
   position: absolute;
   top: 16px;
@@ -10270,6 +10343,7 @@ button.scanner-status-chip:focus-visible {
   }
 
   .scanner-header__actions > .scanner-action-btn,
+  .scanner-header__actions > .action-menu,
   .scanner-header__actions > .scanner-user-menu {
     display: none;
   }
@@ -11828,4 +11902,30 @@ button.stat-card,
   .admin-gradebook-record:hover {
     transform: none !important;
   }
+}
+
+.gate-privacy-notice p { margin: 0.25rem 0 0; }
+
+.scan-feedback__person-chip[data-frame-state] {
+  --scanner-state-color: #dc2626;
+  border-color: var(--scanner-state-color);
+}
+
+.multi-face-guide[data-recognition-state="pending"],
+[data-frame-state="pending"].scan-feedback__person-chip { --scanner-state-color: #d4a017; }
+.multi-face-guide[data-recognition-state="saved"],
+[data-frame-state="saved"].scan-feedback__person-chip { --scanner-state-color: #16803c; }
+
+.enrollment-camera-notice {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  padding: 1rem;
+  background: rgb(15 23 42 / 82%);
+  color: #fff;
+  text-align: center;
+  font-weight: 700;
+  pointer-events: none;
+  z-index: 2;
 }

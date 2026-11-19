@@ -36,6 +36,22 @@ test('requests use browser credentials and the EduScan header', async () => {
   } finally { globalThis.fetch = previousFetch; globalThis.localStorage = previousStorage; }
 });
 
+test('saving a profile keeps the picture in the multipart PATCH request', async () => {
+  const previousFetch = globalThis.fetch;
+  const form = new FormData();
+  form.set('display_name', 'María Santos');
+  form.set('picture', new Blob(['test portrait'], { type: 'image/png' }), 'portrait.png');
+  globalThis.fetch = async (url, request) => {
+    assert.match(url, /\/account\/profile$/);
+    assert.equal(request.method, 'PATCH');
+    assert.equal(request.body, form);
+    assert.equal(request.headers.has('Content-Type'), false);
+    return Response.json({ saved: true });
+  };
+  try { assert.deepEqual(await api.patch('/account/profile', form), { saved: true }); }
+  finally { globalThis.fetch = previousFetch; }
+});
+
 test('concurrent identical GETs share one request and subsequent refreshes fetch again', async () => {
   const previousFetch = globalThis.fetch;
   const previousStorage = globalThis.localStorage;

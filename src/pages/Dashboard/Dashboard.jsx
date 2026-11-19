@@ -2,13 +2,13 @@ import PaginatedBody from '../../components/Common/PaginatedBody';
 import { SkeletonBar, SkeletonRows } from '../../components/Common/Skeleton';
 import useSlowLoading from '../../hooks/useSlowLoading';
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { ReturnLink } from '../../components/Common/ReturnNavigation';
 import { api, displayTime, localDate } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
+import { smsDeliveryLink } from '../../services/smsDelivery';
 import './Dashboard.css';
 
 export default function Dashboard() {
-  const navigate = useNavigate();
   const [data, setData] = useState({ rows: [], events: [], sms: {} });
   const [snapshot, setSnapshot] = useState({ loading: true, error: '', updatedAt: null });
   const { showError } = useToast();
@@ -72,9 +72,9 @@ export default function Dashboard() {
               : <>Updated <time dateTime={snapshot.updatedAt.toISOString()}>{snapshot.updatedAt.toLocaleTimeString('en-PH')}</time> · Refreshes every 15 seconds</>}
           </span>
         </p>
-        <button className="btn-primary" type="button" onClick={() => navigate('/scanner')}>
+        <ReturnLink className="btn-primary" to="/scanner">
            Open gate station
-        </button>
+        </ReturnLink>
       </div>
     </div>
 
@@ -92,11 +92,11 @@ export default function Dashboard() {
         <dd>{value(personnelIn)} <span className="admin-overview__denominator">/ {value(personnel.length)}</span></dd>
       </div>
       <div className="admin-overview__stat admin-overview__stat-sms">
-        <dt>SMS delivery today</dt>
+        <dt>SMS delivery</dt>
         <dd>
-          <span className="is-delivered"><strong>{value(sms.delivered || 0)}</strong><small>Delivered</small></span>
-          <span><strong>{value(smsAccepted)}</strong><small>Accepted</small></span>
-          <span className="is-failed"><strong>{value(smsFailed)}</strong><small>Failed</small></span>
+          <span className="is-delivered"><strong>{value(sms.delivered || 0)}</strong><small><ReturnLink to={smsDeliveryLink({ status: 'delivered' })}>Delivered</ReturnLink></small></span>
+          <span><strong>{value(smsAccepted)}</strong><small><ReturnLink to={smsDeliveryLink({ status: 'sent' })}>Accepted</ReturnLink></small></span>
+          <span className="is-failed"><strong>{value(smsFailed)}</strong><small><ReturnLink to={smsDeliveryLink({ status: 'failed' })}>Failed</ReturnLink></small></span>
         </dd>
       </div>
     </dl>
@@ -131,12 +131,12 @@ export default function Dashboard() {
         <section aria-labelledby="admin-overview-sf2-title">
           <h2 id="admin-overview-sf2-title">SF2 generation</h2>
           <p>Generate an official attendance workbook after roster and daily-close validation.</p>
-          <a className="btn-secondary" href="/dashboard/reports">Open SF2 reports</a>
+          <ReturnLink className="btn-secondary" to="/dashboard/reports#monthly-sf2">Open SF2 reports</ReturnLink>
         </section>
         <section aria-labelledby="admin-overview-sms-title">
           <h2 id="admin-overview-sms-title">Android SMS status</h2>
           <p>Queued and failed messages remain visible for authorized retry and reconciliation.</p>
-          <a className="btn-secondary" href="/dashboard/setup">Open system setup</a>
+          <ReturnLink className="btn-secondary" to={smsDeliveryLink()}>View SMS delivery</ReturnLink>
         </section>
         <section className="admin-overview__chart-section" aria-labelledby="admin-overview-chart-title">
           <h2 id="admin-overview-chart-title">Learner attendance today</h2>

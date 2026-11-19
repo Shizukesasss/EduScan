@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import io
 import json
@@ -7,7 +8,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 from pypdf import PdfReader
 from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -172,6 +173,15 @@ class AnnexGPdfApiTests(unittest.TestCase):
             response = main.annex_g_released_file(current.id,self.db,self.teacher)
             self.assertEqual(response.media_type,'application/pdf')
             self.assertEqual(len(list(Path(directory).glob('*.pdf'))),2)
+            copy = UploadFile(io.BytesIO(original), filename='previous-release.pdf')
+            verified = asyncio.run(main.verify_generated_report(old.id, copy, self.db, self.teacher))
+            self.assertEqual(verified['status'], 'match')
+            changed = UploadFile(io.BytesIO(original), filename='wrong-release.pdf')
+            self.assertEqual(asyncio.run(main.verify_generated_report(current.id, changed, self.db, self.teacher))['status'], 'differs')
+            self.admin.role = 'teacher'
+            with self.assertRaises(HTTPException) as denied:
+                asyncio.run(main.verify_generated_report(current.id, copy, self.db, self.admin))
+            self.assertEqual(denied.exception.status_code, 403)
 
     def test_legacy_html_and_tampered_release(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:

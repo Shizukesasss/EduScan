@@ -313,6 +313,17 @@ class AttendanceEvent(Base):
     person: Mapped[Person] = relationship()
 
 
+class StationSyncOperation(Base):
+    __tablename__ = "station_sync_operations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    local_person_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    payload: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(250), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 class AttendanceCorrection(Base):
     __tablename__ = "attendance_corrections"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

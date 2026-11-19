@@ -1,4 +1,5 @@
 import Modal from '../Common/Modal';
+import ActionMenu from '../Common/ActionMenu';
 import PaginatedBody from '../Common/PaginatedBody';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api/client';
@@ -18,6 +19,7 @@ export default function BiometricEnrollmentManager({ onModelChanged }) {
   const [editing, setEditing] = useState(null);
   const [viewing, setViewing] = useState(null);
   const [deleting, setDeleting] = useState(null);
+  const [historyPerson, setHistoryPerson] = useState(null);
 
   const fetchEnrollments = useCallback(() => Promise.allSettled([
     api.get('/biometrics/enrollments'),
@@ -56,9 +58,9 @@ export default function BiometricEnrollmentManager({ onModelChanged }) {
 
   return <div className="page-stack" data-testid="biometric-enrollment-manager">
     <section className="card-static">
-      <div className="section-heading"><div><p className="eyebrow">Encrypted enrollment registry</p><h2>Facial enrollments</h2><p className="section-copy">Create, inspect, replace, or securely delete an enrollment. Source images are never displayed; only operational metadata is shown.</p></div><div className="action-row"><button className="btn-secondary" onClick={load} disabled={loading}> Refresh</button><button className="btn-primary" onClick={() => setCreating(true)}> Enroll person</button></div></div>
+      <div className="section-heading"><div><p className="eyebrow">Encrypted enrollment registry</p><h2>Facial enrollments</h2><p className="section-copy">Create, inspect, replace, or securely delete an enrollment. Source images are never displayed; only operational metadata is shown.</p></div><div className="action-row"><button className="btn-secondary" onClick={load} disabled={loading}> Refresh</button><button className="btn-primary" onClick={() => setCreating(true)}> Register person</button></div></div>
       <div className="notice notice-blue"><span>Every create, re-enrollment, and deletion records the authorized account, timestamp, reason, sample counts, and resulting LBPH model version.</span></div>
-      <p className="section-copy">Registered people without samples have an <strong>Enroll face</strong> button. Use <strong>Re-enroll</strong> to replace an existing person's samples. Capture that person's own face; their school identity is preserved.</p>
+      <p className="section-copy">Registered people without samples have an <strong>Enroll face</strong> button. Use <strong>Update enrollment</strong> to replace an existing person's samples. Capture that person's own face; their school identity is preserved.</p>
       {loadError && <div className="notice notice-danger" role="alert"><span>{loadError} Click Refresh to try loading the enrolled-person list again.</span></div>}
       <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Person</th><th>Group</th><th>Samples</th><th>Quality</th><th>Last capture</th><th>Actions</th></tr></thead><PaginatedBody>
         {!loading && !loadError && enrollments.length === 0 && <tr><td colSpan="6" className="empty-cell">No facial enrollments yet.</td></tr>}
@@ -70,23 +72,25 @@ export default function BiometricEnrollmentManager({ onModelChanged }) {
           <td>{row.average_quality == null ? '—' : `${row.average_quality}%`}</td>
           <td>{formatDateTime(row.last_captured_at)}</td>
           <td><div className="action-row" style={{ flexWrap: 'wrap' }}>
-            <button type="button" className="btn-primary" onClick={() => setEditing(row)} disabled={loading || !row.active} aria-label={`${row.sample_count ? 'Re-enroll' : 'Enroll face for'} ${row.full_name}`}> {row.sample_count ? 'Re-enroll' : 'Enroll face'}</button>
-            <button type="button" className="btn-secondary" onClick={() => viewDetails(row)} disabled={loading || !row.sample_count}> View details</button>
-            <button type="button" className="btn-link danger-link" onClick={() => setDeleting(row)} disabled={loading || !row.sample_count}> Delete enrollment</button>
+            <button type="button" className="btn-primary" onClick={() => setEditing(row)} disabled={loading || !row.active} aria-label={`${row.sample_count ? 'Update enrollment for' : 'Enroll face for'} ${row.full_name}`}> {row.sample_count ? 'Update enrollment' : 'Enroll face'}</button>
+            <ActionMenu label="More actions" table disabled={loading}>
+              <button type="button" onClick={() => setHistoryPerson(row)}>View history</button>
+              {row.sample_count > 0 && <>
+                <button type="button" onClick={() => viewDetails(row)}>View details</button>
+                <button type="button" className="danger-link" onClick={() => setDeleting(row)}>Delete enrollment</button>
+              </>}
+            </ActionMenu>
           </div></td>
         </tr>)}
       </PaginatedBody></table></div>
     </section>
 
-    <section className="card-static">
-      <div className="section-heading"><div><p className="eyebrow">Append-only accountability record</p><h2>Facial enrollment audit log</h2></div></div>
-      {auditError && <div className="notice notice-warning" role="alert"><span>{auditError} The enrolled-person list above is loaded separately.</span></div>}
-      <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Date & time</th><th>Person</th><th>Action</th><th>Authorized actor</th><th>Samples before → after</th><th>Reason</th><th>Resulting model</th></tr></thead><PaginatedBody>
-        {!loading && !auditError && audit.length === 0 && <tr><td colSpan="7" className="empty-cell">No enrollment changes have been recorded yet.</td></tr>}
-        {audit.map((event) => <tr key={event.id}><td>{formatDateTime(event.created_at)}</td><td><strong>{event.person_name}</strong><small className="table-subline">{event.external_id}</small></td><td><span className={`tag ${event.action === 'deleted' ? 'tag-danger' : event.action === 'updated' ? 'tag-warning' : 'tag-success'}`}>{event.action}</span></td><td>{event.actor_name}<small className="table-subline">{event.actor_role}</small></td><td>{event.before.sample_count} → {event.after.sample_count}</td><td>{event.reason}</td><td className="model-version">{event.model_version || 'No active model'}</td></tr>)}
-      </PaginatedBody></table></div>
-    </section>
+    <details className="card-static">
+      <summary>All facial enrollment history</summary>
+      <EnrollmentHistoryTable audit={audit} loading={loading} auditError={auditError} />
+    </details>
 
+    {historyPerson && <PersonEnrollmentHistory person={historyPerson} onClose={() => setHistoryPerson(null)} />}
     {creating && <StudentRegistrationModal onClose={() => setCreating(false)} onSaved={(result) => changed(result.assisted_registration ? 'School record saved for staff-assisted attendance. No face samples were captured.' : 'Facial enrollment created and recorded in the audit log.')} />}
     {editing && <StudentRegistrationModal person={editing} onClose={() => setEditing(null)} onSaved={() => changed('Facial enrollment saved for the existing identity, LBPH trained, and the change audited.')} />}
     {viewing && <EnrollmentDetails enrollment={viewing} onClose={() => setViewing(null)} />}
@@ -96,6 +100,33 @@ export default function BiometricEnrollmentManager({ onModelChanged }) {
       } else await changed(`${result.removed_samples} encrypted samples and ${result.removed_model_records} obsolete model record(s) securely deleted; the non-biometric audit history was retained.`);
     }} />}
   </div>;
+}
+
+function EnrollmentHistoryTable({ audit, loading, auditError }) {
+  if (loading) return <p role="status">Loading enrollment history…</p>;
+  if (auditError) return <p className="notice notice-warning" role="alert">{auditError}</p>;
+  return <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Date & time</th><th>Person</th><th>Action</th><th>Authorized actor</th><th>Samples before → after</th><th>Reason</th><th>Resulting model</th></tr></thead><PaginatedBody columnCount={7}>
+        {audit.length === 0 && <tr><td colSpan="7" className="empty-cell">No enrollment changes have been recorded yet.</td></tr>}
+        {audit.map((event) => <tr key={event.id}><td>{formatDateTime(event.created_at)}</td><td><strong>{event.person_name}</strong><small className="table-subline">{event.external_id}</small></td><td><span className={`tag ${event.action === 'deleted' ? 'tag-danger' : event.action === 'updated' ? 'tag-warning' : 'tag-success'}`}>{event.action}</span></td><td>{event.actor_name}<small className="table-subline">{event.actor_role}</small></td><td>{event.before.sample_count} → {event.after.sample_count}</td><td>{event.reason}</td><td className="model-version">{event.model_version || 'No active model'}</td></tr>)}
+      </PaginatedBody></table></div>;
+}
+
+function PersonEnrollmentHistory({ person, onClose }) {
+  const [request, setRequest] = useState({ loading: true, audit: [], auditError: '' });
+  useEffect(() => {
+    let active = true;
+    api.get('/biometrics/enrollments/audit?' + new URLSearchParams({ person_id: person.person_id }))
+      .then(audit => { if (active) setRequest({ audit, loading: false, auditError: '' }); })
+      .catch(error => { if (active) setRequest({ audit: [], loading: false, auditError: error.message }); });
+    return () => { active = false; };
+  }, [person.person_id]);
+  return <Modal onClose={onClose} label="Enrollment history">
+    <div className="modal-card enrollment-detail-modal">
+      <div className="modal-header"><h2>Enrollment history for {person.full_name}</h2></div>
+      <EnrollmentHistoryTable {...request} />
+      <div className="modal-actions"><button type="button" className="btn-secondary" onClick={onClose}>Close</button></div>
+    </div>
+  </Modal>;
 }
 
 function EnrollmentDetails({ enrollment, onClose }) {

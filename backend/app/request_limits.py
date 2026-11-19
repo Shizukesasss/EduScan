@@ -12,6 +12,8 @@ MAX_CAMERA_UPLOAD_BYTES = 8 * MIB
 MAX_ROSTER_WORKBOOK_BYTES = 15 * MIB
 MAX_SF2_TEMPLATE_BYTES = 20 * MIB
 MAX_BACKUP_ARCHIVE_BYTES = 250 * MIB
+MAX_REPORT_VERIFICATION_BYTES = 50 * MIB
+MAX_PROFILE_PHOTO_BYTES = 5 * MIB
 FORM_OVERHEAD_BYTES = MIB
 
 _FILE_LIMITS = {
@@ -19,6 +21,7 @@ _FILE_LIMITS = {
     "/api/admin/annex-g/enrollments/import": MAX_ROSTER_WORKBOOK_BYTES,
     "/api/admin/annex-g/dobs/import": MAX_ROSTER_WORKBOOK_BYTES,
     "/api/sf2/template": MAX_SF2_TEMPLATE_BYTES,
+    "/api/account/profile": MAX_PROFILE_PHOTO_BYTES,
     "/api/biometrics/register": MAX_CAMERA_UPLOAD_BYTES,
     "/api/biometrics/recognize": MAX_CAMERA_UPLOAD_BYTES,
     "/api/biometrics/recognize-many": MAX_CAMERA_UPLOAD_BYTES,
@@ -38,6 +41,8 @@ def _form_body_limit(scope: Scope, media_type: str) -> int:
     path = path.rstrip("/")
     if _ENROLLMENT_PATH.fullmatch(path):
         return MAX_CAMERA_UPLOAD_BYTES + FORM_OVERHEAD_BYTES
+    if re.fullmatch(r"/api/reports/history/[^/]+/verify", path):
+        return MAX_REPORT_VERIFICATION_BYTES + FORM_OVERHEAD_BYTES
     return _FILE_LIMITS.get(path, 0) + FORM_OVERHEAD_BYTES
 
 

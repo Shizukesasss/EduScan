@@ -1,9 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { api, auth, captureVideoFrame, localDate, enrollmentCapture } from '../../api/client';
+import ActionMenu from '../../components/Common/ActionMenu';
+import AccountAvatar from '../../components/Common/AccountAvatar';
+import { BackButton, ReturnLink } from '../../components/Common/ReturnNavigation';
+import useReturnState from '../../hooks/useReturnState';
+import useProfilePicture from '../../hooks/useProfilePicture';
+import { smsDeliveryLink } from '../../services/smsDelivery';
 import StudentRegistrationModal from '../../components/Scanner/StudentRegistrationModal';
 import { cameraTestMatchMessage, cameraIdentityScore } from '../../services/enrollmentFeedback';
 
 const attendanceLabel = event => event.direction === event.status ? event.direction : `${event.direction} · ${event.status}`;
+const smsLabels = { queued: 'Queued', accepted: 'Accepted by gateway', processed: 'Processing', sent: 'Sent', delivered: 'Delivered', failed: 'Failed', exhausted: 'Failed', held: 'Held', cancelled: 'Cancelled' };
+const faceState = (item) => item.attendance_event?.recorded ? 'saved'
+  : item.recognized && !item.liveness_verified && item.presentation_verified !== false ? 'pending' : 'idle';
+const enrollmentRequired = new Set(['model_not_trained', 'model_file_missing', 'no_local_identity_references']);
 const gateEventTime = value => {
   if (!value) return '—';
   const [hours, minutes, seconds = 0] = value.split(':').map(Number);
@@ -13,7 +24,16 @@ const gateEventTime = value => {
 };
 
 export default function Scanner() {
-  const [previewOnly] = useState(() => new URLSearchParams(window.location.search).get('preview') === '1');
+  const { search, state } = useLocation();
+  const previewOnly = new URLSearchParams(search).get('preview') === '1';
+  if (previewOnly && auth.role() !== 'admin') return <Navigate to="/scanner" replace state={state} />;
+  return <ScannerStation key={String(previewOnly)} previewOnly={previewOnly} />;
+}
+
+function ScannerStation({ previewOnly }) {
+  const navigate = useNavigate();
+  const returnState = useReturnState();
+  const goTo = to => navigate(to, { state: returnState });
   const videoRef = useRef(null);
   const cameraFrameRef = useRef(null);
   const streamRef = useRef(null);
@@ -40,21 +60,46 @@ export default function Scanner() {
   const [stationHealth, setStationHealth] = useState({ api: false, database: false, gateway_enabled: false, gateway_reachable: false, recognition_model: false, attendance_auto_visit_ready: false });
   const [backendReachable, setBackendReachable] = useState(true);
   const [testRuns, setTestRuns] = useState([]);
+  const [retryingSms, setRetryingSms] = useState(null);
+  const [logNotice, setLogNotice] = useState('');
+  const scanResults = scanning && cameraOn ? feedback?.batch || [] : [];
+  const visibleResults = scanResults.filter(item => item.seen_in_latest_frame !== false);
+  const recognitionState = visibleResults.length && visibleResults.every(item => faceState(item) === 'saved') ? 'saved'
+    : visibleResults.some(item => faceState(item) !== 'idle') ? 'pending' : 'idle';
+  const recognitionLabel = recognitionState === 'saved'
+    ? visibleResults.map(({ attendance_event: event }) => `${event.direction} saved${event.pending_sync ? ' offline · Pending sync' : ''}`).join(' · ')
+    : recognitionState === 'pending' ? 'Face detected · Verification pending'
+      : feedback?.ok === false ? feedback.message : 'Waiting for a face';
 
   const refreshLog = useCallback(() => {
     if (previewOnly) return;
     if (logBusyRef.current) return;
     logBusyRef.current = true;
-    return api.get(`/gate/recent?date=${localDate()}`).then(setEvents).catch((err) => setFeedback({ ok: false, message: err.message }))
+    return api.get(`/gate/recent?date=${localDate()}`).then(setEvents).catch((err) => setLogNotice(err.message))
       .finally(() => { logBusyRef.current = false; });
   }, [previewOnly]);
 
-  useEffect(() => { refreshLog(); }, [refreshLog]);
+  useEffect(() => {
+    if (previewOnly) return undefined;
+    refreshLog();
+    const timer = window.setInterval(refreshLog, 10000);
+    return () => window.clearInterval(timer);
+  }, [previewOnly, refreshLog]);
+
+  const retrySms = async (id) => {
+    setRetryingSms(id);
+    try {
+      await api.post('/sms/outbox/' + encodeURIComponent(id) + '/requeue', {});
+      setLogNotice('SMS queued for retry.');
+      await refreshLog();
+    } catch (error) { setLogNotice(error.message); }
+    finally { setRetryingSms(null); }
+  };
   useEffect(() => {
     let mounted = true;
     const check = async () => {
       try {
-        const result = await api.get('/station/health');
+        const result = await api.get('/station/health?include_gateway=false');
         if (mounted) {
           setStationHealth(result); setBackendReachable(true);
           if (result.recognition_model === false && scanningRef.current) {
@@ -128,15 +173,13 @@ export default function Scanner() {
     const generation = scanGenerationRef.current;
     try {
       const form = new FormData();
-      let lastFrame;
       const startedAt = videoRef.current.currentTime;
       // Capture enough closely spaced observations to catch a natural blink,
       // then perform one request instead of a cloud round trip per frame.
-      const frameCount = 40;
+      const frameCount = previewOnly ? 40 : 12;
       for (let index = 0; index < frameCount; index++) {
         if (!scanningRef.current || generation !== scanGenerationRef.current) return;
         const blob = await captureVideoFrame(videoRef.current, 0.9, enrollmentCapture.maxDimension);
-        lastFrame = blob;
         form.append('frames', blob, `gate-${index}.jpg`);
         if (index < frameCount - 1) await new Promise(resolve => window.setTimeout(resolve, 100));
       }
@@ -144,7 +187,6 @@ export default function Scanner() {
         throw new Error('The camera preview is not updating. Reconnect the camera before trying recognition again.');
       }
       if (!previewOnly) {
-        form.append('frame', lastFrame, 'gate.jpg');
         form.append('station_id', stationIdRef.current);
       }
       if (!scanningRef.current || generation !== scanGenerationRef.current) return;
@@ -170,16 +212,21 @@ export default function Scanner() {
         return;
       }
       const recorded = batch.results.filter((item) => item.attendance_event?.recorded);
+      clearTimeout(feedbackTimerRef.current);
       const recognized = batch.results.filter((item) => item.recognized);
       const held = batch.results.filter(item => item.attendance_event?.presence_hold);
       const blocked = batch.results.filter(item => item.presentation_verified === false);
-      setFeedback({ ok: recorded.length > 0 || held.length > 0, batch: batch.results,
+      setFeedback({ ok: recorded.length > 0, batch: batch.results,
         message: (held.length > 0 && recorded.length === 0 ? 'Attendance is already saved for this visit. Leave the camera view before scanning again.'
           : `${batch.face_count} face(s) detected · ${recognized.length} recognized · ${recorded.length} automatic attendance event(s) recorded.`)
           + (blocked.length ? ` ${blocked.length} capture(s) did not pass photo/video protection; use a live face or ask staff for assistance.` : '') });
       if (recorded.length) {
         setEvents(previous => [...recorded.map(item => ({ id: item.attendance_event.id, name: item.person.full_name, role: item.person.role,
-          direction: item.attendance_event.direction, status: item.attendance_event.status, time: item.attendance_event.time })), ...previous].slice(0, 30));
+          direction: item.attendance_event.direction, status: item.attendance_event.status, time: item.attendance_event.time,
+          sms_status: item.attendance_event.sms_status, sms_id: item.attendance_event.sms_id,
+          sync_status: item.attendance_event.pending_sync ? 'pending' : null })),
+          ...previous.filter(event => !recorded.some(item => item.attendance_event.id === event.id))]
+          .sort((a, b) => b.time.localeCompare(a.time) || b.id.localeCompare(a.id)).slice(0, 30));
         void refreshLog();
         clearTimeout(feedbackTimerRef.current);
         feedbackTimerRef.current = window.setTimeout(() => setFeedback(null), 7000);
@@ -188,7 +235,7 @@ export default function Scanner() {
       if (!scanningRef.current || generation !== scanGenerationRef.current) return;
       if (err.status === 429) retryAtRef.current = performance.now() + err.retryAfter * 1000;
       if (err.message.includes('backend is not reachable')) setBackendReachable(false);
-      if (['model_not_trained', 'model_file_missing', 'model_key_mismatch', 'model_integrity_failed', 'model_unreadable', 'presentation_verifier_unavailable', 'identity_verifier_unavailable'].includes(err.code) || err.message.includes('No trained LBPH model is available')) {
+      if (enrollmentRequired.has(err.code) || ['model_key_mismatch', 'model_integrity_failed', 'model_unreadable', 'presentation_verifier_unavailable', 'identity_verifier_unavailable'].includes(err.code) || err.message.includes('No trained LBPH model is available')) {
         clearInterval(timerRef.current); scanningRef.current = false; scanGenerationRef.current += 1; setScanning(false);
       }
       setFeedback({ ok: false, message: err.message });
@@ -280,11 +327,6 @@ export default function Scanner() {
     }
   };
 
-  const handleCameraStatusToggle = () => {
-    if (cameraOn) stopCamera();
-    else void startCamera();
-  };
-
   const [clockNow, setClockNow] = useState(() => new Date());
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [confirmingSignOut, setConfirmingSignOut] = useState(false);
@@ -341,7 +383,7 @@ export default function Scanner() {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       setAccountMenuOpen(true);
-      const targetIndex = event.key === 'ArrowUp' ? 1 : 0;
+      const targetIndex = event.key === 'ArrowUp' ? -1 : 0;
       window.requestAnimationFrame(() => focusAccountItem(targetIndex));
     }
   };
@@ -364,7 +406,8 @@ export default function Scanner() {
     }
   };
 
-  const operatorName = auth.name() || 'Gate Operator';
+  const operatorName = auth.displayName() || 'Gate Operator';
+  const profilePicture = useProfilePicture();
   const operatorInitials = operatorName
     .trim()
     .split(/\s+/)
@@ -373,6 +416,7 @@ export default function Scanner() {
     .map((part) => part[0]?.toUpperCase() || '')
     .join('') || 'G';
   const operatorRoleLabel = auth.role() === 'admin' ? 'Administrator' : 'Gate Station';
+  const needsEnrollment = enrollmentRequired.has(stationHealth.recognition_code);
 
   const today = localDate();
   const formattedStationDate = new Date(`${today}T12:00:00`).toLocaleDateString('en-PH', {
@@ -439,24 +483,10 @@ export default function Scanner() {
             <span className="scanner-header__divider" aria-hidden="true" />
 
             <div className="scanner-status-group" role="status" aria-live="polite">
-              <button
-                type="button"
-                className={`scanner-status-chip ${cameraOn ? 'is-online' : 'is-offline'}`}
-                onClick={handleCameraStatusToggle}
-                title={cameraOn ? 'Click to turn off gate camera' : 'Click to enable gate camera'}
-                aria-label={
-                  cameraOn
-                    ? scanning
-                      ? 'Camera on and scanning — click to turn off camera'
-                      : 'Camera on — click to turn off camera'
-                    : 'Camera off — click to enable camera'
-                }
-              >
+              <span className={`scanner-status-chip is-readonly ${cameraOn ? 'is-online' : 'is-offline'}`}>
                 <span className="scanner-status-chip__dot" aria-hidden="true" />
-                <span className="scanner-status-chip__label">
-                  {cameraOn ? (scanning ? 'Camera scanning' : 'Camera on') : 'Camera off'}
-                </span>
-              </button>
+                <span className="scanner-status-chip__label">{cameraOn ? (scanning ? 'Camera scanning' : 'Camera on') : 'Camera off'}</span>
+              </span>
 
               <span
                 className={`scanner-status-chip is-readonly ${backendReachable ? 'is-online' : 'is-warning'}`}
@@ -476,40 +506,11 @@ export default function Scanner() {
 
           {/* Zone 3: Actions (Right) */}
           <div className="scanner-header__actions">
-            {auth.role() === 'admin' && (
-              <>
-                <button
-                  type="button"
-                  className="btn-secondary scanner-action-btn scanner-action-btn--secondary"
-                  title="Return to Administrator Dashboard"
-                  aria-label="Dashboard"
-                  onClick={() => {
-                    window.location.href = '/dashboard';
-                  }}
-                >
-                  <span className="scanner-action-btn__label">Dashboard</span>
-                </button>
-                <button
-                  type="button"
-                  className="btn-primary scanner-action-btn scanner-action-btn--primary"
-                  disabled={previewOnly}
-                  title={previewOnly ? 'Open the normal scanner to enroll a person' : 'Enroll a student or staff member'}
-                  onClick={openEnrollment}
-                >
-                  <span className="scanner-action-btn__label">Enroll person</span>
-                </button>
-              </>
-            )}
-
-            {previewOnly && (
-              <a
-                className="btn-secondary scanner-action-btn scanner-action-btn--secondary"
-                href="/scanner"
-                title="Switch to normal attendance scanner"
-              >
-                <span className="scanner-action-btn__label">Normal scanner</span>
-              </a>
-            )}
+            {auth.role() === 'admin' && <ActionMenu label="Station actions">
+              <button type="button" disabled={previewOnly} onClick={openEnrollment}>Register person</button>
+              <button type="button" onClick={() => navigate('/dashboard')}>Dashboard</button>
+              {previewOnly && <button type="button" onClick={() => navigate('/scanner')}>Normal scanner</button>}
+            </ActionMenu>}
 
             {/* User / Account Dropdown */}
             <div className="scanner-user-menu" ref={accountMenuRef}>
@@ -530,9 +531,7 @@ export default function Scanner() {
                 }}
                 onKeyDown={handleAccountTriggerKeyDown}
               >
-                <span className="scanner-user-trigger__avatar" aria-hidden="true">
-                  {operatorInitials}
-                </span>
+                <AccountAvatar className="scanner-user-trigger__avatar" initials={operatorInitials} picture={profilePicture} />
                 <span className="scanner-user-trigger__name">{operatorName}</span>
               </button>
 
@@ -549,15 +548,20 @@ export default function Scanner() {
                   </div>
                   <div className="scanner-user-dropdown__divider" role="separator" />
                   <button
-                    ref={(el) => {
-                      accountItemsRef.current[0] = el;
-                    }}
+                    ref={(el) => { accountItemsRef.current[0] = el; }}
+                    type="button"
+                    role="menuitem"
+                    className="scanner-user-dropdown__item"
+                    onClick={() => goTo('/account/profile')}
+                  >Profile</button>
+                  <button
+                    ref={(el) => { accountItemsRef.current[1] = el; }}
                     type="button"
                     role="menuitem"
                     className="scanner-user-dropdown__item"
                     onClick={() => {
                       setAccountMenuOpen(false);
-                      window.location.href = '/account/security';
+                      goTo('/account/security');
                     }}
                   >
                     <span>Account security</span>
@@ -566,7 +570,7 @@ export default function Scanner() {
                   {!confirmingSignOut ? (
                     <button
                       ref={(el) => {
-                        accountItemsRef.current[1] = el;
+                        accountItemsRef.current[2] = el;
                       }}
                       type="button"
                       role="menuitem"
@@ -588,7 +592,7 @@ export default function Scanner() {
                         </button>
                         <button
                           ref={(el) => {
-                            accountItemsRef.current[1] = el;
+                            accountItemsRef.current[2] = el;
                           }}
                           type="button"
                           className="btn-danger scanner-signout-confirm__btn is-confirm"
@@ -622,14 +626,10 @@ export default function Scanner() {
               {mobileMenuOpen && (
                 <div className="scanner-mobile-sheet" role="dialog" aria-label="Gate station menu">
                   <div className="scanner-mobile-sheet__status">
-                    <button
-                      type="button"
-                      className={`scanner-status-chip ${cameraOn ? 'is-online' : 'is-offline'}`}
-                      onClick={handleCameraStatusToggle}
-                    >
+                    <span className={`scanner-status-chip is-readonly ${cameraOn ? 'is-online' : 'is-offline'}`}>
                       <span className="scanner-status-chip__dot" aria-hidden="true" />
-                      <span>{cameraOn ? 'Camera on' : 'Camera off'}</span>
-                    </button>
+                      <span>{cameraOn ? (scanning ? 'Camera scanning' : 'Camera on') : 'Camera off'}</span>
+                    </span>
                     <span className={`scanner-status-chip is-readonly ${backendReachable ? 'is-online' : 'is-warning'}`}>
                       <span className="scanner-status-chip__dot" aria-hidden="true" />
                       <span>{backendReachable ? 'Online' : 'Offline — queued'}</span>
@@ -650,24 +650,26 @@ export default function Scanner() {
                             openEnrollment();
                           }}
                         >
-                          <span>Enroll person</span>
+                          <span>Register person</span>
                         </button>
                         <button
                           type="button"
                           className="btn-secondary scanner-action-btn scanner-action-btn--secondary"
                           onClick={() => {
-                            window.location.href = '/dashboard';
+                            navigate('/dashboard');
                           }}
                         >
                           <span>Dashboard</span>
                         </button>
                       </>
                     )}
+                    {previewOnly && <Link className="scanner-user-dropdown__item" to="/scanner">Normal scanner</Link>}
+                    <ReturnLink className="scanner-user-dropdown__item" to="/account/profile">Profile</ReturnLink>
                     <button
                       type="button"
                       className="scanner-user-dropdown__item"
                       onClick={() => {
-                        window.location.href = '/account/security';
+                        goTo('/account/security');
                       }}
                     >
                       <span>Account security</span>
@@ -711,6 +713,15 @@ export default function Scanner() {
 
       <main className="scanner-main">
         <section className="scanner-stage" aria-label="Gate camera and recognition controls">
+          {auth.role() === 'admin' && <div><BackButton fallback="/dashboard" /></div>}
+          <div className="notice notice-blue gate-privacy-notice">
+            <div><strong>Face scanning and your privacy</strong>
+              <p>EduScan uses facial recognition to record time in and time out for people with documented consent. Under the Philippine Data Privacy Act of 2012 (RA 10173), you can ask the school about the use of your data. For privacy questions or staff-assisted attendance, contact {stationHealth.privacy_contact || 'the school office'}.</p>
+            </div>
+          </div>
+          {stationHealth.sync?.enabled && <div className="notice notice-blue" role="status">
+            <span>Station sync · {stationHealth.sync.pending} pending · {stationHealth.sync.synced} synced · {stationHealth.sync.conflict} need review</span>
+          </div>}
           {previewOnly && (
             <div className="notice notice-blue" role="status">
               <div>
@@ -748,14 +759,18 @@ export default function Scanner() {
             </div>
           )}
 
-          {stationHealth?.recognition_model === false && (
+          {stationHealth.api && stationHealth.recognition_model === false && (
             <div className="notice notice-warning" role="alert">
               <div>
-                <strong>Face model unavailable on this computer.</strong>
+                <strong>{needsEnrollment ? 'Face enrollment needed' : 'Face recognition unavailable'}</strong>
                 <p>
-                  {stationHealth.recognition_message ||
-                    'Restore the encrypted model and matching key, or enroll authorized people and train a model here.'}
+                  {needsEnrollment
+                    ? 'Saving an authorized face enrollment trains the scanner from available local samples.'
+                    : stationHealth.recognition_message}
                 </p>
+                {needsEnrollment && !previewOnly && auth.role() === 'admin' && (
+                  <ReturnLink className="btn-secondary" to="/dashboard/setup?tab=biometrics#face-enrollments">Manage face enrollments</ReturnLink>
+                )}
               </div>
             </div>
           )}
@@ -793,10 +808,10 @@ export default function Scanner() {
                 <div className="camera-standby-card">
                   <h1>Gate camera is on standby</h1>
                   <p>
-                    Camera frames are processed locally by the on-premise LBPH recognition server and are never uploaded to an external cloud service.
+                    EduScan processes camera frames on the local server.
                   </p>
                   <div className="camera-standby-pills" aria-hidden="true">
-                    <span>Local LBPH processing</span>
+                    <span>Local SFace processing</span>
                     <span>Up to 5 faces</span>
                     <span>Blink liveness check</span>
                   </div>
@@ -808,8 +823,8 @@ export default function Scanner() {
             )}
 
             {scanning && (
-              <div className="multi-face-guide">
-                <span>Multi-face scan area · up to five people facing the camera</span>
+              <div className="multi-face-guide" data-recognition-state={recognitionState}>
+                <span role="status">{recognitionLabel}</span>
               </div>
             )}
           </div>
@@ -841,11 +856,12 @@ export default function Scanner() {
                   <div className="scan-feedback__batch">
                     {feedback.batch.map((item, index) => (
                       <span
-                        className="scan-feedback__person-chip muted-small"
+                        className="scan-feedback__person-chip muted-small" data-frame-state={faceState(item)}
                         key={`${item.person?.id || index}-${item.distance}`}
                       >
                         <strong>{item.person?.full_name || `Unknown person ${index + 1}`}</strong>:{' '}
                         {item.attendance_event?.recorded ? attendanceLabel(item.attendance_event) : item.message} ·{' '}
+                        {item.attendance_event?.pending_sync && 'Saved offline · Pending sync · '}
                         {item.liveness_verified ? 'liveness verified' : 'liveness pending'} ·{' '}
                         {cameraIdentityScore(item)}
                       </span>
@@ -900,6 +916,7 @@ export default function Scanner() {
                   <span>Restart recognition</span>
                 </button>
               )}
+              {cameraOn && <button type="button" className="btn-secondary scanner-control-btn" onClick={stopCamera}>Turn off camera</button>}
             </div>
           </div>
 
@@ -924,7 +941,7 @@ export default function Scanner() {
                   } catch {
                     /* Scan errors are shown by the scanner. */
                   }
-                  window.location.href = '/dashboard/administration?tab=people';
+                  goTo('/dashboard/administration?tab=people');
                 }}
               >
                 Open People &amp; records
@@ -994,6 +1011,7 @@ export default function Scanner() {
             )}
 
             <div className="scanner-log-list">
+              {logNotice && <p role="status">{logNotice}</p>}
               {events.length === 0 && (
                 <div className="empty-state">
                   <strong>No gate events recorded today</strong>
@@ -1021,6 +1039,14 @@ export default function Scanner() {
                       <span className={`tag ${isLate ? 'tag-warning' : 'tag-success'}`}>
                         {attendanceLabel(event)}
                       </span>
+                      {event.sync_status && <span className="tag tag-gray">{({ pending: 'Pending sync', synced: 'Synced', conflict: 'Needs sync review' })[event.sync_status]}</span>}
+                      {(event.sms_id || !event.sync_status) && (
+                        auth.role() === 'admin' && event.sms_id
+                          ? <ReturnLink className="tag tag-gray" to={smsDeliveryLink({ message: event.sms_id })}>SMS · {smsLabels[event.sms_status] || 'Not applicable'}</ReturnLink>
+                          : <span className="tag tag-gray">SMS · {smsLabels[event.sms_status] || 'Not applicable'}</span>
+                      )}
+                      {auth.role() === 'admin' && event.sms_id && ['failed', 'exhausted'].includes(event.sms_status) &&
+                        <button type="button" className="btn-link" disabled={Boolean(retryingSms)} onClick={() => retrySms(event.sms_id)}>Retry SMS</button>}
                     </div>
                   </div>
                 );
@@ -1028,7 +1054,7 @@ export default function Scanner() {
             </div>
             <div className="scanner-log-footer">
               {auth.role() === 'admin' ? (
-                <a href="/dashboard/setup#sms-delivery">Review SMS delivery in System Setup</a>
+                <ReturnLink to={smsDeliveryLink()}>View SMS delivery</ReturnLink>
               ) : (
                 'SMS delivery is recorded by the server'
               )}

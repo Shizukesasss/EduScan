@@ -1,0 +1,12 @@
+**
+!app/
+!app/**
+!resources/
+!resources/**
+!templates/
+!templates/**
+!requirements.txt
+!production.py
+**/__pycache__/
+**/*.pyc
+**/~$*

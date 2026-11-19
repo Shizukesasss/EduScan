@@ -5,11 +5,14 @@ if "%ACTION%"=="" set "ACTION=start"
 if not "%~2"=="" goto usage
 if /i "%ACTION%"=="start" goto run
 if /i "%ACTION%"=="restart" goto run
+if /i "%ACTION%"=="stop" goto run
+if /i "%ACTION%"=="start-api" goto run
+if /i "%ACTION%"=="restart-api" goto run
 
 goto usage
 
 :usage
-echo Usage: %~nx0 [start^|restart]
+echo Usage: %~nx0 [start^|restart^|stop^|start-api^|restart-api]
 exit /b 2
 
 :run

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import { api, auth, localDate } from '../api/client';
 import WorkspaceHeader from '../components/Common/WorkspaceHeader';
+import AccountAvatar from '../components/Common/AccountAvatar';
+import useProfilePicture from '../hooks/useProfilePicture';
 import useScrollReveal from '../hooks/useScrollReveal';
 
 const navigation = [
@@ -11,19 +13,6 @@ const navigation = [
   { path: '/teacher/schedules', label: 'Schedules' },
   { path: '/teacher/roster', label: 'My advisory' },
   { path: '/teacher/truancy', label: 'Interventions' },
-];
-
-const teacherNotifications = [
-  {
-    title: 'Attendance interventions',
-    description: 'Check learners meeting the five-absence review threshold.',
-    href: '/teacher/truancy',
-  },
-  {
-    title: 'Advisory attendance today',
-    description: 'Review daily time-in status and parent contact details.',
-    href: '/teacher/roster',
-  },
 ];
 
 const LOWERCASE_PARTICLES = new Set(['de', 'del', 'dela', 'la', 'las', 'los', 'van', 'von']);
@@ -90,9 +79,11 @@ export default function TeacherLayout() {
   });
 
   const today = localDate();
+  const displayName = auth.displayName();
+  const profilePicture = useProfilePicture();
   const { fullName, firstName, initials } = useMemo(
-    () => extractTeacherIdentity(auth.name()),
-    [],
+    () => extractTeacherIdentity(displayName),
+    [displayName],
   );
 
   useEffect(() => {
@@ -269,8 +260,7 @@ export default function TeacherLayout() {
         navAriaLabel="Main"
         items={navigation}
         showScanner={false}
-        profileHref="/account/security"
-        notifications={teacherNotifications}
+        showBack
       />
       <main id="main-content" ref={mainRef} className="app-main" tabIndex={-1}>
         <header
@@ -279,7 +269,7 @@ export default function TeacherLayout() {
         >
           <div className="teacher-welcome-card__left">
             <div className="teacher-welcome-card__avatar" aria-hidden="true">
-              <span>{initials}</span>
+              <AccountAvatar className="teacher-profile-avatar" initials={initials} picture={profilePicture} />
               <span className="teacher-welcome-card__status-dot" />
             </div>
 

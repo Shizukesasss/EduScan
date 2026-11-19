@@ -49,6 +49,7 @@ MIGRATIONS = (
     ("0035_attendance_status_override", "Preserve verified arrival status corrections"),
     ("0036_browser_sessions", "Store revocable browser sessions"),
     ("0037_admin_recovery_email", "Store verified administrator recovery email addresses and verification challenges"),
+    ("0038_station_sync_and_recent_indexes", "Add offline station operation receipts and indexes for recent events"),
 )
 
 
@@ -89,7 +90,13 @@ def run_migrations(engine: Engine, *, after=None) -> list[str]:
         for version, description in MIGRATIONS:
             if version in applied:
                 continue
-            if version == "0032_google_identity":
+            if version == "0038_station_sync_and_recent_indexes":
+                _models.StationSyncOperation.__table__.create(bind=connection, checkfirst=True)
+                _create_index_if_missing(connection, "attendance_events", "ix_attendance_recent_station",
+                                         "event_date, event_time, id")
+                _create_index_if_missing(connection, "system_audit_events", "ix_system_audit_entity_recent",
+                                         "entity_type, created_at, id")
+            elif version == "0032_google_identity":
                 if inspect(connection).has_table("users"):
                     _add_column_if_missing(connection, "users", "google_sub", "VARCHAR(255) NULL")
                     _add_column_if_missing(connection, "users", "google_email", "VARCHAR(254) NULL")

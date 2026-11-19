@@ -21,6 +21,15 @@ from browser_test_client import issued_session_headers
 
 
 class AdminReportingPermissionsTest(unittest.TestCase):
+    def test_notification_only_announces_reports_the_teacher_can_access(self):
+        own = self.report()
+        other = self.report(section="Other")
+        response = self.client.get("/api/notifications", headers=self.teacher_headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([item["id"] for item in response.json()["items"]], [f"report-{own.id}"])
+        self.assertEqual(self.client.delete(f"/api/notifications/report-{other.id}",
+                                            headers=self.teacher_headers).status_code, 404)
+
     def test_teacher_report_queries_load_only_assigned_exports(self):
         allowed = self.report()
         excluded = self.report(section="Other")
@@ -231,6 +240,21 @@ class AdminReportingPermissionsTest(unittest.TestCase):
         item = self.db.scalar(select(GeneratedReport).where(GeneratedReport.report_type == 'Temporary Attendance Log'))
         self.assertEqual(item.file_sha256, hashlib.sha256(response.content).hexdigest())
 
+    def test_temporary_attendance_pdf_falls_back_when_windows_excel_is_unavailable(self):
+        with patch.object(reports, 'os_name', 'nt'), \
+                patch.object(excel_pdf, 'os', SimpleNamespace(name='nt')), \
+                patch.object(excel_pdf, '_native_excel_pdf', side_effect=OSError('Excel is unavailable')) as excel:
+            response = self.client.get('/api/attendance/temporary-log?date=2026-10-01',
+                                       headers=self.admin_headers)
+
+        excel.assert_called_once()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers['content-type'], 'application/pdf')
+        pdf = PdfReader(BytesIO(response.content))
+        self.assertTrue(pdf.is_encrypted)
+        self.assertFalse(int(pdf.trailer['/Encrypt']['/P']) & 8)
+        self.assertIn('All-School Attendance', pdf.pages[0].extract_text())
+
     def test_excel_exports_are_registered_workbooks_and_keep_pdf_permissions(self):
         from openpyxl import load_workbook
 
@@ -269,6 +293,21 @@ class AdminReportingPermissionsTest(unittest.TestCase):
         self.assertIn('Rizal', [row['name'] for row in structure.json()['sections'] if row['adviser_name'] is None])
         response = self.client.get('/api/sf2/export?year=2026&month=10&grade=10&section=Rizal&school_year=2026-2027', headers=self.admin_headers)
         self.assertEqual(response.status_code, 200, response.text)
+
+    def test_sf2_builtin_pdf_keeps_roster_totals_and_signature_page(self):
+        route = '/api/sf2/export?year=2026&month=10&grade=10&section=Rizal&school_year=2026-2027'
+        with patch.object(excel_pdf, '_native_excel_pdf', side_effect=OSError('Excel is unavailable')):
+            response = self.client.get(route, headers=self.admin_headers)
+        self.assertEqual(response.status_code, 200)
+        pdf = PdfReader(BytesIO(response.content))
+        self.assertEqual(len(pdf.pages), 3)
+        roster, instructions, sessions = [' '.join(page.extract_text().split()) for page in pdf.pages]
+        self.assertIn('TEST STUDENT', roster)
+        self.assertIn('Combined TOTAL PER DAY', roster)
+        self.assertGreaterEqual(len(pdf.pages[0].images), 2)
+        self.assertIn('GUIDELINES', instructions)
+        self.assertIn('Signature of School Head over Printed Name', instructions)
+        self.assertIn('AM-PM Attendance', sessions)
 
     def test_unresolved_past_attendance_blocks_official_export_without_writing_absences(self):
         student = self.fixture.student

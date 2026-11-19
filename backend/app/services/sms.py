@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -147,7 +147,7 @@ def render_message(db: Session, event_type: str, person: Person, values: dict) -
 
 
 def queue_notice(db: Session, person: Person, event_type: str, values: dict,
-                 idempotency_key: str | None = None) -> SmsOutbox | None:
+                 idempotency_key: str | None = None, *, commit: bool = True) -> SmsOutbox | None:
     if person.role != "Student" or not person.guardian_phone:
         return None
     if idempotency_key:
@@ -163,6 +163,9 @@ def queue_notice(db: Session, person: Person, event_type: str, values: dict,
         message=render_message(db, event_type, person, values),
         status="queued",
     )
+    if not commit:
+        db.add(record)
+        return record
     try:
         db.add(record)
         db.commit()
@@ -273,19 +276,25 @@ def send_record(db: Session, record: SmsOutbox) -> SmsOutbox:
         db.commit()
         return record
     record.attempts += 1
+    submission_id = record.gateway_message_id or record.id
     try:
         validate_local_gateway_url(config["gateway_url"])
         url = config["gateway_url"].rstrip("/") + "/message"
         response = httpx.post(
             url,
             auth=(config["username"], config["password"]),
-            json={"textMessage": {"text": record.message}, "phoneNumbers": [record.recipient],
+            json={"id": submission_id, "textMessage": {"text": record.message}, "phoneNumbers": [record.recipient],
                   "withDeliveryReport": True},
             timeout=12,
         )
-        response.raise_for_status()
-        payload = response.json() if response.content else {}
-        record.gateway_message_id = str(payload.get("id") or payload.get("messageId") or "") or None
+        if response.status_code == 409:
+            payload = _gateway_state(config, submission_id)
+            if not payload:
+                response.raise_for_status()
+        else:
+            response.raise_for_status()
+            payload = response.json() if response.content else {}
+        record.gateway_message_id = str(payload.get("id") or payload.get("messageId") or submission_id)
         record.status = "accepted"
         record.sent_at = now
         record.next_attempt_at = None
@@ -307,6 +316,7 @@ def send_record(db: Session, record: SmsOutbox) -> SmsOutbox:
 def dispatch_queued(db: Session, limit: int = 25) -> list[SmsOutbox]:
     records = db.scalars(
         select(SmsOutbox).where(SmsOutbox.status.in_(["queued", "failed"]), SmsOutbox.attempts < 3,
+                                SmsOutbox.sent_at.is_(None),
                                 or_(SmsOutbox.next_attempt_at.is_(None), SmsOutbox.next_attempt_at <= datetime.utcnow()))
         .order_by(SmsOutbox.created_at).limit(limit)
     ).all()
@@ -370,19 +380,20 @@ def reconcile_outbox(db: Session, limit: int = 100) -> list[SmsOutbox]:
 
 
 def requeue_record(db: Session, record: SmsOutbox) -> SmsOutbox:
-    if record.status not in {"failed", "exhausted", "cancelled", "held"}:
+    requeueable = {"failed", "exhausted", "cancelled", "held"}
+    if record.status not in requeueable:
         raise HTTPException(status_code=409, detail="Only failed, exhausted, cancelled, or held messages can be requeued")
     if _is_ineligible_recipient(db, record):
         raise HTTPException(status_code=409, detail="SMS notifications are only available for student guardians.")
-    record.status = "queued"
-    record.attempts = 0
-    record.gateway_message_id = None
-    record.last_error = None
-    record.next_attempt_at = datetime.utcnow()
-    record.sent_at = None
-    record.delivered_at = None
-    record.cancelled_at = None
-    record.exhausted_at = None
+    # Use a new gateway message only after a previously accepted attempt reached a terminal state.
+    submission_id = str(uuid.uuid4()) if record.sent_at is not None else record.gateway_message_id
+    result = db.execute(update(SmsOutbox).where(SmsOutbox.id == record.id, SmsOutbox.status.in_(requeueable)).values(
+        status="queued", attempts=0, gateway_message_id=submission_id, last_error=None, next_attempt_at=datetime.utcnow(),
+        sent_at=None, delivered_at=None, cancelled_at=None, exhausted_at=None,
+    ))
+    if result.rowcount != 1:
+        db.rollback()
+        raise HTTPException(409, "The message status changed. Refresh the delivery log before retrying.")
     db.commit()
     db.refresh(record)
     return record

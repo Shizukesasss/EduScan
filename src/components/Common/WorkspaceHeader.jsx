@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
+import useReturnState from '../../hooks/useReturnState';
 import { auth } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
+import useNotifications from '../../hooks/useNotifications';
+import useProfilePicture from '../../hooks/useProfilePicture';
+import AccountAvatar from './AccountAvatar';
+import { BackButton } from './ReturnNavigation';
+
+const notificationTime = new Intl.DateTimeFormat('en-PH', {
+  dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Manila',
+});
 
 export default function WorkspaceHeader({
   brandHref = '/dashboard',
@@ -10,15 +19,22 @@ export default function WorkspaceHeader({
   navAriaLabel = 'Main',
   items = [],
   showScanner = false,
-  profileHref = '/account/security',
-  notifications = [],
+  showBack = false,
+  showNotifications = true,
 }) {
   const location = useLocation();
   const navigate = useNavigate();
+  const returnState = useReturnState();
+  const openPage = to => {
+    if (to === location.pathname + location.search + location.hash) return;
+    const samePage = to.split(/[?#]/, 1)[0] === location.pathname;
+    navigate(to, { state: samePage ? location.state : returnState });
+  };
   const { showError } = useToast();
   const [isScrolled, setIsScrolled] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const [pendingAlerts, setPendingAlerts] = useState([]);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const userMenuRef = useRef(null);
@@ -28,11 +44,19 @@ export default function WorkspaceHeader({
   const notifTriggerRef = useRef(null);
   const mobileToggleRef = useRef(null);
 
-  const userName = auth.name() || 'User';
+  const userName = auth.displayName() || 'User';
   const securityLabel = auth.role() === 'admin' && auth.provider() === 'password' ? 'Account Security' : 'Change Password';
-  const userInitial = userName.trim().charAt(0).toUpperCase() || 'U';
-  const unreadCount = notifications.length;
+  const profilePicture = useProfilePicture();
+  const { items: notifications, unread: unreadCount, loading: alertsLoading, error: alertsError,
+          refresh: refreshAlerts, change: changeAlert } = useNotifications(showNotifications);
   const notifLabel = unreadCount > 0 ? `Notifications, ${unreadCount} unread` : 'Notifications';
+
+  const updateAlert = async (item, remove) => {
+    setPendingAlerts(ids => [...ids, item.id]);
+    try { await changeAlert(item.id, remove); }
+    catch (err) { showError(err.message); void refreshAlerts(); }
+    finally { setPendingAlerts(ids => ids.filter(id => id !== item.id)); }
+  };
 
   useEffect(() => {
     const onScroll = () => {
@@ -142,9 +166,8 @@ export default function WorkspaceHeader({
             </div>
           </Link>
 
-          <span className="app-header__divider" aria-hidden="true" />
-
-          <nav
+          {items.length > 0 && <span className="app-header__divider" aria-hidden="true" />}
+          {items.length > 0 && <nav
             className="primary-nav"
             onFocus={(event) => event.target.scrollIntoView({ block: 'nearest', inline: 'nearest' })}
             aria-label={navAriaLabel}
@@ -160,21 +183,22 @@ export default function WorkspaceHeader({
                 <span className="nav-text" data-label={label}>{label}</span>
               </NavLink>
             ))}
-          </nav>
+          </nav>}
         </div>
 
         <div className="header-actions">
+          {showBack && <BackButton className="header-text-btn" />}
           {showScanner && (
             <button
               type="button"
               className="btn-primary header-scanner-btn"
-              onClick={() => navigate('/scanner')}
+              onClick={() => openPage('/scanner')}
             >
               <span>Scanner</span>
             </button>
           )}
 
-          <div className="header-notif" ref={notifRef}>
+          {showNotifications && <div className="header-notif" ref={notifRef}>
             <button
               ref={notifTriggerRef}
               type="button"
@@ -185,7 +209,8 @@ export default function WorkspaceHeader({
               aria-expanded={notifOpen}
               onClick={() => {
                 setUserMenuOpen(false);
-                setNotifOpen((prev) => !prev);
+                if (!notifOpen) void refreshAlerts();
+                setNotifOpen(!notifOpen);
               }}
             >
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
@@ -202,28 +227,41 @@ export default function WorkspaceHeader({
             {notifOpen && (
               <div className="header-popover header-notif__popover" role="dialog" aria-label="Workspace notifications">
                 <div className="header-popover__header">
-                  <strong>Notifications &amp; queues</strong>
-                  <span>Quick status</span>
+                  <strong>Notifications</strong>
+                  {!alertsLoading && !alertsError && <span>{unreadCount ? `${unreadCount} unread` : 'All caught up'}</span>}
                 </div>
                 <div className="header-notif__list">
-                  {notifications.map((item) => (
-                    <button
-                      key={item.href + item.title}
-                      type="button"
-                      className="header-notif__item"
-                      onClick={() => {
+                  {alertsLoading && <p className="header-notif__message" role="status">Loading notifications…</p>}
+                  {alertsError && <div className="header-notif__message" role="status">
+                    <p>Notifications could not refresh. {alertsError}</p>
+                    <button type="button" className="btn-link" onClick={refreshAlerts}>Retry</button>
+                  </div>}
+                  {!alertsLoading && !alertsError && notifications.length === 0 &&
+                    <p className="header-notif__message">No notifications.</p>}
+                  {notifications.map(item => {
+                    const pending = pendingAlerts.includes(item.id);
+                    return <article className={`header-notif__entry${item.read ? '' : ' is-unread'}`} key={item.id}>
+                      <button type="button" className="header-notif__item" onClick={() => {
+                        if (!item.read && !pending) void updateAlert(item, false);
                         setNotifOpen(false);
-                        navigate(item.href);
-                      }}
-                    >
-                      <strong>{item.title}</strong>
-                      <span>{item.description}</span>
-                    </button>
-                  ))}
+                        openPage(item.href);
+                      }}>
+                        <strong>{item.title}{!item.read && <span className="sr-only"> (Unread)</span>}</strong>
+                        <span>{item.description}</span>
+                        <time dateTime={item.created_at}>{notificationTime.format(new Date(item.created_at))}</time>
+                      </button>
+                      <div className="header-notif__actions">
+                        {!item.read && <button type="button" className="btn-link" disabled={pending}
+                          aria-label={`Mark ${item.title} as read`} onClick={() => updateAlert(item, false)}>Mark as read</button>}
+                        <button type="button" className="btn-link" disabled={pending}
+                          aria-label={`Delete ${item.title} notification`} onClick={() => updateAlert(item, true)}>Delete</button>
+                      </div>
+                    </article>;
+                  })}
                 </div>
               </div>
             )}
-          </div>
+          </div>}
 
           <div className="user-menu" ref={userMenuRef}>
             <button
@@ -240,7 +278,7 @@ export default function WorkspaceHeader({
               }}
               onKeyDown={handleUserTriggerKeyDown}
             >
-              <span className="account-avatar" aria-hidden="true">{userInitial}</span>
+              <AccountAvatar name={userName} picture={profilePicture} />
               <span className="user-menu__meta">
                 <span className="account-name">{userName}</span>
                 <span className="account-role">{roleLabel}</span>
@@ -281,7 +319,7 @@ export default function WorkspaceHeader({
                   className="user-menu__item"
                   onClick={() => {
                     setUserMenuOpen(false);
-                    navigate(profileHref);
+                    openPage('/account/profile');
                   }}
                 >
                   <svg
@@ -310,7 +348,7 @@ export default function WorkspaceHeader({
                   className="user-menu__item"
                   onClick={() => {
                     setUserMenuOpen(false);
-                    navigate('/account/security');
+                    openPage('/account/security');
                   }}
                 >
                   <svg
@@ -400,7 +438,7 @@ export default function WorkspaceHeader({
 
           <div className="mobile-nav-drawer__account" role="group" aria-label="Account">
             <div className="mobile-nav-drawer__identity">
-              <span className="account-avatar" aria-hidden="true">{userInitial}</span>
+              <AccountAvatar name={userName} picture={profilePicture} />
               <span className="mobile-nav-drawer__identity-text">
                 <strong>{userName}</strong>
                 <span>{roleLabel}</span>
@@ -411,7 +449,7 @@ export default function WorkspaceHeader({
               className="mobile-nav-link"
               onClick={() => {
                 setMobileNavOpen(false);
-                navigate(profileHref);
+                openPage('/account/profile');
               }}
             >
               <span>Profile</span>
@@ -421,7 +459,7 @@ export default function WorkspaceHeader({
               className="mobile-nav-link"
               onClick={() => {
                 setMobileNavOpen(false);
-                navigate('/account/security');
+                openPage('/account/security');
               }}
             >
               <span>{securityLabel}</span>

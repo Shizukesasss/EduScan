@@ -1,6 +1,6 @@
 import RequestFeedback from '../../components/Common/RequestFeedback';
 import PaginatedBody from '../../components/Common/PaginatedBody';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, auth } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 import './OperationalControls.css';
@@ -31,18 +31,16 @@ function smsStatusTagClass(status) {
   return 'tag-gray';
 }
 
-export default function OperationalControls({ view, embedded = false }) {
+export default function OperationalControls({ view, embedded = false, smsParams, setSmsParams }) {
   const role = auth.role();
   const healthAccess = view === 'health' && ['admin', 'ict'].includes(role);
   const privacyAccess = view === 'data' && ['admin', 'privacy_officer'].includes(role);
   const reviewAccess = view === 'reviews' && ['admin', 'records_officer', 'privacy_officer'].includes(role);
-  const activityAccess = view === 'activity' && ['admin', 'records_officer', 'privacy_officer'].includes(role);
   const backupAccess = view === 'backup' && ['admin', 'ict'].includes(role);
   const smsAccess = view === 'sms' && ['admin', 'records_officer'].includes(role);
   const biometricAccess = view === 'biometrics' && role === 'admin';
   const [health, setHealth] = useState(null);
   const [healthState, setHealthState] = useState({ loading: true, error: '' });
-  const [audit, setAudit] = useState([]);
   const [reviews, setReviews] = useState([]);
   const [retention, setRetention] = useState(defaultRetention);
   const [preview, setPreview] = useState(null);
@@ -56,7 +54,9 @@ export default function OperationalControls({ view, embedded = false }) {
   const [restorePassphrase, setRestorePassphrase] = useState('');
   const [restoreConfirmation, setRestoreConfirmation] = useState('');
   const [smsOutbox, setSmsOutbox] = useState([]);
-  const [smsStatusFilter, setSmsStatusFilter] = useState('all');
+  const requestedSmsStatus = smsParams?.get('status');
+  const smsStatusFilter = ['queued', 'sent', 'delivered', 'failed'].includes(requestedSmsStatus) ? requestedSmsStatus : 'all';
+  const smsMessage = smsAccess ? smsParams?.get('message') : null;
   const [smsQuery, setSmsQuery] = useState('');
   const [biometricRuntime, setBiometricRuntime] = useState({ threshold: 65, liveness_enabled: true, liveness_window_seconds: 8, review_failure_threshold: 4 });
   const { showSuccess, showError } = useToast();
@@ -69,11 +69,13 @@ export default function OperationalControls({ view, embedded = false }) {
       const tasks = [];
       const labels = [];
       if (healthAccess) { tasks.push(api.get('/station/health')); labels.push('health'); }
-      if (activityAccess) { tasks.push(api.get('/audit?limit=300')); labels.push('audit'); }
       if (reviewAccess) { tasks.push(api.get('/biometrics/reviews?status=Open')); labels.push('reviews'); }
       if (privacyAccess) { tasks.push(api.get('/retention'), api.get('/retention/preview'), api.get('/legal-holds')); labels.push('retention', 'preview', 'holds'); }
       if (backupAccess) { tasks.push(api.get('/admin/backup-runs'), api.get('/admin/backup-schedule')); labels.push('backups', 'schedule'); }
-      if (smsAccess) { tasks.push(api.get('/sms/outbox')); labels.push('sms'); }
+      if (smsAccess) {
+        tasks.push(api.get('/sms/outbox' + (smsMessage ? '?' + new URLSearchParams({ message_id: smsMessage }) : '')));
+        labels.push('sms');
+      }
       if (biometricAccess) { tasks.push(api.get('/biometrics/status')); labels.push('biometric'); }
       const results = await Promise.allSettled(tasks);
       const failed = results.find(result => result.status === 'rejected');
@@ -81,15 +83,24 @@ export default function OperationalControls({ view, embedded = false }) {
       labels.forEach((label, index) => {
         if (results[index].status === 'rejected') { if (label === 'health') setHealthState({ loading: false, error: results[index].reason?.message || 'Station health is unavailable.' }); showError(results[index].reason?.message || 'Could not load this section.'); return; }
         const value = results[index].value;
-        if (label === 'health') { setHealth(value); setHealthState({ loading: false, error: '' }); } else if (label === 'audit') setAudit(value); else if (label === 'reviews') setReviews(value);
+        if (label === 'health') { setHealth(value); setHealthState({ loading: false, error: '' }); } else if (label === 'reviews') setReviews(value);
         else if (label === 'retention') setRetention(value); else if (label === 'preview') setPreview(value); else if (label === 'holds') setHolds(value);
         else if (label === 'backups') setBackups(value); else if (label === 'schedule') setBackupSchedule((current) => ({ ...current, ...value, passphrase: '' }));
         else if (label === 'sms') setSmsOutbox(value);
         else if (label === 'biometric') setBiometricRuntime(value);
       });
     } catch (err) { setRequest({ loading: false, error: err.message }); showError(err.message); }
-  }, [activityAccess, backupAccess, biometricAccess, healthAccess, privacyAccess, reviewAccess, smsAccess, showError]);
+  }, [backupAccess, biometricAccess, healthAccess, privacyAccess, reviewAccess, smsAccess, smsMessage, showError]);
   useEffect(() => { load(); }, [load]);
+  const scrolledTo = useRef('');
+  useEffect(() => {
+    if (request.loading || request.error) return;
+    const target = reviewAccess ? 'recognition-reviews' : smsAccess ? 'sms-delivery' : '';
+    if (target && window.location.hash === '#' + target && target !== scrolledTo.current) {
+      document.getElementById(target)?.scrollIntoView({ block: 'start' });
+      scrolledTo.current = target;
+    }
+  }, [reviewAccess, smsAccess, request.loading, request.error]);
   const done = async (message) => { showSuccess(message); await load(); };
   const saveRetention = async () => { try { await api.put('/retention', retention); await done('Retention policy saved. Preview the eligible items before an authorized execution.'); } catch (err) { showError(err.message); } };
   const executeRetention = async () => { try { const result = await api.post('/retention/execute', retentionApproval); await done(`Cleanup completed. Disposal certificate: ${result.certificate_reference}`); } catch (err) { showError(err.message); } };
@@ -150,33 +161,36 @@ export default function OperationalControls({ view, embedded = false }) {
     {!healthAccess && <RequestFeedback {...request} label="operational records" onRetry={load} />}
     {(!request.loading && !request.error || healthAccess) && <>
 
-    {healthAccess && <section className={embedded ? 'operational-health-embedded__section' : 'card-static'}><div className="section-heading"><div>{!embedded && <p className="eyebrow">Live service indicators</p>}<HealthHeading>{embedded ? 'Station health' : 'Operational health'}</HealthHeading></div><button type="button" className="btn-secondary" onClick={load} aria-busy={healthState.loading}> Refresh</button></div><p className="operational-health-feedback" role="status">{healthState.loading ? 'Checking station health…' : healthState.error ? `${health ? 'Refresh failed. Showing the previous check. ' : ''}${healthState.error}` : ''}</p>{health && <div className="principle-grid"><div><strong>API / database</strong><span>{health.api && health.database ? 'Ready' : 'Unavailable'}</span></div><div><strong>LBPH model</strong><span>{health.recognition_model ? health.model_version : 'Not trained'}</span></div><div><strong>Android gateway</strong><span>{health.gateway_enabled ? health.gateway_reachable ? 'Reachable' : 'Unreachable' : 'Disabled'}</span></div><div><strong>Checked</strong><span>{new Date(health.checked_at).toLocaleString('en-PH')}</span></div></div>}</section>}
+    {healthAccess && <section className={embedded ? 'operational-health-embedded__section' : 'card-static'}><div className="section-heading"><div>{!embedded && <p className="eyebrow">Live service indicators</p>}<HealthHeading>{embedded ? 'Station health' : 'Operational health'}</HealthHeading></div><button type="button" className="btn-secondary" onClick={load} aria-busy={healthState.loading}> Refresh</button></div><p className="operational-health-feedback" role="status">{healthState.loading ? 'Checking station health…' : healthState.error ? `${health ? 'Refresh failed. Showing the previous check. ' : ''}${healthState.error}` : ''}</p>{health && <div className="principle-grid"><div><strong>API / database</strong><span>{health.api && health.database ? 'Ready' : 'Unavailable'}</span></div><div><strong>Face recognition</strong><span>{health.recognition_model ? 'Ready' : 'Unavailable'}</span></div><div><strong>Android gateway</strong><span>{health.gateway_enabled ? health.gateway_reachable ? 'Reachable' : 'Unreachable' : 'Disabled'}</span></div><div><strong>Checked</strong><span>{new Date(health.checked_at).toLocaleString('en-PH')}</span></div></div>}</section>}
 
     {biometricAccess && <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Administrator-restricted matching controls</p><h2>Liveness and review settings</h2></div></div><div className="form-grid three-columns"><label><span className="field-label">Liveness window (seconds)</span><input placeholder="Enter liveness window (seconds)" className="input-field" type="number" min="3" max="30" value={biometricRuntime.liveness_window_seconds} onChange={(event) => setBiometricRuntime((current) => ({ ...current, liveness_window_seconds: Number(event.target.value) }))} /></label><label><span className="field-label">Review occurrence threshold</span><input placeholder="Enter review occurrence threshold" className="input-field" type="number" min="2" max="20" value={biometricRuntime.review_failure_threshold} onChange={(event) => setBiometricRuntime((current) => ({ ...current, review_failure_threshold: Number(event.target.value) }))} /></label><label className="checkbox-field"><input type="checkbox" checked={biometricRuntime.liveness_enabled} onChange={(event) => setBiometricRuntime((current) => ({ ...current, liveness_enabled: event.target.checked }))} /><span>Require blink-based liveness before recording attendance</span></label></div><p className="section-copy">Liveness failures create non-image review entries and do not record attendance. The trained model sets its own LBPH threshold; these controls do not recalibrate identity matching.</p><button className="btn-primary" onClick={saveBiometricRuntime}>Save recognition controls</button></section>}
 
-    {reviewAccess && <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Unknown, rejected, or suspicious attempts</p><h2>Recognition review queue</h2><p className="muted-small">Latest loaded reviews (up to 1,000).</p></div></div><p className="section-copy">No face image is retained in this queue. Resolve the cause, then use the normal documented Attendance correction screen for a manual fallback.</p><div className="table-scroll"><table className="interactive-table recognition-review-table" aria-label="Recognition review queue"><colgroup><col style={{ width: '16%' }} /><col style={{ width: '14%' }} /><col style={{ width: '14%' }} /><col style={{ width: '12%' }} /><col style={{ width: '34%' }} /><col style={{ width: '10%' }} /></colgroup><thead><tr><th>Last seen</th><th>Type</th><th>Candidate</th><th>Occurrences</th><th>Reason</th><th>Action</th></tr></thead><PaginatedBody>{reviews.length === 0 && <tr><td colSpan="6" className="empty-cell">No open recognition reviews.</td></tr>}{reviews.map((item) => <tr key={item.id}><td>{new Date(item.last_seen_at).toLocaleString('en-PH')}</td><td>{item.review_type}</td><td>{item.candidate_name || 'Unknown'}</td><td>{item.occurrence_count}</td><td>{item.reason}</td><td><button className="btn-link" onClick={() => resolveReview(item.id)}>Resolve</button></td></tr>)}</PaginatedBody></table></div></section>}
-    {activityAccess && <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Before-and-after accountability</p><h2>Unified administrative audit</h2><p className="muted-small">Latest loaded records (up to 300).</p></div></div><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Date</th><th>Actor</th><th>Action</th><th>Entity</th><th>Summary</th></tr></thead><PaginatedBody>{audit.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.actor_name}<span className="table-subline">{item.actor_role}</span></td><td>{item.action}</td><td>{item.entity_type}</td><td>{item.summary}</td></tr>)}</PaginatedBody></table></div></section>}
+    {reviewAccess && <section id="recognition-reviews" className="card-static"><div className="section-heading"><div><p className="eyebrow">Unknown, rejected, or suspicious attempts</p><h2>Recognition review queue</h2><p className="muted-small">Latest loaded reviews (up to 1,000).</p></div></div><p className="section-copy">No face image is retained in this queue. Resolve the cause, then use the normal documented Attendance correction screen for a manual fallback.</p><div className="table-scroll"><table className="interactive-table recognition-review-table" aria-label="Recognition review queue"><colgroup><col style={{ width: '16%' }} /><col style={{ width: '14%' }} /><col style={{ width: '14%' }} /><col style={{ width: '12%' }} /><col style={{ width: '34%' }} /><col style={{ width: '10%' }} /></colgroup><thead><tr><th>Last seen</th><th>Type</th><th>Candidate</th><th>Occurrences</th><th>Reason</th><th>Action</th></tr></thead><PaginatedBody>{reviews.length === 0 && <tr><td colSpan="6" className="empty-cell">No open recognition reviews.</td></tr>}{reviews.map((item) => <tr key={item.id}><td>{new Date(item.last_seen_at).toLocaleString('en-PH')}</td><td>{item.review_type}</td><td>{item.candidate_name || 'Unknown'}</td><td>{item.occurrence_count}</td><td>{item.reason}</td><td><button className="btn-link" onClick={() => resolveReview(item.id)}>Resolve</button></td></tr>)}</PaginatedBody></table></div></section>}
 
     {smsAccess && (
       <section id="sms-delivery" className="card-static setup-card">
         <div className="section-heading">
           <div>
             <p className="eyebrow">Queued → accepted → sent → delivered</p>
-            <h2>SMS delivery reconciliation</h2>
+            <h2>SMS delivery</h2>
             <p className="section-copy">
               Review outbound guardian notifications, synchronize delivery statuses with the local Android gateway, and requeue or cancel pending messages.
             </p>
           </div>
           <div className="sms-reconcile-header-actions">
-            <button type="button" className="btn-secondary" onClick={() => api.download('/sms/outbox.pdf', 'sms-delivery-log.pdf')}>
+            <button type="button" className="btn-secondary" onClick={() => api.download('/sms/outbox.pdf', 'sms-delivery-log.pdf').catch(err => showError(err.message))}>
               Download delivery log PDF
-            </button>
-            <button type="button" className="btn-primary" onClick={() => smsAction('/sms/reconcile', 'Gateway delivery statuses reconciled.')}>
-              Reconcile now
             </button>
           </div>
         </div>
 
+        {smsMessage && <button type="button" className="btn-link" onClick={() => setSmsParams(previous => {
+          const next = new URLSearchParams(previous);
+          next.set('tab', 'sms');
+          next.delete('message');
+          next.delete('status');
+          return next;
+        })}>Show all messages</button>}
         <div className="setup-form-panel sms-reconcile-toolbar">
           <div className="sms-reconcile-toolbar__top">
             <div className="academic-filter-bar sms-filter-pills" role="group" aria-label="Filter SMS messages by delivery status">
@@ -192,7 +206,14 @@ export default function OperationalControls({ view, embedded = false }) {
                   type="button"
                   className={`academic-filter-pill${smsStatusFilter === id ? ' is-active' : ''}`}
                   aria-pressed={smsStatusFilter === id}
-                  onClick={() => setSmsStatusFilter(id)}
+                  onClick={() => setSmsParams(previous => {
+                    const next = new URLSearchParams(previous);
+                    next.set('tab', 'sms');
+                    next.delete('message');
+                    if (id === 'all') next.delete('status');
+                    else next.set('status', id);
+                    return next;
+                  })}
                 >
                   <span>{label}</span>
                   <span className="academic-filter-pill__count">{count}</span>
@@ -211,7 +232,7 @@ export default function OperationalControls({ view, embedded = false }) {
                 />
               </div>
               <span className="setup-count-badge">
-                Showing {filteredSmsOutbox.length} of {smsOutbox.length} (max 500)
+                {smsMessage ? 'Showing the selected SMS' : `Showing ${filteredSmsOutbox.length} of ${smsOutbox.length} recent messages`}
               </span>
             </div>
           </div>

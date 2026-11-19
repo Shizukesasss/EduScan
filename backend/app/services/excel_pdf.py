@@ -1,5 +1,6 @@
 """Export the actual Excel print layout, then apply PDF editing restrictions."""
 import io
+import logging
 import os
 import secrets
 import subprocess
@@ -7,19 +8,28 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
 
+from fastapi import HTTPException
 from pypdf import PdfWriter
 from pypdf.constants import UserAccessPermissions
 
+from .report_pdf import workbook_report_pdf
+
 
 _excel_lock = Lock()
+logger = logging.getLogger(__name__)
 
 
 def excel_report_pdf(source: Path, *, terms: tuple[int, ...] = (), draft: bool = False,
                      landscape: bool = False) -> bytes:
-    if os.name != 'nt':
-        from .report_pdf import workbook_report_pdf
-        return workbook_report_pdf(source, terms=terms, draft=draft, landscape_pages=landscape)
+    if os.name == 'nt':
+        try:
+            return _native_excel_pdf(source, terms=terms, draft=draft, landscape=landscape)
+        except (OSError, subprocess.SubprocessError) as error:
+            logger.warning('Using the built-in PDF renderer because Excel export failed (%s).', type(error).__name__)
+    return workbook_report_pdf(source, terms=terms, draft=draft, landscape_pages=landscape)
 
+
+def _native_excel_pdf(source: Path, *, terms: tuple[int, ...], draft: bool, landscape: bool) -> bytes:
     with TemporaryDirectory(dir=source.parent) as directory:
         command = [
             'powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
@@ -32,20 +42,12 @@ def excel_report_pdf(source: Path, *, terms: tuple[int, ...] = (), draft: bool =
             command.append('-Draft')
         if landscape:
             command.append('-Landscape')
-        try:
-            with _excel_lock:
-                subprocess.run(command, check=True, capture_output=True, timeout=90,
-                               creationflags=subprocess.CREATE_NO_WINDOW)
-        except subprocess.TimeoutExpired as error:
-            from fastapi import HTTPException
-            raise HTTPException(503, 'Excel took too long to export the report. Try generating it again.') from error
-        except (OSError, subprocess.CalledProcessError) as error:
-            from fastapi import HTTPException
-            raise HTTPException(503, 'Excel could not export the report template. Check that Microsoft Excel can open and print the template on the EduScan host.') from error
+        with _excel_lock:
+            subprocess.run(command, check=True, capture_output=True, timeout=90,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
 
         parts = sorted(Path(directory).glob('sheet-*.pdf'))
         if not parts:
-            from fastapi import HTTPException
             raise HTTPException(409, 'The report template has no printable sheets for the selected terms.')
         with PdfWriter() as writer:
             for part in parts:

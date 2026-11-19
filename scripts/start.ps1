@@ -3,6 +3,8 @@ param(
   [switch]$Wait,
   [switch]$OpenBrowser,
   [switch]$ApiOnly,
+  [switch]$WebOnly,
+  [switch]$Offline,
   [ValidateRange(1, 65535)]
   [int]$WebPort = 5175
 )
@@ -11,23 +13,12 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = 'SilentlyContinue'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $backendRoot = Join-Path $projectRoot "backend"
-$python = Join-Path $backendRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $python)) {
-  throw "Backend environment is missing. Run .\scripts\setup.ps1 first."
-}
+. (Join-Path $PSScriptRoot 'eduscan-processes.ps1')
 
 function Assert-LocalPortAvailable {
   param([int]$Port, [string]$ServiceName)
-  $client = [Net.Sockets.TcpClient]::new()
-  try {
-    $connection = $client.ConnectAsync("127.0.0.1", $Port)
-    if ($connection.Wait(400) -and $client.Connected) {
-      throw "$ServiceName cannot start because port $Port is already in use. Close the other program or EduScan instance, then run this script again."
-    }
-  } catch [AggregateException] {
-    # Connection refused means the port is available.
-  } finally {
-    $client.Dispose()
+  if (Test-EduScanPort -Port $Port) {
+    throw "$ServiceName cannot start because port $Port is already in use. Close the other program or EduScan instance, then run this script again."
   }
   # Restricted shells can miss a listener even while its HTTP endpoint is
   # reachable. Refuse to launch another process that could reserve more DB slots.
@@ -40,10 +31,35 @@ function Assert-LocalPortAvailable {
   }
 }
 
-Assert-LocalPortAvailable -Port 8000 -ServiceName "EduScan API"
+if ($WebOnly -and ($ApiOnly -or $Wait)) { throw 'Web-only startup cannot be combined with API-only or foreground startup.' }
+if (-not $WebOnly) {
+  $python = Join-Path $backendRoot '.venv\Scripts\python.exe'
+  if (-not (Test-Path -LiteralPath $python)) {
+    throw 'Backend environment is missing. Run .\scripts\setup.ps1 first.'
+  }
+  Assert-LocalPortAvailable -Port 8000 -ServiceName 'EduScan API'
+}
 if (-not $ApiOnly) {
   Assert-LocalPortAvailable -Port $WebPort -ServiceName "EduScan web app"
 }
+
+$launchEnvironment = @{}
+if ($Offline -and -not $WebOnly) {
+  # Keep the local database, generated files, and keys together in a separate folder.
+  $launchEnvironment = @{
+    DATABASE_URL = 'sqlite:///./data/eduscan-offline/eduscan.db'
+    EDUSCAN_DATA_DIR = Join-Path $backendRoot 'data\eduscan-offline'
+    EDUSCAN_SEED_DEMO_ACCOUNTS = 'true'
+    EDUSCAN_DEPED_ONLY = 'false'
+    EDUSCAN_DEPED_PASSWORD_RECOVERY = 'false'
+    EDUSCAN_SECRET_KEY = ' '
+    EDUSCAN_ENCRYPTION_KEY = ' '
+    GOOGLE_CLIENT_ID = ' '
+    SMTP_HOST = ' '
+    SMS_GATEWAY_ENABLED = 'false'
+  }
+}
+if ($Offline) { $launchEnvironment['VITE_API_URL'] = 'http://127.0.0.1:8000/api' }
 
 $logDirectory = Join-Path $projectRoot "logs"
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
@@ -68,9 +84,12 @@ if (@($allowedOrigins -split ',' | ForEach-Object { $_.Trim() }) -notcontains $w
   if ([string]::IsNullOrWhiteSpace($allowedOrigins)) { $allowedOrigins = $webOrigin }
   else { $allowedOrigins = "$allowedOrigins,$webOrigin" }
 }
-$env:ALLOWED_ORIGINS = $allowedOrigins
+$launchEnvironment['ALLOWED_ORIGINS'] = $allowedOrigins
+$previousEnvironment = @{}
 $api = $null
+$apiServer = $null
 $web = $null
+$apiErrorLog = Join-Path $logDirectory 'api.stderr.log'
 
 
 function Wait-EduScanEndpoint {
@@ -98,13 +117,16 @@ function Wait-EduScanEndpoint {
   throw "$ServiceName did not become ready within 60 seconds. Read $ErrorLog for the error."
 }
 
-function Stop-EduScanProcess {
-  param([System.Diagnostics.Process]$Process)
-  if ($Process -and -not $Process.HasExited) {
-    # The Windows virtual environment can launch Python as a child process.
-    $ErrorActionPreference = 'SilentlyContinue'
-    taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
+function Get-EduScanApiServer {
+  # A Windows venv can keep a launcher process waiting on Uvicorn's Python process.
+  $startupLine = Select-String -LiteralPath $apiErrorLog -Pattern 'Started server process \[(\d+)\]' -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if ($startupLine) {
+    $serverId = [int]$startupLine.Matches[0].Groups[1].Value
+    $server = Get-Process -Id $serverId -ErrorAction SilentlyContinue
+    if ($server -and $server.StartTime -ge $api.StartTime) { return $server }
   }
+  return $api
 }
 
 $ready = $false
@@ -115,15 +137,27 @@ try {
     $node = (Get-Command node.exe -ErrorAction Stop).Source
     $viteScript = Join-Path $projectRoot 'node_modules\vite\bin\vite.js'
   }
-  Write-Host "Starting the EduScan API on port 8000..."
-  $api = Start-Process -FilePath $python -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000" -WorkingDirectory $backendRoot -RedirectStandardOutput (Join-Path $logDirectory "api.stdout.log") -RedirectStandardError (Join-Path $logDirectory "api.stderr.log") @processWindow -PassThru
+  foreach ($name in $launchEnvironment.Keys) {
+    $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    [Environment]::SetEnvironmentVariable($name, $launchEnvironment[$name], 'Process')
+  }
+  if (-not $WebOnly) {
+    if ($Offline) { Write-Host 'Offline mode uses this computer''s separate SQLite database.' }
+    Write-Host "Starting the EduScan API on port 8000..."
+    $api = Start-Process -FilePath $python -ArgumentList '-m', 'uvicorn', 'app.main:app', '--no-proxy-headers', '--app-dir', ('"' + $backendRoot + '"'), '--host', '127.0.0.1', '--port', '8000' -WorkingDirectory $backendRoot -RedirectStandardOutput (Join-Path $logDirectory "api.stdout.log") -RedirectStandardError $apiErrorLog @processWindow -PassThru
+  }
   if (-not $ApiOnly) {
     $web = Start-Process -FilePath $node -ArgumentList ('"' + $viteScript + '" --host 127.0.0.1 --strictPort --port ' + $WebPort) -WorkingDirectory $projectRoot -RedirectStandardOutput (Join-Path $logDirectory "web.stdout.log") -RedirectStandardError (Join-Path $logDirectory "web.stderr.log") @processWindow -PassThru
+    Save-EduScanProcess -Directory $logDirectory -Port $WebPort -Process $web -Offline ([bool]$Offline)
     Wait-EduScanEndpoint -Uri $webOrigin -Process $web -ServiceName "EduScan web app" -ErrorLog "logs\web.stderr.log"
     Write-Host "EduScan web app ready (PID $($web.Id)): $webOrigin"
   }
-  Wait-EduScanEndpoint -Uri "http://127.0.0.1:8000/api/health" -Process $api -ServiceName "EduScan API" -ErrorLog "logs\api.stderr.log"
-  Write-Host "EduScan API ready (PID $($api.Id)): http://127.0.0.1:8000/api/health"
+  if ($api) {
+    Wait-EduScanEndpoint -Uri "http://127.0.0.1:8000/api/health" -Process $api -ServiceName "EduScan API" -ErrorLog "logs\api.stderr.log"
+    $apiServer = Get-EduScanApiServer
+    Save-EduScanProcess -Directory $logDirectory -Port 8000 -Process $apiServer -Offline ([bool]$Offline)
+    Write-Host "EduScan API ready (PID $($apiServer.Id)): http://127.0.0.1:8000/api/health"
+  }
   Write-Host "Logs: $logDirectory"
   $ready = $true
   if ($OpenBrowser -and $web) {
@@ -144,9 +178,19 @@ try {
     throw "EduScan web app stopped. Check logs\web.stderr.log."
   }
 } finally {
-  if ($Wait -or -not $ready) {
-    Stop-EduScanProcess $web
-    Stop-EduScanProcess $api
+  try {
+    if ($Wait -or -not $ready) {
+      try { Stop-EduScanProcess $web } finally {
+        if ($api -and -not $api.HasExited) {
+          if (-not $apiServer) { $apiServer = Get-EduScanApiServer }
+          Stop-EduScanProcess $apiServer
+        }
+      }
+    }
+  } finally {
+    foreach ($name in $previousEnvironment.Keys) {
+      [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
+    }
   }
 }
 

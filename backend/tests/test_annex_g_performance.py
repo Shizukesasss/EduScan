@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
-DATA = tempfile.TemporaryDirectory(prefix='annex-perf-', dir=ROOT / 'tmp')
+DATA = tempfile.TemporaryDirectory(prefix='annex-perf-', dir=os.environ.get('EDUSCAN_TEST_TEMP_DIR'))
 os.environ['DATABASE_URL'] = 'sqlite://'
 os.environ['EDUSCAN_DATA_DIR'] = DATA.name
 os.environ['EDUSCAN_SECRET_KEY'] = 'isolated-annex-performance-tests'

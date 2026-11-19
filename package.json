@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start.ps1 -Wait -OpenBrowser -WebPort 5173",
     "build": "vite build",
+    "build:vercel": "vite build --mode vercel",
     "lint": "oxlint",
     "verify": "npm run lint && npm run build",
     "preview": "vite preview"

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api, auth } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 import { loadGoogleIdentity, renderGoogleSignIn, workspaceFor } from '../../services/googleIdentity';
 import PasswordRecovery from './PasswordRecovery';
+import { isWorkspaceLocation } from '../../hooks/useReturnState';
 
 function formatTeacherGreeting(rawName) {
   const trimmed = String(rawName || '').trim();
@@ -14,12 +15,15 @@ function formatTeacherGreeting(rawName) {
 
 export default function Login() {
   const navigate = useNavigate();
+  const { search, state } = useLocation();
+  const requested = isWorkspaceLocation(state?.requested) ? state.requested : null;
   const { showSuccess } = useToast();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
-  const [recoveryMode, setRecoveryMode] = useState(null);
+  const mode = new URLSearchParams(search).get('recovery');
+  const recoveryMode = mode === 'admin' || mode === 'deped' ? mode : null;
 
   const [busy, setBusy] = useState(false);
   const [config, setConfig] = useState(null);
@@ -44,7 +48,7 @@ export default function Login() {
         if (result.role === 'teacher') {
           showSuccess(formatTeacherGreeting(result.full_name));
         }
-        navigate(workspaceFor(result.role), { replace: true });
+        navigate(requested || workspaceFor(result.role), { replace: true });
       } catch (err) {
         if (!cancelled) setError(err.message);
       } finally {
@@ -74,7 +78,7 @@ export default function Login() {
       }
     })();
     return () => { cancelled = true; };
-  }, [navigate, attempt, showSuccess]);
+  }, [navigate, attempt, showSuccess, requested, recoveryMode]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -87,8 +91,10 @@ export default function Login() {
       if (result.role === 'teacher') {
         showSuccess(formatTeacherGreeting(result.full_name));
       }
-      const workspace = workspaceFor(result.role);
-      navigate(result.must_change_password ? '/account/security' : workspace);
+      navigate(result.must_change_password ? '/account/security' : requested || workspaceFor(result.role), {
+        replace: true,
+        state: result.must_change_password ? { requested } : undefined,
+      });
     } catch (err) { setError(err.message); }
     finally {
       signingIn.current = false;
@@ -104,7 +110,7 @@ export default function Login() {
 
   const openPasswordRecovery = (mode) => {
     setError('');
-    setRecoveryMode(mode);
+    navigate({ pathname: '/login', search: '?recovery=' + mode }, { state: { ...state, fromLogin: true } });
   };
 
   return (
@@ -142,9 +148,9 @@ export default function Login() {
                 key={recoveryMode}
                 active
                 admin={recoveryMode === 'admin'}
-                enabled={recoveryMode === 'admin' ? config.admin_password_recovery : config.deped_password_recovery}
+                enabled={recoveryMode === 'admin' ? config?.admin_password_recovery : config?.deped_password_recovery}
                 onReset={handlePasswordReset}
-                onBack={() => setRecoveryMode(null)}
+                onBack={() => state?.fromLogin ? navigate(-1) : navigate('/login', { replace: true, state })}
               />
             ) : <>
             <h2>Welcome back</h2>
@@ -165,7 +171,7 @@ export default function Login() {
                 : 'Password access is available during the school’s transition to DepEd Google sign-in.'}</p>
               <form onSubmit={handleLogin} className="login-form">
                 <div>
-                  <label htmlFor="login-username">{config.deped_only ? 'DepEd email' : config.deped_password_recovery ? 'Username or DepEd email' : 'Username'}</label>
+                  <label htmlFor="login-username">{config.deped_only ? 'DepEd email' : 'Email or username'}</label>
                   <div className="login-input-wrap">
                     <input id="login-username" autoComplete="username" type={config.deped_only ? 'email' : 'text'} className="input-field" value={username} onChange={(e) => setUsername(e.target.value)} required />
                   </div>

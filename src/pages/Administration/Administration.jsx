@@ -1,10 +1,14 @@
 import PageHeading from '../../components/Common/PageHeading';
+import Activity from './Activity';
+import EmailChangeRequests from './EmailChangeRequests';
+import ActionMenu from '../../components/Common/ActionMenu';
 import Modal from '../../components/Common/Modal';
 import usePagination from '../../hooks/usePagination';
 import Pagination from '../../components/Common/Pagination';
 import PaginatedBody from '../../components/Common/PaginatedBody';
 import { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useSearchParams } from 'react-router-dom';
+import { ReturnLink } from '../../components/Common/ReturnNavigation';
 import { api, auth } from '../../api/client';
 import { WORK_IMMERSION_SCOPE, editableShsSubject, shsElectiveChoices, shsElectiveForSave } from '../../services/shsWorkImmersion';
 import { tleSpecialization, withTleSpecialization } from '../../services/tleSubjects';
@@ -357,6 +361,7 @@ function SelectField({ label, value, onChange, options }) {
 
 export default function Administration() {
   const role = auth.role();
+  const { state } = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const available = [
     ...(role === 'admin' ? tabs : []),
@@ -370,9 +375,12 @@ export default function Administration() {
   return <div className="page-stack">
     <PageHeading title="Administration" description="Manage school records and the controls available to your role." />
     <nav className="setup-tabs" aria-label="Workspace sections">{available.map(([id, label]) =>
-      <button key={id} aria-pressed={active === id} className={active === id ? 'active' : ''} onClick={() => setSearchParams({ tab: id })}>{label}</button>)}</nav>
+      <button key={id} aria-pressed={active === id} className={active === id ? 'active' : ''} onClick={() => {
+        if (id !== active) setSearchParams({ tab: id }, { state });
+      }}>{label}</button>)}</nav>
     {tabs.some(([id]) => id === active) && role === 'admin' && <AdminRecords active={active} />}
-    {['activity', 'data', 'backup', 'health'].includes(active) && <OperationalControls view={active} />}
+    {active === 'activity' && <Activity role={role} />}
+    {['data', 'backup', 'health'].includes(active) && <OperationalControls view={active} />}
   </div>;
 }
 
@@ -405,7 +413,7 @@ function AdminRecords({ active }) {
   return (
     <div className="page-stack">
       {active === 'people'   && <PeopleManager people={people} disposals={disposals} reload={load} success={success} fail={fail} structure={structure} />}
-      {active === 'accounts' && <AccountManager users={users} schoolYears={structure.school_years} reload={load} success={success} fail={fail} />}
+      {active === 'accounts' && <><EmailChangeRequests /><AccountManager users={users} schoolYears={structure.school_years} reload={load} success={success} fail={fail} /></>}
       {active === 'academic' && <AcademicManager structure={structure} deletedReferences={deletedReferences} teachers={users.filter((u) => u.role === 'teacher' && u.active)} reload={load} success={success} fail={fail} />}
     </div>
   );
@@ -416,11 +424,18 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
   const [form, setForm] = useState(emptyPerson);
   const [editing, setEditing] = useState(null);
   const [disposal, setDisposal] = useState(null);
-  const editingRole = people.find((item) => item.id === editing)?.role;
+  const [lrnError, setLrnError] = useState('');
+  const originalPerson = people.find((item) => item.id === editing);
+  const editingRole = originalPerson?.role;
   const patch = (field, value) => setForm((c) => ({ ...c, [field]: value, ...(field === 'role' && value !== c.role ? { enrollment_status: value === 'Student' ? 'Regular' : 'Appointed', enrollment_end_date: '', school_year_id: '' } : {}) }));
-  const edit  = (item) => { setEditing(item.id); setForm(Object.fromEntries(Object.keys(emptyPerson).map((k) => [k, item[k] ?? emptyPerson[k]]))); };
+  const edit  = (item) => { setLrnError(''); setEditing(item.id); setForm(Object.fromEntries(Object.keys(emptyPerson).map((k) => [k, item[k] ?? emptyPerson[k]]))); };
   const save  = async (event) => {
     event.preventDefault();
+    const preservesLegacyLrn = originalPerson?.role === 'Student' && (originalPerson.lrn || '') === form.lrn;
+    if (form.role === 'Student' && !preservesLegacyLrn && !/^[0-9]{12}$/.test(form.lrn)) {
+      setLrnError('LRN must contain exactly 12 digits (0–9).');
+      return;
+    }
     try {
       const payload = { ...form, external_id: form.role === 'Student' && !editing ? form.lrn : form.external_id, lrn: form.role === 'Student' ? form.lrn || null : null, date_of_birth: form.date_of_birth || null, middle_name: form.middle_name || null, name_extension: form.name_extension || null, grade: form.grade || null, section: form.section || null, guardian_phone: form.guardian_phone || null, enrollment_note: form.enrollment_note || null, enrollment_start_date: form.enrollment_start_date || null, enrollment_end_date: form.enrollment_end_date || null, transfer_school: form.transfer_school || null };
       if (editing || form.role !== 'Student') delete payload.school_year_id;
@@ -432,13 +447,17 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
   const setActive = async (item) => { const data = new FormData(); data.append('active', String(!item.active)); try { await api.post(`/admin/persons/${item.id}/active`, data); success(`${item.full_name} ${item.active ? 'deactivated' : 'reactivated'}.`); await reload(); } catch (err) { fail(err); } };
   return (
     <div className="page-stack">
-      <div className="notice notice-blue">Create or update a school record here when camera capture is unavailable. This does not enroll a face. To capture face samples and train the model, use <a href="/scanner">Gate Station → Enroll person</a>. Staff can record a verified assisted visit in Attendance.</div>
+      <div className="notice notice-blue">Create or update a school record here when camera capture is unavailable. This does not enroll a face. To capture face samples and train the model, use <ReturnLink to="/scanner">Gate Station → Register person</ReturnLink>. Staff can record a verified assisted visit in Attendance.</div>
       <section className="card-static">
         <div className="section-heading"><div><p className="eyebrow">Students, faculty, and personnel</p><h2>{editing ? 'Edit school record' : 'Add school record'}</h2></div></div>
         <form onSubmit={save}>
           <div className="form-grid three-columns">
             {form.role === 'Student'
-              ? <Field label="LRN" value={form.lrn} onChange={(v) => patch('lrn', v)} required />
+              ? <label><span className="field-label">LRN</span>
+                  <input className="input-field" inputMode="numeric" value={form.lrn} aria-invalid={Boolean(lrnError)} aria-describedby={lrnError ? 'admin-lrn-error' : undefined}
+                    onChange={(event) => { patch('lrn', event.target.value); setLrnError(''); }} />
+                  {lrnError && <span id="admin-lrn-error" className="input-error" role="alert">{lrnError}</span>}
+                </label>
               : <Field label="Employee ID" value={form.external_id} onChange={(v) => patch('external_id', v)} required />}
             <SelectField label="Role" value={form.role} onChange={(v) => patch('role', v)} options={['Student', 'Faculty', 'Non-teaching Personnel']} />
             <Field label="Surname" value={form.surname} onChange={(v) => patch('surname', v)} required pattern={personNamePattern} title="Use letters and common name punctuation only." />
@@ -463,7 +482,11 @@ function PeopleManager({ people, disposals, reload, success, fail, structure }) 
       <section className="card-static">
         <h2>School records</h2>
         <p className="section-copy">Students use an LRN; teaching and non-teaching staff use an employee ID. Deactivation preserves history and blocks recognition. Full disposal permanently removes the person, face enrollment, and linked records.</p>
-        <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>ID / LRN</th><th>Role / placement</th><th>Movement</th><th>Status</th><th /></tr></thead><PaginatedBody>{people.map((item) => <tr key={item.id}><td><strong>{item.full_name}</strong>{item.possible_duplicate && <span className="table-subline duplicate-warning">Possible duplicate name—verify IDs</span>}</td><td>{item.role === 'Student' ? item.lrn || 'LRN not recorded' : item.external_id}<span className="table-subline">{item.role === 'Student' ? 'LRN' : 'Employee ID'}</span></td><td>{item.role}<span className="table-subline">{item.grade ? `Grade ${item.grade} — ${item.section}` : '—'}</span></td><td>{item.enrollment_status}{item.transfer_school && <span className="table-subline">{item.transfer_school}</span>}{item.enrollment_end_date && <span className="table-subline">Last day: {item.enrollment_end_date}</span>}{item.enrollment_note && <span className="table-subline">{item.enrollment_note}</span>}</td><td><span className={`tag ${item.active ? 'tag-success' : 'tag-gray'}`}>{item.active ? 'Active' : 'Inactive'}</span></td><td><details className="action-menu table-action-menu"><summary> Manage</summary><div className="action-menu-panel"><button onClick={() => edit(item)}> Edit record</button><button onClick={() => setActive(item)}>{item.active ? 'Deactivate record' : 'Reactivate record'}</button><button className="danger-link" onClick={() => setDisposal(item)}> Full disposal</button></div></details></td></tr>)}</PaginatedBody></table></div>
+        <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>ID / LRN</th><th>Role / placement</th><th>Movement</th><th>Status</th><th /></tr></thead><PaginatedBody>{people.map((item) => <tr key={item.id}><td><strong>{item.full_name}</strong>{item.possible_duplicate && <span className="table-subline duplicate-warning">Possible duplicate name—verify IDs</span>}</td><td>{item.role === 'Student' ? item.lrn || 'LRN not recorded' : item.external_id}<span className="table-subline">{item.role === 'Student' ? 'LRN' : 'Employee ID'}</span></td><td>{item.role}<span className="table-subline">{item.grade ? `Grade ${item.grade} — ${item.section}` : '—'}</span></td><td>{item.enrollment_status}{item.transfer_school && <span className="table-subline">{item.transfer_school}</span>}{item.enrollment_end_date && <span className="table-subline">Last day: {item.enrollment_end_date}</span>}{item.enrollment_note && <span className="table-subline">{item.enrollment_note}</span>}</td><td><span className={`tag ${item.active ? 'tag-success' : 'tag-gray'}`}>{item.active ? 'Active' : 'Inactive'}</span></td><td><div className="action-row"><button type="button" className="btn-link" onClick={() => edit(item)}>Edit</button>
+          <ActionMenu label="More actions" table>
+            <button type="button" onClick={() => setActive(item)}>{item.active ? 'Deactivate record' : 'Reactivate record'}</button>
+            <button type="button" className="danger-link" onClick={() => setDisposal(item)}>Full disposal</button>
+          </ActionMenu></div></td></tr>)}</PaginatedBody></table></div>
       </section>
       <section className="card-static"><h2>Record-disposal audit</h2><div className="table-scroll"><table className="interactive-table"><thead><tr><th>Completed</th><th>Anonymous reference</th><th>Authority</th><th>Reason</th><th>Removed</th><th>Actor</th></tr></thead><PaginatedBody>{disposals.length === 0 && <tr><td colSpan="6" className="empty-cell">No full record disposal has been performed.</td></tr>}{disposals.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString('en-PH')}</td><td>{item.disposal_reference}</td><td>{item.authorization_reference}</td><td>{item.reason}</td><td>{Object.entries(item.removed_counts).map(([k, v]) => `${k}: ${v}`).join(', ')}</td><td>{item.actor_name}</td></tr>)}</PaginatedBody></table></div></section>
       {disposal && <DisposalModal person={disposal} onClose={() => setDisposal(null)} onDone={async (result) => { setDisposal(null); if (result.file_cleanup_pending) fail(new Error('The record and recognition enrollment were removed, but some encrypted files could not be deleted. Contact the administrator to complete file cleanup.')); else success('The selected person, face enrollment, and linked school records were disposed.'); await reload(); }} fail={fail} />}
@@ -549,6 +572,13 @@ function AccountManager({ users, schoolYears, reload, success, fail }) {
   const patch = (field, value) => setForm((c) => ({ ...c, [field]: value }));
   const edit  = (item) => { setEditing(item.id); setForm({ username: item.username, password: '', role: item.role, full_name: item.full_name, active: item.active }); };
   const save  = async (event) => { event.preventDefault(); try { if (editing) await api.put(`/admin/users/${editing}`, { role: form.role, full_name: form.full_name, active: form.active, new_password: form.password || null }); else await api.post('/admin/users', form); success(editing ? 'Account updated.' : 'Account created.'); setEditing(null); setForm(emptyUser); await reload(); } catch (err) { fail(err); } };
+  const reactivate = async (item) => {
+    try {
+      await api.put(`/admin/users/${item.id}`, { role: item.role, full_name: item.full_name, active: true });
+      success(`${item.username} reactivated.`);
+      await reload();
+    } catch (err) { fail(err); }
+  };
   const deactivate    = async (item) => { try { await api.delete(`/admin/users/${item.id}`); success(`${item.username} was deactivated.`); await reload(); } catch (err) { fail(err); } };
   const unlock        = async (item) => { try { await api.post(`/admin/users/${item.id}/unlock`, {}); success(`${item.username} was unlocked.`); await reload(); } catch (err) { fail(err); } };
   return (
@@ -568,7 +598,15 @@ function AccountManager({ users, schoolYears, reload, success, fail }) {
           </div>
           <div className="modal-actions">{editing && <button type="button" className="btn-secondary" onClick={() => { setEditing(null); setForm(emptyUser); }}>Cancel</button>}<button className="btn-primary"> Save account</button></div>
         </form>}
-        <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>Account</th><th>Role</th><th>Status</th><th>Security</th><th /></tr></thead><PaginatedBody>{users.map((item) => <tr key={item.id}><td>{item.full_name}{item.is_demo && <span className="table-subline">Demo account</span>}</td><td>{item.google_email || item.username}</td><td>{item.role}</td><td>{item.active ? 'Active' : 'Inactive'}</td><td>{item.auth_provider === 'google' ? 'Google sign-in' : item.locked_until ? `Locked until ${new Date(item.locked_until).toLocaleString('en-PH')}` : item.must_change_password ? 'Password change required' : 'Ready'}</td><td><details className="action-menu table-action-menu"><summary> Manage</summary><div className="action-menu-panel"><button onClick={() => edit(item)}> Edit account</button>{item.locked_until && <button onClick={() => unlock(item)}>Unlock account</button>}{item.active && item.username !== 'admin' && <button className="danger-link" onClick={() => deactivate(item)}>Deactivate account</button>}</div></details></td></tr>)}</PaginatedBody></table></div>
+        <div className="table-scroll"><table className="interactive-table"><thead><tr><th>Name</th><th>Account</th><th>Role</th><th>Status</th><th>Security</th><th /></tr></thead><PaginatedBody>{users.map((item) => <tr key={item.id}><td>{item.full_name}{item.is_demo && <span className="table-subline">Demo account</span>}</td><td>{item.google_email || item.username}</td><td>{item.role}</td><td>{item.active ? 'Active' : 'Inactive'}</td><td>{item.auth_provider === 'google' ? 'Google sign-in' : item.locked_until ? `Locked until ${new Date(item.locked_until).toLocaleString('en-PH')}` : item.must_change_password ? 'Password change required' : 'Ready'}</td><td><div className="action-row"><button type="button" className="btn-link" onClick={() => edit(item)}>Edit</button>
+          {(item.locked_until || !item.active || (item.username !== 'admin' && item.id !== auth.snapshot().user?.id)) &&
+            <ActionMenu label="More actions" table>
+              {item.locked_until && <button type="button" onClick={() => unlock(item)}>Unlock account</button>}
+              {!item.active && <button type="button" onClick={() => reactivate(item)}>Reactivate account</button>}
+              {item.active && item.username !== 'admin' && item.id !== auth.snapshot().user?.id &&
+                <button type="button" className="danger-link" onClick={() => deactivate(item)}>Deactivate account</button>}
+            </ActionMenu>}
+          </div></td></tr>)}</PaginatedBody></table></div>
       </section>
     </div>
   );

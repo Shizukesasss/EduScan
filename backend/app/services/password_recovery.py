@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from ..auth import DEPED_PASSWORD_PREFIX, hash_password, revoke_user_sessions, verify_password
 from ..config import settings
 from ..models import DepedPasswordReset, RecoveryEmailVerification, User
+from .account_email import mapped_account
 from .audit import add_audit
 from .google_login import DOMAIN, deped_email
 
@@ -71,6 +72,9 @@ def _admin_user(db: Session, username: str) -> User | None:
     username = username.strip().lower()
     if not admin_recovery_enabled() or (settings.deped_password_recovery and username.endswith(f"@{DOMAIN}")):
         return None
+    mapped = mapped_account(db, username)
+    if mapped:
+        return mapped if mapped.role == "admin" and mapped.active and not mapped.google_email and not mapped.google_sub else None
     return db.scalar(select(User).where(func.lower(User.username) == username,
                                         User.role == "admin", User.active.is_(True),
                                         User.google_email.is_(None), User.google_sub.is_(None)))

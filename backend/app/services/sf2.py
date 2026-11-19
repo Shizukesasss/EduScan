@@ -246,9 +246,13 @@ def sf2_students(db: Session, year: int, month: int, grade: str, section: str) -
 
 def sf2_pending_attendance(db: Session, people: list[Person], year: int, month: int) -> dict:
     today = local_now().date()
+    days = [day for day in _school_days(db, year, month) if day < today]
+    return _unresolved_attendance(people, rows_for_people_on_days(db, people, days), today)
+
+
+def _unresolved_attendance(people: list[Person], rows_by_day: dict[date, list[dict]], today: date) -> dict:
     unresolved = 0
     examples = []
-    days = [day for day in _school_days(db, year, month) if day < today]
     registrations = {}
     for person in people:
         registered = person.created_at
@@ -256,7 +260,9 @@ def sf2_pending_attendance(db: Session, people: list[Person], year: int, month: 
             registered = registered.replace(tzinfo=timezone.utc)
         if not person.enrollment_start_date and registered:
             registrations[person.id] = registered.astimezone(MANILA).date()
-    for day, rows in rows_for_people_on_days(db, people, days).items():
+    for day, rows in rows_by_day.items():
+        if day >= today:
+            continue
         for row in rows:
             if day < registrations.get(row['person_id'], day):
                 continue
@@ -316,7 +322,7 @@ def _append_session_sheet(members: dict[str, bytes], rows_by_day: dict[date, lis
 
 
 def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
-                 school_id: str, school_year: str, school_name: str) -> Path:
+                 school_id: str, school_year: str, school_name: str, *, require_resolved: bool = False) -> Path:
     days = _school_days(db, year, month)
     if len(days) > len(DAY_COLUMNS):
         raise HTTPException(status_code=422, detail="This month has more than 25 weekdays; the official SF2 template cannot hold every day")
@@ -326,6 +332,16 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
     females = sorted((person for person in students if person.sex == "Female"), key=lambda person: person.full_name.casefold())
     if len(males) > len(MALE_ROWS) or len(females) > len(FEMALE_ROWS):
         raise HTTPException(status_code=422, detail=f"SF2 capacity exceeded (male {len(males)}/{len(MALE_ROWS)}, female {len(females)}/{len(FEMALE_ROWS)})")
+
+    today = local_now().date()
+    rows_by_day = rows_for_people_on_days(db, students, days)
+    if require_resolved:
+        pending = _unresolved_attendance(students, rows_by_day, today)
+        if pending["unresolved_count"]:
+            raise HTTPException(409, detail={
+                "message": "Review or close the unresolved daily attendance before generating official SF2. No attendance was changed.",
+                **pending,
+            })
 
     source = template_path()
     try:
@@ -370,7 +386,6 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
     tardy_positions: list[tuple[int, int]] = []
     male_present = [0] * len(days)
     female_present = [0] * len(days)
-    rows_by_day = rows_for_people_on_days(db, students, days)
     daily_status = {day: {row["person_id"]: row["status"] for row in rows} for day, rows in rows_by_day.items()}
     for group, row_numbers in ((males, MALE_ROWS), (females, FEMALE_ROWS)):
         for person, row_number in zip(group, row_numbers):
@@ -414,7 +429,6 @@ def generate_sf2(db: Session, year: int, month: int, grade: str, section: str,
         members["xl/media/eduscan-tardy.png"] = _triangle_png()
         members["[Content_Types].xml"] = _ensure_png_content_type(members["[Content_Types].xml"])
 
-    today = local_now().date()
     _append_session_sheet(members, {day: rows for day, rows in rows_by_day.items() if day <= today})
 
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)

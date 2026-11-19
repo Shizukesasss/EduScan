@@ -1,8 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'vite';
-import { renderToStaticMarkup } from 'react-dom/server';
+import { renderToPipeableStream } from 'react-dom/server';
 import { createElement } from 'react';
+import { StaticRouter } from 'react-router-dom';
+import { PassThrough } from 'node:stream';
+
+function render(element) {
+  return new Promise((resolve, reject) => {
+    const output = new PassThrough();
+    output.setEncoding('utf8');
+    let markup = '';
+    output.on('data', chunk => { markup += chunk; });
+    output.on('end', () => resolve(markup));
+    output.on('error', reject);
+    const stream = renderToPipeableStream(element, {
+      onAllReady: () => stream.pipe(output),
+      onError: reject,
+    });
+  });
+}
 
 function findRoute(element, path) {
   if (!element || typeof element !== 'object') return null;
@@ -27,15 +44,17 @@ test('attendance reads the administrator role after login, not at app startup', 
     await auth.restore();
     const dashboard = findRoute(tree, '/dashboard');
     const route = findRoute(dashboard, 'attendance');
-    const markup = renderToStaticMarkup(createElement(tree.type, null, route.props.element));
+    const renderAttendance = () => render(createElement(StaticRouter, { location: '/dashboard/attendance' },
+      createElement(tree.type, null, route.props.element)));
+    const markup = await renderAttendance();
     assert.match(markup, /Daily attendance register/);
     assert.match(markup, /Attendance records/);
     for (const role of ['records_officer', 'privacy_officer']) {
       currentRole = role;
       await auth.restore();
-      const restricted = renderToStaticMarkup(createElement(tree.type, null, route.props.element));
+      const restricted = await renderAttendance();
       // Server rendering does not fetch operational records in React effects.
-      assert.match(restricted, /Loading operational records/);
+      assert.match(restricted.replaceAll('<!-- -->', ''), /Loading operational records/);
       assert.doesNotMatch(restricted, /Daily attendance register/);
     }
   } finally {

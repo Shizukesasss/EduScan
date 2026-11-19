@@ -282,7 +282,7 @@ class AttendanceSyncTest(unittest.TestCase):
         })
         self.assertEqual(invalid.status_code, 422, invalid.text)
         created = self.client.post("/api/persons", headers=self.admin_headers, json={
-            "external_id": "NEW-STUDENT", "surname": "New", "first_name": "Learner", "sex": "Female", "date_of_birth": "2012-01-01", "role": "Student", "grade": "10", "section": "Rizal", "school_year_id": self.school_year.id, "enrollment_start_date": "2026-06-01", "biometric_consent": False})
+            "external_id": "NEW-STUDENT", "lrn": "012345678910", "surname": "New", "first_name": "Learner", "sex": "Female", "date_of_birth": "2012-01-01", "role": "Student", "grade": "10", "section": "Rizal", "school_year_id": self.school_year.id, "enrollment_start_date": "2026-06-01", "biometric_consent": False})
         self.assertEqual(created.status_code, 200, created.text)
         row = next(row for row in self.api_rows() if row["person_id"] == created.json()["id"])
         self.assertEqual(row["status"], "No scan")
@@ -476,7 +476,7 @@ class AttendanceSyncTest(unittest.TestCase):
         self.assertEqual(small[1], 30)
         self.assertEqual(large[1], 15_000)
         self.assertEqual(small[0], large[0])
-        self.assertLessEqual(large[0], 151)
+        self.assertLessEqual(large[0], 6)
 
     def test_sf2_pending_month_uses_batched_queries(self):
         from app.services.sf2 import sf2_pending_attendance
@@ -569,6 +569,7 @@ class AttendanceSyncTest(unittest.TestCase):
             ({"role": "Faculty"}, [self.personnel.id]),
             ({"grade": "10", "section": "Rizal"}, [self.student.id]),
             ({"person_id": self.student.id}, [self.student.id]),
+            ({"person_id": duplicate.id}, []),
             ({"role": "Faculty", "person_id": self.student.id}, []),
             ({"grade": "Unknown"}, []),
         ]:

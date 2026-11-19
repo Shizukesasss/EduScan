@@ -214,7 +214,7 @@ class EduScanSmokeTest(unittest.TestCase):
             sf2_path = generate_sf2(db, 2026, 8, "10", "Rizal", "SMOKE", "2026-2027",
                                     "San Jose National High School")
         with zipfile.ZipFile(sf2_path) as archive:
-            self.assertIn("xl/media/image2.wmf", archive.namelist())
+            self.assertIn("xl/media/image2.png", archive.namelist())
             self.assertIn("xl/media/eduscan-tardy.png", archive.namelist())
             drawing = archive.read("xl/drawings/drawing1.xml")
             self.assertIn(b"EduScan Tardy 14-4", drawing)
@@ -351,6 +351,7 @@ class EduScanSmokeTest(unittest.TestCase):
                 "http://192.168.1.100:8080/message",
                 auth=("eduscan-gateway", "test-only-password"),
                 json={
+                    "id": record.id,
                     "textMessage": {"text": "EduScan capcom6 contract test."},
                     "phoneNumbers": ["+639171234567"],
                     "withDeliveryReport": True,
@@ -454,7 +455,7 @@ class EduScanSmokeTest(unittest.TestCase):
         people = []
         for external_id, name, sex in (("MULTI-001", "Zulu, Ana", "Female"), ("MULTI-002", "Alpha, Bea", "Female")):
             response = self.client.post("/api/persons", headers=self.headers, json={
-                "external_id": external_id, "lrn": None, "surname": name.split(',')[0], "first_name": name.split(',')[1].strip(), "sex": sex, "date_of_birth": "2012-01-01", "role": "Student",
+                "external_id": external_id, "lrn": f"99999992760{external_id[-1]}", "surname": name.split(',')[0], "first_name": name.split(',')[1].strip(), "sex": sex, "date_of_birth": "2012-01-01", "role": "Student",
                 "grade": "9", "section": "Multi", **self.student_placement, "guardian_phone": None, "biometric_consent": True,
             })
             self.assertEqual(response.status_code, 200, response.text)

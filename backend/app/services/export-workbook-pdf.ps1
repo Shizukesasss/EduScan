@@ -71,6 +71,24 @@ function Set-LandscapePageFit {
     }
 }
 
+function Remove-SystemGeneratedFooter {
+    param($Sheet)
+    $layout = $Sheet.PageSetup
+    $pattern = '(?i)\bsystem[\s-]+generated\b'
+    foreach ($part in @('LeftFooter', 'CenterFooter', 'RightFooter')) {
+        $text = [string]$layout.$part
+        if ($text -match $pattern) { $layout.$part = $text -replace $pattern, '' }
+        if ($layout.DifferentFirstPageHeaderFooter) {
+            $footer = $layout.FirstPage.$part
+            if ($footer.Text -match $pattern) { $footer.Text = $footer.Text -replace $pattern, '' }
+        }
+        if ($layout.OddAndEvenPagesHeaderFooter) {
+            $footer = $layout.EvenPage.$part
+            if ($footer.Text -match $pattern) { $footer.Text = $footer.Text -replace $pattern, '' }
+        }
+    }
+}
+
 $excel = New-Object -ComObject Excel.Application
 $book = $null
 try {
@@ -78,6 +96,9 @@ try {
     $excel.EnableEvents = $false
     $excel.AutomationSecurity = 3  # Disable macros in uploaded templates.
     $book = $excel.Workbooks.Open($Source, 0, $true)
+    foreach ($sheet in $book.Worksheets) {
+        if ($sheet.Visible -eq -1) { Remove-SystemGeneratedFooter $sheet }
+    }
     if ($Terms) {
         $included = $Terms.Split(',')
         $termSheets = @($book.Worksheets | Where-Object {

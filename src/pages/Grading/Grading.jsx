@@ -1,6 +1,9 @@
 import PageHeading from '../../components/Common/PageHeading';
+import { BackButton } from '../../components/Common/ReturnNavigation';
+import useReturnState from '../../hooks/useReturnState';
 import { MAPEH_AREAS, formatMapehFinalizeIssue, mapehAreaContext, sameMapehContext } from '../../services/mapehLearningAreas';
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import { api, auth } from '../../api/client';
 import { normalizeGradeName, subjectMatchesGrade, availableOptionId } from '../../services/academicContext';
 import { buildGradebookExportQuery, filterPreviewIssues } from '../../services/gradebookExport';
@@ -23,6 +26,25 @@ export default function Grading() {
   const currentRole = String(auth.role()).toLowerCase();
   const isTeacher = currentRole === 'teacher';
   const isReviewer = ['admin', 'records_officer', 'school_head'].includes(currentRole);
+  const { pathname, state } = useLocation();
+  const returnState = useReturnState();
+  const [params, setParams] = useSearchParams();
+  const requestedRecord = params.get('record') || '';
+  const adminGradebookId = isReviewer && /^[1-9]\d*$/.test(requestedRecord) ? requestedRecord : '';
+  const recordOpen = Boolean(adminGradebookId);
+  const activeTab = params.get('view') === 'metrics' ? 'metrics' : 'gradebook';
+  const changeView = (view, record = adminGradebookId, replace = false) => {
+    if (view === activeTab && record === adminGradebookId) return;
+    const next = new URLSearchParams(params);
+    if (view === 'metrics') next.set('view', 'metrics');
+    else next.delete('view');
+    if (record) next.set('record', record);
+    else next.delete('record');
+    const navigationState = !recordOpen && record ? returnState
+      : recordOpen && !record && state?.returnTo?.location.pathname === pathname ? state.returnTo.state : state;
+    setParams(next, { state: navigationState, replace });
+  };
+  const setAdminGradebookId = record => changeView(activeTab, record);
   const [structure, setStructure] = useState({
     school_years: [],
     grading_periods: [],
@@ -42,27 +64,31 @@ export default function Grading() {
   const [existingGradebooksLoading, setExistingGradebooksLoading] = useState(isReviewer);
   const [existingGradebooksError, setExistingGradebooksError] = useState('');
   const [includeHistoricalGradebooks, setIncludeHistoricalGradebooks] = useState(false);
-  const [adminGradebookId, setAdminGradebookId] = useState('');
   const [adminGradebookSearch, setAdminGradebookSearch] = useState('');
-  const [recordOpen, setRecordOpen] = useState(false);
   const recordHeadingRef = useRef(null);
-  const [openRequest, setOpenRequest] = useState(0);
 
   // Active Gradebook data from API
   const [gradebookId, setGradebookId] = useState(null);
   const [fullGradebook, setFullGradebook] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(recordOpen);
+  const [previousRecord, setPreviousRecord] = useState(adminGradebookId);
   const [structureLoading, setStructureLoading] = useState(!isReviewer);
   const [saving, setSaving] = useState(false);
+  if (previousRecord !== adminGradebookId) {
+    setPreviousRecord(adminGradebookId);
+    setFullGradebook(null);
+    setGradebookId(null);
+    setLoading(recordOpen);
+  }
   useEffect(() => {
-    if (!isReviewer || !openRequest) return undefined;
+    if (!recordOpen) return undefined;
     const frame = requestAnimationFrame(() => {
       const target = recordHeadingRef.current;
       target?.focus({ preventScroll: true });
       target?.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
     });
     return () => cancelAnimationFrame(frame);
-  }, [isReviewer, openRequest, loading]);
+  }, [recordOpen, adminGradebookId, activeTab]);
 
   const loadRequestRef = useRef(0);
   const { showSuccess, showError } = useToast();
@@ -88,7 +114,6 @@ export default function Grading() {
   const [auditList, setAuditList] = useState([]);
 
   // Navigation State
-  const [activeTab, setActiveTab] = useState('gradebook');
 
   // 1. Initial Load: Academic Structure
   useEffect(() => {
@@ -669,13 +694,13 @@ export default function Grading() {
       <div className="setup-tabs mb-4">
         <button
           className={activeTab === 'gradebook' ? 'active' : ''}
-          onClick={() => setActiveTab('gradebook')}
+          onClick={() => changeView('gradebook')}
         >
           Gradebook
         </button>
         <button
           className={activeTab === 'metrics' ? 'active' : ''}
-          onClick={() => setActiveTab('metrics')}
+          onClick={() => changeView('metrics')}
         >
           Class Performance Metrics
         </button>
@@ -734,10 +759,7 @@ export default function Grading() {
                   placeholder="Teacher, subject, grade, section, term, or school year"
                   onChange={(event) => {
                     setAdminGradebookSearch(event.target.value);
-                    setAdminGradebookId('');
-                    setFullGradebook(null);
-                    setGradebookId(null);
-                    setLoading(false);
+                    changeView(activeTab, '', true);
                   }} />
               </span>
             </label>
@@ -747,10 +769,7 @@ export default function Grading() {
                   setIncludeHistoricalGradebooks(event.target.checked);
                   setExistingGradebooksLoading(true);
                   setExistingGradebooksError('');
-                  setAdminGradebookId('');
-                  setFullGradebook(null);
-                  setGradebookId(null);
-                  setLoading(false);
+                  changeView(activeTab, '', true);
                 }} />
               <span>Include older or inactive records</span>
             </label>
@@ -778,15 +797,11 @@ export default function Grading() {
                       className={`admin-gradebook-record${selected ? ' is-selected' : ''}`}
                       aria-pressed={selected}
                       onClick={() => {
-                        setActiveTab('gradebook');
-                        setRecordOpen(true);
-                        setOpenRequest((request) => request + 1);
-                        if (selected && fullGradebook) return;
-                        setFullGradebook(null);
-                        setGradebookId(null);
-                        setLoading(true);
-                        if (selected) loadGradebook();
-                        else setAdminGradebookId(String(book.id));
+                        changeView('gradebook', String(book.id));
+                        if (selected) {
+                          if (!fullGradebook) { setLoading(true); loadGradebook(); }
+                          if (activeTab === 'gradebook') recordHeadingRef.current?.focus();
+                        }
                       }}>
                       <span className="class-record-browser__subject">
                         <strong>{book.subject_name || 'Subject unavailable'}</strong>
@@ -811,12 +826,13 @@ export default function Grading() {
             {existingGradebooksError && <p className="notice notice-danger mt-2" role="alert">Could not load class records: {existingGradebooksError}</p>}
           </section>}
 
-      {isReviewer && recordOpen && activeTab === 'gradebook' && <header className="class-record-workspace">
+      {recordOpen && <header className="class-record-workspace">
         <div>
           <h2 ref={recordHeadingRef} tabIndex={-1}>{selectedRecord?.subject_name || 'Class record'}</h2>
-          <p>{selectedRecord ? `Grade ${normalizeGradeName(selectedRecord.grade_name)} · ${selectedRecord.section_name || 'Unassigned section'} · ${selectedRecord.school_year_name || ''} · ${selectedRecord.grading_period_name || `Term ${selectedRecord.term_order}`}` : 'Loading the selected record…'}</p>
+          <p>{selectedRecord ? `Grade ${normalizeGradeName(selectedRecord.grade_name)} · ${selectedRecord.section_name || 'Unassigned section'} · ${selectedRecord.school_year_name || ''} · ${selectedRecord.grading_period_name || `Term ${selectedRecord.term_order}`}` : loading ? 'Loading the selected record…' : 'The selected record is unavailable.'}</p>
           {selectedRecord?.teacher_name && <p>Teacher: {selectedRecord.teacher_name}</p>}
         </div>
+        <BackButton fallback={pathname} className="btn-secondary" withinPage>Back to class records</BackButton>
       </header>}
 
 

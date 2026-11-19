@@ -1,4 +1,5 @@
 import Modal from '../../components/Common/Modal';
+import { ReturnLink } from '../../components/Common/ReturnNavigation';
 import PaginatedBody from '../../components/Common/PaginatedBody';
 import { SkeletonBar, SkeletonRows } from '../../components/Common/Skeleton';
 import useSlowLoading from '../../hooks/useSlowLoading';
@@ -8,6 +9,7 @@ import { api, auth, displayTime, localDate } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
 import { orderAttendanceRows } from '../../services/attendanceOrder';
 import { searchAttendanceRows } from '../../services/attendanceSearch';
+import { smsDeliveryLink } from '../../services/smsDelivery';
 import './Attendance.css';
 
 const statusColor = {
@@ -129,7 +131,7 @@ export default function Attendance() {
       </dl>
       <div className="attendance-register__heading">
         <div><h2>Attendance records</h2><p>Latest gate activity first · Refreshes every 2 seconds while visible</p></div>
-        <div className="attendance-scope-note">{auth.role() === 'admin' ? <a href="/dashboard/setup#sms-delivery">View SMS delivery in System Setup</a> : `${sections.length} assigned section(s)`}</div>
+        <div className="attendance-scope-note">{auth.role() === 'admin' ? <ReturnLink to={smsDeliveryLink()}>View SMS delivery</ReturnLink> : `${sections.length} assigned section(s)`}</div>
       </div>
       <div className="attendance-search-row">
         <div className="attendance-search">

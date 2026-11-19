@@ -10,6 +10,7 @@ from .services.enrollment import enrollment_error
 
 USER_ROLES = {"admin", "teacher", "scanner",
               "records_officer", "privacy_officer", "ict", "school_head"}
+EMAIL_ADDRESS_PATTERN = r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+$"
 
 
 def strong_password(value: str) -> str:
@@ -30,7 +31,7 @@ class LoginRequest(BaseModel):
 
 class PasswordRecoveryRequest(BaseModel):
     email: str | None = Field(default=None, min_length=1, max_length=254)
-    username: str | None = Field(default=None, min_length=1, max_length=80)
+    username: str | None = Field(default=None, min_length=1, max_length=254)
     website: str | None = None
 
     @model_validator(mode="after")
@@ -48,8 +49,24 @@ class PasswordRecoveryConfirm(PasswordRecoveryRequest):
 
 
 class RecoveryEmailRequest(BaseModel):
-    email: str = Field(min_length=3, max_length=254, pattern=r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+$")
+    email: str = Field(min_length=3, max_length=254, pattern=EMAIL_ADDRESS_PATTERN)
     current_password: str = Field(min_length=1, max_length=200)
+
+
+class AccountEmailRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254, pattern=EMAIL_ADDRESS_PATTERN)
+
+
+class AccountEmailReview(BaseModel):
+    request_id: str = Field(min_length=32, max_length=32)
+    approve: bool
+
+
+class AccountCredentialsChange(AccountEmailRequest):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=12, max_length=200)
+
+    _strong_password = field_validator("new_password")(strong_password)
 
 
 class RecoveryEmailConfirm(BaseModel):

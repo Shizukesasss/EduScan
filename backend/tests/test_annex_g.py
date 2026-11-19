@@ -89,7 +89,7 @@ class AnnexGImportTests(unittest.TestCase):
         return record
 
     def test_native_student_creation_adds_year_specific_placement(self):
-        payload = PersonCreate(external_id="NATIVE-ENROLL-1", first_name="New", surname="Learner",
+        payload = PersonCreate(external_id="NATIVE-ENROLL-1", lrn="012345678910", first_name="New", surname="Learner",
             sex="Female", date_of_birth=date(2012, 1, 2), role="Student", grade="7", section="Jose",
             school_year_id=self.year.id, enrollment_start_date=date(2026, 6, 1))
         person = main._new_person_record(payload, self.db, self.admin)
@@ -105,7 +105,7 @@ class AnnexGImportTests(unittest.TestCase):
 
     def test_native_student_creation_requires_year_and_start_date(self):
         for field in ("school_year_id", "enrollment_start_date"):
-            values = {"external_id": f"MISSING-{field}", "first_name": "New", "surname": "Learner",
+            values = {"external_id": f"MISSING-{field}", "lrn": "012345678910", "first_name": "New", "surname": "Learner",
                 "sex": "Female", "date_of_birth": date(2012, 1, 2), "role": "Student", "grade": "7",
                 "section": "Jose", "school_year_id": self.year.id,
                 "enrollment_start_date": date(2026, 6, 1)}
@@ -116,7 +116,7 @@ class AnnexGImportTests(unittest.TestCase):
             self.assertIsNone(self.db.scalar(select(Person).where(Person.external_id == values["external_id"])))
 
     def test_native_student_creation_rejects_date_outside_school_year(self):
-        payload = PersonCreate(external_id="OUTSIDE-NATIVE", first_name="New", surname="Learner",
+        payload = PersonCreate(external_id="OUTSIDE-NATIVE", lrn="012345678910", first_name="New", surname="Learner",
             sex="Female", date_of_birth=date(2012, 1, 2), role="Student", grade="7", section="Jose",
             school_year_id=self.year.id, enrollment_start_date=date(2027, 4, 1))
         with self.assertRaises(HTTPException) as failure:
@@ -125,7 +125,7 @@ class AnnexGImportTests(unittest.TestCase):
         self.assertIsNone(self.db.scalar(select(Person).where(Person.external_id == "OUTSIDE-NATIVE")))
 
     def test_native_student_placement_rolls_back_with_person(self):
-        payload = PersonCreate(external_id="ROLLBACK-NATIVE", first_name="New", surname="Learner",
+        payload = PersonCreate(external_id="ROLLBACK-NATIVE", lrn="012345678910", first_name="New", surname="Learner",
             sex="Female", date_of_birth=date(2012, 1, 2), role="Student", grade="7", section="Jose",
             school_year_id=self.year.id, enrollment_start_date=date(2026, 6, 1))
         person = main._new_person_record(payload, self.db, self.admin)

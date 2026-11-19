@@ -4,13 +4,15 @@ from .models import SectionAdviserAssignment
 from .services.section_advisers import adviser_for_section, current_school_year_id
 
 import hashlib
+import hmac
 import json
 import math
 import os
 import re
 import uuid
 import time as monotonic_time
-from datetime import date, datetime, timedelta
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -21,7 +23,7 @@ from pydantic import ValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
-from sqlalchemy import and_, delete, extract, func, or_, select, update
+from sqlalchemy import String, and_, cast, delete, extract, func, literal, or_, select, union_all, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -30,21 +32,22 @@ from .auth import (DEPED_PASSWORD_PREFIX, DEPED_PASSWORD_PROVIDER, SESSION_COOKI
                    require_roles, revoke_session, revoke_user_sessions, secure_session_transport, seed_users,
                    set_session_cookie, verify_password)
 from .services.google_login import DOMAIN, google_user, verify_google_credential
-from .schemas import (GoogleLoginRequest, PasswordRecoveryConfirm, PasswordRecoveryRequest,
+from .schemas import (AccountCredentialsChange, AccountEmailRequest, AccountEmailReview, GoogleLoginRequest, PasswordRecoveryConfirm, PasswordRecoveryRequest,
                       RecoveryEmailConfirm, RecoveryEmailRequest)
 from .services import password_recovery
-from .config import settings
+from .services import account_email, notifications, profiles, station_sync
+from .config import EXPORT_DIR, settings
 from .database import SessionLocal, engine, get_db
 from .migrations import initialize_database
 from .rate_limits import RateLimitedRoute, RequestRateLimiter, rate_limit
-from .request_limits import (FormBodyLimitMiddleware, MAX_BACKUP_ARCHIVE_BYTES, MAX_CAMERA_UPLOAD_BYTES,
+from .request_limits import (FormBodyLimitMiddleware, MAX_BACKUP_ARCHIVE_BYTES, MAX_CAMERA_UPLOAD_BYTES, MAX_PROFILE_PHOTO_BYTES, MAX_REPORT_VERIFICATION_BYTES,
                              MAX_ROSTER_WORKBOOK_BYTES, MAX_SF2_TEMPLATE_BYTES)
 from .models import (
     AttendanceCorrection, AttendanceEvent, AttendanceResetAudit, BiometricAuditEvent, BiometricModel, BiometricSample, CalendarException,
     BackupRun, ClassSchedule, ExcusedAbsence, GeneratedReport, GradeChangeAudit, GradeComponent, GradebookState,
     GradeLevel, GradeScore, GradingPeriod, Intervention, LegalHold, Person, PersonnelSchedule, RecognitionReview,
     RecordDisposalAudit, RetentionExecution, LearnerEnrollment, AnnexGTermComment,
-    SchoolSection, SchoolYear, SmsOutbox,
+    SchoolSection, SchoolYear, SmsOutbox, StationSyncOperation,
     Subject, SubjectTeachingAssignment, SystemAuditEvent, SystemSetting, User,
 )
 from .schemas import (
@@ -58,7 +61,10 @@ from .schemas import (
     SubjectTeachingAssignmentPayload,
     UserCreate, UserUpdate, SchoolHeadPayload, AnnexGCommentPayload, AnnexGPlacementPayload, AnnexGSchoolProfilePayload,
 )
-from .services.attendance import attendance_event_query, close_day, latest_day_reset, list_rows, record_gate_match, reset_day, save_correction
+from .services.attendance import (
+    MANILA, active_people, attendance_event_query, close_day, list_rows, record_gate_match,
+    reset_day, rows_for_people_on_days, save_correction,
+)
 from .services.class_access import (
     advised_people, adviser_assignment, adviser_sections_for_year, assigned_roster_sections, json_columns,
     person_in_sections, report_section_scope, school_year_for_date, scoped_record, section_query,
@@ -70,6 +76,7 @@ from .storage_quota import StorageQuotaExceeded, quota_detail
 from .services.biometrics import biometric_service
 from .services.sface_test import recognize_test_frames as sface_test_frames
 from .services.gate_presence import gate_presence
+from .services.gate_network import GateNetworkSettings, gate_network_settings, normalized_network_settings, enforce_gate_network
 from .services.gate_exports import update_gate_export
 from .services.gate_defaults import configure_fast_gate
 from .services.disposal import dispose_person_records
@@ -93,7 +100,7 @@ from .schemas_grading import (
 )
 from .services.reports import (
     REPORT_DIR, generate_attendance_range_xlsx, generate_grade_report_xlsx, generate_gradebook_summary_workbook,
-    register_report, register_workbook_report, generate_gradebook_report_xlsx, official_sf2_preview,
+    register_report, registered_report_path, register_workbook_report, generate_gradebook_report_xlsx, official_sf2_preview,
 )
 from .services.export_files import new_report_path
 from .services.report_pdf import table_report_pdf
@@ -170,7 +177,7 @@ def startup() -> None:
     try:
         initialize_database(engine)
         with SessionLocal() as db:
-            if settings.seed_demo_accounts:
+            if settings.seed_demo_accounts and not station_sync.enabled:
                 seed_users(db)
             seed_reference_data(db)
             configure_fast_gate(db)
@@ -179,10 +186,12 @@ def startup() -> None:
         logging.getLogger("uvicorn.error").error("EduScan startup initialization error: %s", exc)
     if settings.attendance_scheduler_enabled:
         attendance_scheduler.start()
+    station_sync.start(_new_person_record)
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
+    station_sync.stop()
     if settings.attendance_scheduler_enabled:
         attendance_scheduler.stop()
 
@@ -218,8 +227,8 @@ def seed_reference_data(db: Session) -> None:
 
 
 def person_json(person: Person, db: Session, include_private: bool = True,
-                include_sensitive: bool = False) -> dict:
-    count = db.scalar(select(func.count(BiometricSample.id)).where(
+                include_sensitive: bool = False, sample_count: int | None = None) -> dict:
+    count = sample_count if sample_count is not None else db.scalar(select(func.count(BiometricSample.id)).where(
         BiometricSample.person_id == person.id)) or 0
     return {
         "id": person.id, "external_id": person.external_id, "lrn": person.lrn, "full_name": person.full_name,
@@ -233,6 +242,10 @@ def person_json(person: Person, db: Session, include_private: bool = True,
         "sample_count": count, "enrolled": count >= settings.min_samples,
         **({"date_of_birth": person.date_of_birth} if include_sensitive else {}),
     }
+
+
+person_sample_count = select(func.count(BiometricSample.id)).where(
+    BiometricSample.person_id == Person.id).correlate(Person).scalar_subquery()
 
 
 def correction_json(item: AttendanceCorrection) -> dict:
@@ -371,8 +384,17 @@ def teacher_sf2_scope(db: Session, user: User, *, download=False):
                 GeneratedReport.status.not_in(["Rejected", "Superseded"]), sections.exists())
 
 
-def biometric_enrollment_json(person: Person, db: Session, include_samples: bool = False) -> dict:
-    snapshot = biometric_service.enrollment_snapshot(db, person)
+def biometric_enrollment_json(person: Person, db: Session, include_samples: bool = False, *, snapshot: dict | None = None) -> dict:
+    samples = []
+    if include_samples:
+        samples = db.execute(
+            select(BiometricSample.id, BiometricSample.quality_score, BiometricSample.created_at)
+            .where(BiometricSample.person_id == person.id)
+            .order_by(BiometricSample.created_at, BiometricSample.id)
+        ).all()
+    if snapshot is None:
+        snapshot = (biometric_service.summarize_enrollment(samples) if include_samples
+                    else biometric_service.enrollment_snapshot(db, person))
     result = {
         "person_id": person.id, "external_id": person.external_id, "full_name": person.full_name,
         "role": person.role, "grade": person.grade, "section": person.section,
@@ -380,11 +402,6 @@ def biometric_enrollment_json(person: Person, db: Session, include_samples: bool
         **snapshot,
     }
     if include_samples:
-        samples = db.scalars(
-            select(BiometricSample).where(
-                BiometricSample.person_id == person.id)
-            .order_by(BiometricSample.created_at, BiometricSample.id)
-        ).all()
         result["samples"] = [{"id": item.id, "quality_score": item.quality_score,
                               "created_at": item.created_at} for item in samples]
     return result
@@ -430,14 +447,229 @@ def sign_in_response(db: Session, user: User, provider: str, request: Request, r
         failed_login_count=0, locked_until=None, last_login_at=datetime.utcnow(),
     ))
     if updated.rowcount != 1:
+        _audit_sign_in(db, request, provider, user, success=False)
         raise HTTPException(401, "Your account changed. Please sign in again")
     db.refresh(user)
     revoke_session(db, request.cookies.get(SESSION_COOKIE))
     token = issue_session(db, user, provider=provider)
-    db.commit()
+    _audit_sign_in(db, request, provider, user, success=True)
     set_session_cookie(response, token, secure=secure)
     return LoginResponse(role=user.role, full_name=user.full_name,
                          must_change_password=user.must_change_password, auth_provider=provider)
+
+
+AUTH_LOG_REPORT = "Authentication Log"
+SMS_LOG_REPORT = "SMS Delivery Log"
+ACTIVITY_ROLES = ("admin", "records_officer", "privacy_officer")
+ACTIVITY_REPORT = "Administrative Activity"
+RESTRICTED_ACTIVITY_REPORT = "Administrative Activity with Sign-ins"
+
+
+def _audit_sign_in(db: Session, request: Request, provider: str, user: User | None, *, success: bool) -> None:
+    outcome = "Succeeded" if success else "Failed"
+    add_audit(db, user, outcome, "Authentication", user.id if user else None, f"Sign-in {outcome.lower()}",
+              after={"method": provider, "account": user.username if user else None,
+                     "source": request.client.host if request.client else None}, commit=True)
+
+
+def _activity_date_bounds(starts_on, ends_on):
+    if starts_on and ends_on and starts_on > ends_on:
+        raise HTTPException(422, "Start date must be on or before end date.")
+    start = datetime.combine(starts_on, datetime.min.time(), MANILA).astimezone(timezone.utc).replace(tzinfo=None) if starts_on else None
+    end = datetime.combine(ends_on, datetime.max.time(), MANILA).astimezone(timezone.utc).replace(tzinfo=None) if ends_on else None
+    return start, end
+
+
+def _sign_in_log(db, starts_on, ends_on, account, limit, outcome=None):
+    start, end = _activity_date_bounds(starts_on, ends_on)
+    audit = select(
+        SystemAuditEvent.id, SystemAuditEvent.actor_name.label("name"), SystemAuditEvent.created_at.label("time"),
+        SystemAuditEvent.action.label("outcome"), SystemAuditEvent.after_json, literal(None, String).label("account"),
+    ).where(SystemAuditEvent.entity_type == "Authentication")
+    # Older versions kept only the most recent successful sign-in per account.
+    # Include it when the detailed audit does not already represent that sign-in.
+    recorded = select(SystemAuditEvent.id).where(
+        SystemAuditEvent.entity_type == "Authentication", SystemAuditEvent.action == "Succeeded",
+        SystemAuditEvent.actor_user_id == User.id, SystemAuditEvent.created_at >= User.last_login_at,
+    ).exists()
+    historical = select(
+        (literal("legacy:") + cast(User.id, String)).label("id"), User.full_name.label("name"),
+        User.last_login_at.label("time"), literal("Succeeded").label("outcome"),
+        literal(None, String).label("after_json"), User.username.label("account"),
+    ).where(User.last_login_at.is_not(None), ~recorded)
+    if start:
+        audit = audit.where(SystemAuditEvent.created_at >= start)
+        historical = historical.where(User.last_login_at >= start)
+    if end:
+        audit = audit.where(SystemAuditEvent.created_at <= end)
+        historical = historical.where(User.last_login_at <= end)
+    if account is not None:
+        audit = audit.where(SystemAuditEvent.actor_user_id == account)
+        historical = historical.where(User.id == account)
+    if outcome:
+        audit = audit.where(SystemAuditEvent.action == outcome)
+    entries = (audit if outcome == "Failed" else union_all(audit, historical)).subquery()
+    rows = db.execute(select(entries).order_by(entries.c.time.desc(), entries.c.id.desc()).limit(limit))
+    result = []
+    for row in rows:
+        details = json.loads(row.after_json) if row.after_json else {}
+        username = details.get("account") or row.account
+        result.append({
+            "id": row.id, "name": row.name if username else None,
+            "time": row.time.isoformat() + "Z", "outcome": row.outcome, "account": username,
+            "method": details.get("method", "Unknown (historical)"), "source": details.get("source"),
+        })
+    return result
+
+
+class ActivityFilters:
+    def __init__(
+        self, starts_on: date | None = None, ends_on: date | None = None,
+        kind: Literal["all", "changes", "sign-ins"] = "all",
+        account: Annotated[int | None, Query(ge=1)] = None,
+        outcome: Literal["Succeeded", "Failed"] | None = None,
+        actor: Annotated[str, Query(max_length=180)] = "",
+        action: Annotated[str, Query(max_length=80)] = "",
+        entity: Annotated[str, Query(max_length=80)] = "",
+    ):
+        self.starts_on, self.ends_on = starts_on, ends_on
+        self.start, self.end = _activity_date_bounds(starts_on, ends_on)
+        self.kind, self.account, self.outcome = kind, account, outcome
+        self.actor, self.action, self.entity = actor.strip(), action.strip(), entity.strip()
+
+    def includes_sign_ins(self, user: User) -> bool:
+        if user.role != "admin" and (self.kind == "sign-ins" or self.account or self.outcome):
+            raise HTTPException(403, "Only administrators can access sign-in activity.")
+        return user.role == "admin" and self.kind != "changes"
+
+    def report_parameters(self) -> dict:
+        return {key: value for key, value in {
+            "activity_type": {"all": "All activity", "changes": "Administrative changes", "sign-ins": "Sign-ins"}[self.kind],
+            "starts_on": self.starts_on.isoformat() if self.starts_on else None,
+            "ends_on": self.ends_on.isoformat() if self.ends_on else None,
+            "account": self.account, "outcome": self.outcome, "actor": self.actor, "action": self.action,
+            "record_type": self.entity,
+        }.items() if value}
+
+
+def _audit_changes(db, filters, user, limit, include_details):
+    columns = [SystemAuditEvent.id, SystemAuditEvent.created_at, SystemAuditEvent.actor_name,
+               SystemAuditEvent.action, SystemAuditEvent.entity_type, SystemAuditEvent.summary]
+    if include_details:
+        columns.extend([SystemAuditEvent.actor_role, SystemAuditEvent.entity_id,
+                        SystemAuditEvent.before_json, SystemAuditEvent.after_json])
+    query = select(*columns).where(SystemAuditEvent.entity_type != "Authentication")
+    if filters.start:
+        query = query.where(SystemAuditEvent.created_at >= filters.start)
+    if filters.end:
+        query = query.where(SystemAuditEvent.created_at <= filters.end)
+    for term, column in ((filters.actor, SystemAuditEvent.actor_name), (filters.action, SystemAuditEvent.action),
+                         (filters.entity, SystemAuditEvent.entity_type)):
+        if term:
+            query = query.where(column.icontains(term, autoescape=True))
+    rows = db.execute(query.order_by(SystemAuditEvent.created_at.desc(), SystemAuditEvent.id.desc()).limit(limit))
+    entries = []
+    for item in rows:
+        entry = {"id": item.id, "kind": "changes", "time": item.created_at.isoformat(timespec="microseconds") + "Z",
+                 "name": item.actor_name, "action": item.action, "entity": item.entity_type, "summary": item.summary}
+        if include_details:
+            entry.update(role=item.actor_role, entity_id=item.entity_id, before=_audit_snapshot(item.before_json, user),
+                         after=_audit_snapshot(item.after_json, user))
+        entries.append(entry)
+    return entries
+
+
+def _audit_snapshot(value, user):
+    snapshot = json.loads(value)
+    if user.role != "admin" and isinstance(snapshot, dict):
+        snapshot.pop("date_of_birth", None)
+    return snapshot
+
+
+def _activity_rows(db, filters, user, limit, *, include_details=True):
+    include_sign_ins = filters.includes_sign_ins(user)
+    rows = _audit_changes(db, filters, user, limit, include_details) if filters.kind != "sign-ins" else []
+    if include_sign_ins:
+        for item in _sign_in_log(db, filters.starts_on, filters.ends_on, filters.account, limit, filters.outcome):
+            historical = item["id"].startswith("legacy:")
+            rows.append({
+                **item, "time": datetime.fromisoformat(item["time"].removesuffix("Z")).isoformat(timespec="microseconds") + "Z",
+                "kind": "sign-ins", "action": item["outcome"], "entity": "Sign-in",
+                "summary": "Last known sign-in" if historical else f"Sign-in {item['outcome'].lower()}",
+                "method": None if historical else item["method"],
+            })
+    return sorted(rows, key=lambda item: (item["time"], item["id"]), reverse=True)[:limit]
+
+
+@app.get("/api/admin/activity")
+def administrative_activity(filters: ActivityFilters = Depends(), db: Session = Depends(get_db),
+                            user: User = Depends(require_roles(*ACTIVITY_ROLES))) -> dict:
+    rows = _activity_rows(db, filters, user, 501)
+    return {"rows": rows[:500], "has_more": len(rows) > 500}
+
+
+@app.get("/api/admin/activity.pdf")
+@rate_limit("report")
+def administrative_activity_pdf(filters: ActivityFilters = Depends(), db: Session = Depends(get_db),
+                                user: User = Depends(require_roles(*ACTIVITY_ROLES))) -> FileResponse:
+    rows = _activity_rows(db, filters, user, 5001, include_details=False)
+    if len(rows) > 5000:
+        raise HTTPException(422, "Narrow the filters to export up to 5,000 activity entries.")
+    report_type = ACTIVITY_REPORT
+    if filters.kind == "sign-ins":
+        report_type = AUTH_LOG_REPORT
+    elif filters.includes_sign_ins(user):
+        report_type = RESTRICTED_ACTIVITY_REPORT
+    parameters = filters.report_parameters()
+    if filters.account:
+        parameters["account"] = db.scalar(select(User.username).where(User.id == filters.account)) or str(filters.account)
+    entries = []
+    for item in rows:
+        local_time = datetime.fromisoformat(item["time"].replace("Z", "+00:00")).astimezone(MANILA)
+        description = item["summary"]
+        if item["kind"] == "sign-ins":
+            description += f" | Method: {item['method'] or 'Unavailable'} | Source: {item['source'] or 'Unavailable'}"
+        entries.append((local_time.strftime("%Y-%m-%d %H:%M:%S"), item.get("account") or item["name"] or "Unknown",
+                        item["action"], item["entity"], description))
+    pdf = table_report_pdf(report_type, {"Time (PHT)": 25, "Actor or account": 30, "Action": 19, "Record type": 24, "Summary": 68},
+                           entries, sheet_title="Activity", subtitle=" | ".join(f"{key.replace('_', ' ').capitalize()}: {value}"
+                                                                                for key, value in parameters.items()))
+    return _save_activity_pdf(db, pdf, report_type, parameters, user)
+
+
+def _save_activity_pdf(db, content, report_type, parameters, user):
+    filename = "authentication-log.pdf" if report_type == AUTH_LOG_REPORT else "administrative-activity.pdf"
+    path = new_report_path(EXPORT_DIR, filename)
+    try:
+        path.write_bytes(content)
+        entry = register_report(db, path, report_type, parameters, user)
+        return FileResponse(entry.file_path, filename=entry.filename, media_type="application/pdf",
+                            headers={"Cache-Control": "private, no-store"})
+    finally:
+        path.unlink(missing_ok=True)
+        path.parent.rmdir()
+
+
+@app.get("/api/admin/authentication-log")
+def authentication_log(starts_on: date | None = None, ends_on: date | None = None, account: int | None = None,
+                       db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))) -> list[dict]:
+    return _sign_in_log(db, starts_on, ends_on, account, 500)
+
+
+@app.get("/api/admin/authentication-log.pdf")
+@rate_limit("report")
+def authentication_log_pdf(starts_on: date | None = None, ends_on: date | None = None, account: int | None = None,
+                           db: Session = Depends(get_db), user: User = Depends(require_roles("admin"))) -> FileResponse:
+    rows = _sign_in_log(db, starts_on, ends_on, account, 5001)
+    if len(rows) > 5000:
+        raise HTTPException(422, "Narrow the date or account filter to export up to 5,000 attempts.")
+    pdf = table_report_pdf(AUTH_LOG_REPORT, {"Time (UTC)": 30, "Account": 38, "Method": 22, "Outcome": 16, "Source IP": 25},
+                           [(row["time"], row["account"] or "Unknown", row["method"], row["outcome"],
+                             row["source"] or "Unavailable") for row in rows], sheet_title=AUTH_LOG_REPORT)
+    return _save_activity_pdf(db, pdf, AUTH_LOG_REPORT, {
+        "starts_on": starts_on.isoformat() if starts_on else None,
+        "ends_on": ends_on.isoformat() if ends_on else None, "account": account,
+    }, user)
 
 
 @app.post("/api/auth/google", response_model=LoginResponse, dependencies=[Depends(require_app_request)])
@@ -447,7 +679,12 @@ def google_login(payload: GoogleLoginRequest, request: Request, response: Respon
     secure = secure_session_transport(request)
     if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
         raise HTTPException(415, "Google sign-in requires a JSON request")
-    user = google_user(db, verify_google_credential(payload.credential, payload.nonce))
+    try:
+        user = google_user(db, verify_google_credential(payload.credential, payload.nonce))
+    except HTTPException:
+        db.rollback()
+        _audit_sign_in(db, request, "google", None, success=False)
+        raise
     return sign_in_response(db, user, "google", request, response, secure=secure)
 
 
@@ -459,16 +696,20 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
     secure = secure_session_transport(request)
     identifier = payload.username.strip().lower()
     deped_login = settings.deped_password_recovery and identifier.endswith(f"@{DOMAIN}")
+    provider = DEPED_PASSWORD_PROVIDER if deped_login else "password"
     if settings.deped_only and not deped_login:
+        _audit_sign_in(db, request, provider, None, success=False)
         raise HTTPException(403, "Password login is disabled. Sign in with your @deped.gov.ph Google account.")
-    lookup = User.google_email if deped_login else func.lower(User.username)
-    user = db.scalar(select(User).where(lookup == identifier))
+    user = (db.scalar(select(User).where(User.google_email == identifier)) if deped_login
+            else account_email.password_account(db, identifier))
     if deped_login and user and not has_deped_password(user):
         user = None
     if not deped_login and user and user.google_email:
+        _audit_sign_in(db, request, provider, user, success=False)
         raise HTTPException(403, "This account uses Google sign-in. Use your @deped.gov.ph Google account.")
     now = datetime.utcnow()
     if user and user.locked_until and user.locked_until > now:
+        _audit_sign_in(db, request, provider, user, success=False)
         remaining = max(
             1, int((user.locked_until - now).total_seconds() // 60) + 1)
         raise HTTPException(
@@ -484,10 +725,9 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
                 user.failed_login_count = 0
                 add_audit(db, None, "Lockout", "User", user.id,
                           f"Account {user.username} temporarily locked for 15 minutes after 5 failed login attempts")
-            db.commit()
+        _audit_sign_in(db, request, provider, user, success=False)
         raise HTTPException(
             status_code=401, detail="Invalid username or password")
-    provider = DEPED_PASSWORD_PROVIDER if deped_login else "password"
     return sign_in_response(db, user, provider, request, response, secure=secure)
 
 
@@ -551,11 +791,94 @@ def confirm_recovery_email(payload: RecoveryEmailConfirm, db: Session = Depends(
 
 
 @app.get("/api/auth/me")
-def me(request: Request, user: User = Depends(current_user)) -> dict:
+def me(request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     return {"id": user.id, "username": user.username, "role": user.role, "full_name": user.full_name,
             "must_change_password": user.must_change_password, "password_changed_at": user.password_changed_at,
             "auth_provider": request.state.auth_provider, "google_email": user.google_email,
-            "session_context": request.state.session_context}
+            "session_context": request.state.session_context, **profiles.profile_summary(db, user)}
+
+
+PROFILE_ROLES = ("admin", "teacher", "scanner", "records_officer", "privacy_officer", "ict", "school_head")
+
+
+@app.get("/api/account/profile")
+def own_profile(response: Response, db: Session = Depends(get_db),
+                user: User = Depends(require_roles(*PROFILE_ROLES))) -> dict:
+    response.headers["Cache-Control"] = "private, no-store"
+    return profiles.profile_details(db, user)
+
+
+def _profile_upload(picture, remove_picture):
+    if picture is not None and remove_picture:
+        raise HTTPException(422, "Choose either a replacement picture or removal.")
+    return profiles.normalize_picture(picture.file.read(MAX_PROFILE_PHOTO_BYTES + 1)) if picture is not None else None
+
+
+@app.put("/api/account/profile")
+def save_own_profile(
+    display_name: str = Form(..., max_length=160),
+    phone_number: str = Form("", max_length=40), emergency_name: str = Form("", max_length=160),
+    emergency_phone: str = Form("", max_length=40), picture: UploadFile | None = File(None),
+    remove_picture: bool = Form(False), db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PROFILE_ROLES)),
+) -> dict:
+    email = account_email.login_email(db, user)
+    if not email:
+        raise HTTPException(422, "Set up your sign-in email before saving your profile.")
+    contact = profiles.validated_contact(phone_number, emergency_name, emergency_phone)
+    return {"email": email, **profiles.save_profile(db, user, display_name, _profile_upload(picture, remove_picture),
+                                                     remove_picture, contact=contact)}
+
+
+@app.get("/api/account/email-change")
+def own_email_request(response: Response, db: Session = Depends(get_db),
+                      user: User = Depends(require_roles(*PROFILE_ROLES))) -> dict:
+    response.headers["Cache-Control"] = "private, no-store"
+    return {"email": account_email.login_email(db, user), "request": account_email.request_status(db, user)}
+
+
+@app.post("/api/account/email-change")
+def request_own_email_change(payload: AccountEmailRequest, db: Session = Depends(get_db),
+                             user: User = Depends(require_roles(*PROFILE_ROLES))) -> dict:
+    return account_email.submit_request(db, user, payload.email)
+
+
+@app.get("/api/admin/email-change-requests")
+def list_email_change_requests(response: Response, db: Session = Depends(get_db),
+                               _: User = Depends(require_roles("admin"))) -> list[dict]:
+    response.headers["Cache-Control"] = "private, no-store"
+    return account_email.pending_requests(db)
+
+
+@app.post("/api/admin/email-change-requests/{user_id}")
+def review_email_change_request(user_id: int, payload: AccountEmailReview, db: Session = Depends(get_db),
+                                administrator: User = Depends(require_roles("admin"))) -> dict:
+    return account_email.review_request(db, administrator, user_id, payload.request_id, payload.approve)
+
+
+@app.put("/api/account/credentials", status_code=204)
+@rate_limit("password sign-in")
+def update_own_credentials(payload: AccountCredentialsChange, request: Request, db: Session = Depends(get_db),
+                           user: User = Depends(require_roles(*PROFILE_ROLES))) -> Response:
+    secure = secure_session_transport(request)
+    account_email.change_credentials(db, user, payload)
+    response = Response(status_code=204)
+    clear_session_cookie(response, secure=secure)
+    return response
+
+
+@app.patch("/api/account/profile")
+def update_own_profile(display_name: str | None = Form(None, max_length=160), picture: UploadFile | None = File(None),
+                       remove_picture: bool = Form(False), db: Session = Depends(get_db),
+                       user: User = Depends(require_roles(*PROFILE_ROLES))) -> dict:
+    return profiles.save_profile(db, user, display_name, _profile_upload(picture, remove_picture), remove_picture)
+
+
+@app.get("/api/account/profile/photo")
+def own_profile_photo(db: Session = Depends(get_db), user: User = Depends(require_roles(*PROFILE_ROLES))) -> Response:
+    return Response(profiles.profile_picture(db, user), media_type="image/jpeg", headers={
+        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+    })
 
 
 @app.post("/api/auth/logout", status_code=204, dependencies=[Depends(require_app_request)])
@@ -733,11 +1056,11 @@ def persons(role: str | None = None, grade: str | None = None, section: str | No
         query = query.where(Person.section == section)
     if user.role == "teacher":
         query = query.where(Person.role == "Student", person_in_sections(teacher_roster_scope(user, scope)))
-    items = db.scalars(query).all()
-    return [person_json(item, db) for item in items]
+    return [person_json(item, db, sample_count=count) for item, count in db.execute(query.add_columns(person_sample_count))]
 
 
-def _new_person_record(payload: PersonCreate, db: Session, actor: User) -> Person:
+def _new_person_record(payload: PersonCreate, db: Session, actor: User, *, track_sync: bool = True) -> Person:
+    _validate_student_lrn(payload)
     if db.scalar(select(Person).where(Person.external_id == payload.external_id)):
         raise HTTPException(
             status_code=409, detail="External ID is already registered")
@@ -797,9 +1120,21 @@ def _new_person_record(payload: PersonCreate, db: Session, actor: User) -> Perso
             source_sha256=hashlib.sha256(json.dumps(placement_source, sort_keys=True).encode()).hexdigest(),
             imported_by=actor.id, imported_by_name=actor.full_name,
         ))
+        if track_sync:
+            station_sync.enqueue(db, "enrollment", actor, {"record": payload.model_dump(mode="json"), "school_year": year.name},
+                                 local_person_id=person.id)
     add_audit(db, actor, "Create", "Person", person.id,
               f"School record created for {person.full_name}", {}, model_snapshot(person))
     return person
+
+
+def _validate_student_lrn(payload: PersonCreate, previous: Person | None = None) -> None:
+    if payload.role != "Student" or re.fullmatch(r"[0-9]{12}", payload.lrn or ""):
+        return
+    if previous and previous.role == "Student" and previous.lrn == payload.lrn:
+        return
+    raise HTTPException(422, detail={"code": "invalid_lrn", "field": "lrn",
+                                     "message": "LRN must contain exactly 12 digits (0–9)."})
 
 
 @app.post("/api/persons")
@@ -816,6 +1151,7 @@ def update_person(person_id: int, payload: PersonCreate, db: Session = Depends(g
     person = db.get(Person, person_id)
     if not person:
         raise HTTPException(status_code=404, detail="Person was not found")
+    _validate_student_lrn(payload, person)
     if payload.role == "Student" and person.role != "Student" and payload.date_of_birth is None:
         raise HTTPException(status_code=422, detail="Student date of birth is required")
     duplicate_id = db.scalar(select(Person).where(
@@ -849,16 +1185,16 @@ def update_person(person_id: int, payload: PersonCreate, db: Session = Depends(g
 
 @app.get("/api/admin/persons")
 def admin_persons(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))) -> list[dict]:
-    people = db.scalars(select(Person).order_by(
+    people = db.execute(select(Person, person_sample_count).order_by(
         Person.active.desc(), Person.full_name, Person.external_id)).all()
     name_counts: dict[str, int] = {}
-    for person in people:
+    for person, _count in people:
         if person.active and person.role == "Student":
             key = re.sub(r"[^a-z0-9]", "", person.full_name.casefold())
             name_counts[key] = name_counts.get(key, 0) + 1
     result = []
-    for person in people:
-        item = person_json(person, db, include_sensitive=True)
+    for person, count in people:
+        item = person_json(person, db, include_sensitive=True, sample_count=count)
         key = re.sub(r"[^a-z0-9]", "", person.full_name.casefold())
         item["possible_duplicate"] = person.active and person.role == "Student" and name_counts.get(
             key, 0) > 1
@@ -1291,25 +1627,64 @@ def release_annex_g(enrollment_id: int, term_order: int = Query(ge=1, le=3),
         source.parent.rmdir()
 
 
+def teacher_annex_g_release_scope(db: Session, user: User):
+    params = json_columns(db, GeneratedReport.parameters_json)
+    allowed = select(LearnerEnrollment.id).join(Person).where(
+        LearnerEnrollment.id == params["enrollment_id"].as_integer(), Person.role == "Student",
+        adviser_assignment(user.id, LearnerEnrollment.school_year_id, LearnerEnrollment.section_id),
+    ).correlate(GeneratedReport).exists()
+    return and_(GeneratedReport.report_type == "Annex G", GeneratedReport.status.in_(["Released", "Superseded"]), allowed)
+
+
+NOTIFICATION_ROLES = ("admin", "teacher", "records_officer", "privacy_officer", "ict", "school_head")
+
+
+def _notification_report_scope(db, user):
+    if user.role != "teacher":
+        return None
+    return or_(teacher_sf2_scope(db, user), and_(teacher_annex_g_release_scope(db, user), GeneratedReport.status == "Released"))
+
+
+@app.get("/api/notifications")
+def notification_inbox(db: Session = Depends(get_db), user: User = Depends(require_roles(*NOTIFICATION_ROLES))) -> dict:
+    return notifications.inbox(db, user, _notification_report_scope(db, user))
+
+
+def _save_notification(db, user, alert_id, state):
+    scope = _notification_report_scope(db, user)
+    if not any(item["id"] == alert_id for item in notifications.candidates(db, user, report_scope=scope)):
+        raise HTTPException(404, "This notification is no longer available.")
+    notifications.save_state(db, user.id, alert_id, state)
+    return Response(status_code=204)
+
+
+@app.patch("/api/notifications/{alert_id}", status_code=204)
+def read_notification(alert_id: str, db: Session = Depends(get_db),
+                      user: User = Depends(require_roles(*NOTIFICATION_ROLES))) -> Response:
+    return _save_notification(db, user, alert_id, "read")
+
+
+@app.delete("/api/notifications/{alert_id}", status_code=204)
+def delete_notification(alert_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(require_roles(*NOTIFICATION_ROLES))) -> Response:
+    return _save_notification(db, user, alert_id, "deleted")
+
+
 @app.get("/api/annex-g/releases/{report_id}", response_class=Response)
 def annex_g_released_file(report_id: str, db: Session = Depends(get_db),
                           user: User = Depends(require_roles("admin", "teacher", "records_officer"))) -> Response:
     query = select(GeneratedReport).where(GeneratedReport.id == report_id, GeneratedReport.report_type == "Annex G",
                                           GeneratedReport.status.in_(["Released", "Superseded"]))
     if user.role == "teacher":
-        params = json_columns(db, GeneratedReport.parameters_json)
-        allowed = select(LearnerEnrollment.id).join(Person).where(
-            LearnerEnrollment.id == params["enrollment_id"].as_integer(), Person.role == "Student",
-            adviser_assignment(user.id, LearnerEnrollment.school_year_id, LearnerEnrollment.section_id),
-        ).correlate(GeneratedReport).exists()
-        item = scoped_record(db, query, allowed, GeneratedReport.id, "This school-year section is not assigned to you as adviser")
+        item = scoped_record(db, query, teacher_annex_g_release_scope(db, user), GeneratedReport.id,
+                             "This school-year section is not assigned to you as adviser")
     else:
         item = db.scalar(query)
     if not item:
         raise HTTPException(status_code=404, detail="Released Annex G report was not found")
     parameters = json.loads(item.parameters_json)
     _annex_g_enrollment(db, int(parameters["enrollment_id"]), user)
-    path = Path(item.file_path)
+    path = registered_report_path(item)
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != item.file_sha256:
         raise HTTPException(status_code=409, detail="Released report integrity check failed")
     if path.suffix.lower() == ".pdf":
@@ -1472,6 +1847,9 @@ async def enroll(person_id: int, background_tasks: BackgroundTasks, frames: list
 def _enroll_with_sms(db: Session, person: Person, contents: list[bytes], user: User,
                      reason: str, background_tasks: BackgroundTasks, require_existing: bool | None = None) -> dict:
     result = biometric_service.enroll(db, person, contents, user, reason, require_existing=require_existing)
+    if station_sync.enabled:
+        result["sms"] = {"message": "Face samples saved on this station."}
+        return result
     result["sms"] = queue_enrollment_notice(db, person, result)
     if result["sms"].get("id") and result["sms"].get("dispatch_ready"):
         background_tasks.add_task(dispatch_record_by_id, result["sms"]["id"])
@@ -1481,11 +1859,25 @@ def _enroll_with_sms(db: Session, person: Person, contents: list[bytes], user: U
 @app.get("/api/biometrics/enrollments")
 def biometric_enrollments(db: Session = Depends(get_db),
                           _: User = Depends(require_roles("admin"))) -> list[dict]:
-    people = db.scalars(
-        select(Person).where(Person.active.is_(True) | Person.id.in_(select(BiometricSample.person_id)))
-        .order_by(Person.full_name)
-    ).all()
-    return [biometric_enrollment_json(person, db) for person in people]
+    summary = select(
+        BiometricSample.person_id, func.count().label("count"), func.avg(BiometricSample.quality_score).label("mean"),
+        func.min(BiometricSample.quality_score).label("minimum"), func.max(BiometricSample.quality_score).label("maximum"),
+        func.min(BiometricSample.created_at).label("first"), func.max(BiometricSample.created_at).label("last"),
+    ).group_by(BiometricSample.person_id).subquery()
+    query = select(
+        Person.id, Person.external_id, Person.full_name, Person.role, Person.grade, Person.section,
+        Person.biometric_consent, Person.active, summary.c.count.label("sample_count"),
+        summary.c.mean, summary.c.minimum, summary.c.maximum, summary.c.first, summary.c.last,
+    ).outerjoin(summary, Person.id == summary.c.person_id)
+    query = query.where(Person.active.is_(True) | summary.c.count.is_not(None)).order_by(Person.full_name, Person.id)
+    return [biometric_enrollment_json(row, db, snapshot={
+        "sample_count": row.sample_count or 0, "enrolled": (row.sample_count or 0) >= settings.min_samples,
+        "average_quality": round(row.mean, 2) if row.sample_count else None,
+        "minimum_quality": round(row.minimum, 2) if row.sample_count else None,
+        "maximum_quality": round(row.maximum, 2) if row.sample_count else None,
+        "first_captured_at": row.first.isoformat() if row.first else None,
+        "last_captured_at": row.last.isoformat() if row.last else None,
+    }) for row in db.execute(query)]
 
 
 @app.get("/api/biometrics/enrollments/audit")
@@ -1564,9 +1956,9 @@ def train(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"
 @app.get("/api/biometrics/status")
 def biometric_status(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))) -> dict:
     active = db.scalar(select(BiometricModel).where(
-        BiometricModel.active.is_(True)).order_by(BiometricModel.id.desc()))
+        BiometricModel.active.is_(True)).order_by(BiometricModel.id.desc()).limit(1))
     runtime = biometric_service.runtime_config(db)
-    readiness = biometric_service.model_readiness(db)
+    readiness = biometric_service.model_readiness(db, active)
     return {
         "enabled": settings.biometric_enabled, "minimum_samples": settings.min_samples,
         **runtime, "model_readiness": readiness,
@@ -1626,36 +2018,76 @@ def resolve_recognition_review(review_id: str, payload: RecognitionReviewResolut
 
 
 @app.get("/api/station/health")
-def station_health(db: Session = Depends(get_db),
+def station_health(include_gateway: bool = True, db: Session = Depends(get_db),
                    _: User = Depends(require_roles("admin", "scanner", "records_officer", "privacy_officer", "ict"))) -> dict:
-    database_ok = True
-    try:
-        db.execute(select(1))
-    except Exception:
-        database_ok = False
-    active = db.scalar(select(BiometricModel).where(
-        BiometricModel.active.is_(True)).order_by(BiometricModel.id.desc()))
-    gateway = gateway_diagnostics(db)
-    readiness = biometric_service.model_readiness(db)
-    return {"api": True, "database": database_ok,
+    active = db.execute(
+        select(BiometricModel.version, BiometricModel.file_path, BiometricModel.sha256)
+        .where(BiometricModel.active.is_(True)).order_by(BiometricModel.id.desc()).limit(1)
+    ).first()
+    if include_gateway:
+        gateway = gateway_diagnostics(db)
+    else:
+        gateway = {"enabled": bool(get_json(db, "sms", {}).get("enabled", settings.sms_gateway_enabled)),
+                   "reachable": None}
+    readiness = biometric_service.model_readiness(db, active)
+    return {"api": True, "database": True,
             "attendance_auto_visit_ready": True,
+            "privacy_contact": gate_network_settings(db).privacy_contact,
+            "sync": station_sync.status(db),
             "recognition_model": readiness["available"], "model_version": active.version if active else None,
             "recognition_message": readiness["message"], "recognition_code": readiness["code"],
             "gateway_enabled": gateway["enabled"], "gateway_reachable": gateway["reachable"],
             "checked_at": datetime.utcnow()}
 
 
+@app.get("/api/settings/gate-network")
+def get_gate_network(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))) -> GateNetworkSettings:
+    return gate_network_settings(db)
+
+
+@app.get("/api/admin/station-sync")
+def get_station_sync(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))) -> dict:
+    return station_sync.status(db, detailed=True)
+
+
+@app.post("/api/admin/station-sync/{operation_id}/retry")
+def retry_station_operation(operation_id: str, db: Session = Depends(get_db),
+                            user: User = Depends(require_roles("admin"))) -> dict:
+    if not station_sync.enabled:
+        raise HTTPException(409, "School sync is disabled on this station.")
+    changed = db.execute(update(StationSyncOperation).where(
+        StationSyncOperation.id == operation_id, StationSyncOperation.status == "conflict",
+    ).values(status="pending", error=None))
+    if changed.rowcount != 1:
+        raise HTTPException(409, "Only operations that need review can be retried.")
+    add_audit(db, user, "Retry", "StationSyncOperation", operation_id, "Queued offline station operation for retry.", commit=True)
+    return station_sync.status(db, detailed=True)
+
+
+@app.put("/api/settings/gate-network")
+def update_gate_network(payload: GateNetworkSettings, db: Session = Depends(get_db),
+                        user: User = Depends(require_roles("admin"))) -> GateNetworkSettings:
+    updated = normalized_network_settings(payload)
+    before = gate_network_settings(db)
+    set_json(db, "gate.network", updated.model_dump(), commit=False)
+    add_audit(db, user, "Update", "GateNetwork", None, "Updated gate network policy",
+              before.model_dump(), updated.model_dump(), commit=True)
+    return updated
+
+
 @app.post("/api/biometrics/recognize", response_model=RecognitionResult)
 @rate_limit("camera")
-async def recognize(background_tasks: BackgroundTasks, frame: UploadFile = File(...), db: Session = Depends(get_db),
+async def recognize(request: Request, background_tasks: BackgroundTasks, frame: UploadFile = File(...), db: Session = Depends(get_db),
                     user: User = Depends(require_roles("admin", "scanner")), station_id: str = Form(default='legacy', max_length=120)) -> RecognitionResult:
+    enforce_gate_network(gate_network_settings(db), request)
+    station_sync.check_operator(db, user, gate=True)
     data = await read_bounded_upload(frame, MAX_CAMERA_UPLOAD_BYTES, 'Recognition frame exceeds 8 MB')
-    result = await run_in_threadpool(process_gate_frames, background_tasks, [data], station_id, db, True)
+    result = await run_in_threadpool(process_gate_frames, background_tasks, [data], station_id, db, True, user)
     return RecognitionResult(**result['results'][0])
 
 
 def process_gate_frames(background_tasks: BackgroundTasks, frame_data: list[bytes], station_id: str, db: Session,
-                        require_single: bool = False) -> dict:
+                        require_single: bool = False, user: User | None = None) -> dict:
     started = monotonic_time.perf_counter()
     try:
         matches = biometric_service.recognize_frames(db, frame_data, verified_present=gate_presence.current_visits(station_id),
@@ -1663,6 +2095,7 @@ def process_gate_frames(background_tasks: BackgroundTasks, frame_data: list[byte
     except HTTPException as error:
         if error.status_code == 422 and isinstance(error.detail, dict) and error.detail.get('code') == 'no_faces_in_burst':
             gate_presence.observe(station_id, set())
+            biometric_service.clear_station_liveness(station_id)
         raise
     results = []
     export_days = set()
@@ -1672,10 +2105,11 @@ def process_gate_frames(background_tasks: BackgroundTasks, frame_data: list[byte
         for match in matches:
             person, distance, quality, box = match['person'], match['distance'], match['quality'], match['box']
             result = {'recognized': person is not None, 'liveness_verified': match['liveness_verified'],
+                      'seen_in_latest_frame': match.get('seen_in_latest_frame', True),
                       'identity_similarity': match.get('identity_similarity'),
                       'presentation_verified': match['presentation_verified'], 'presentation_score': match['presentation_score'],
                       'message': match['message'], 'review_id': match['review_id'],
-                      'distance': round(distance, 2), 'quality_score': quality, 'box': box}
+                      'distance': round(distance, 2) if distance is not None else None, 'quality_score': quality, 'box': box}
             if person is None:
                 results.append(result)
                 continue
@@ -1686,7 +2120,8 @@ def process_gate_frames(background_tasks: BackgroundTasks, frame_data: list[byte
             elif not match['liveness_verified']:
                 event = {'recorded': False}
             else:
-                event = record_gate_match(db, person, distance, identity_matcher='SFace (LBPH audit distance)')
+                matcher = 'SFace' if distance is None else 'SFace (LBPH audit distance)'
+                event = record_gate_match(db, person, distance, identity_matcher=matcher, sync_actor=user, station_id=station_id)
                 if event.get('recorded'):
                     gate_presence.mark_recorded(station_id, person.id)
                     export_days.add(date.fromisoformat(event['date']))
@@ -1706,13 +2141,15 @@ def process_gate_frames(background_tasks: BackgroundTasks, frame_data: list[byte
 
 @app.post('/api/biometrics/recognize-many')
 @rate_limit("camera")
-async def recognize_many(background_tasks: BackgroundTasks, frame: UploadFile | None = File(default=None),
+async def recognize_many(request: Request, background_tasks: BackgroundTasks, frame: UploadFile | None = File(default=None),
                          frames: list[UploadFile] = File(default=[]), station_id: str = Form(default='default', max_length=120),
                          db: Session = Depends(get_db), user: User = Depends(require_roles('admin', 'scanner'))) -> dict:
+    enforce_gate_network(gate_network_settings(db), request)
+    station_sync.check_operator(db, user, gate=True)
     uploads = frames or ([frame] if frame else [])
     frame_data = await read_recognition_uploads(uploads, 40)
     # OpenCV and cloud database work must not block other camera/API requests.
-    return await run_in_threadpool(process_gate_frames, background_tasks, frame_data, station_id, db)
+    return await run_in_threadpool(process_gate_frames, background_tasks, frame_data, station_id, db, False, user)
 
 
 async def read_recognition_uploads(uploads: list[UploadFile], limit: int) -> list[bytes]:
@@ -1763,7 +2200,8 @@ def test_camera_frames(frame_data: list[bytes], bind, mode: str = 'recognition')
                 results = [{
                     'recognized': match['person'] is not None,
                     'person': {'id': match['person'].id, 'full_name': match['person'].full_name, 'role': match['person'].role} if match['person'] else None,
-                    'distance': round(match['distance'], 2), 'quality_score': match['quality'], 'box': match['box'],
+                    'distance': round(match['distance'], 2) if match['distance'] is not None else None,
+                    'quality_score': match['quality'], 'box': match['box'],
                     'identity_similarity': match.get('identity_similarity'),
                     'presentation_verified': match['presentation_verified'], 'presentation_score': match['presentation_score'],
                     'liveness_verified': match['liveness_verified'], 'message': match['message'],
@@ -1809,20 +2247,35 @@ def attendance(day: date = Query(alias="date"), grade: str | None = None, sectio
     return list_rows(db, day, grade, section, students_only=bool(grade or section))
 
 
+def recent_attendance_query(day: date):
+    reset_after_event = select(AttendanceResetAudit.id).where(
+        AttendanceResetAudit.attendance_date == day, AttendanceResetAudit.created_at >= AttendanceEvent.created_at,
+    ).exists()
+    return attendance_event_query().with_only_columns(
+        AttendanceEvent.id, Person.full_name.label("name"), Person.role,
+        AttendanceEvent.direction, AttendanceEvent.status, AttendanceEvent.event_time,
+    ).join(Person, Person.id == AttendanceEvent.person_id).where(
+        AttendanceEvent.event_date == day, ~reset_after_event,
+    ).order_by(AttendanceEvent.event_time.desc(), AttendanceEvent.id.desc())
+
+
 @app.get("/api/gate/recent")
 def gate_recent(day: date = Query(alias="date"), db: Session = Depends(get_db),
                 _: User = Depends(require_roles("admin", "scanner"))) -> list[dict]:
-    query = attendance_event_query().options(joinedload(AttendanceEvent.person)).where(
-        AttendanceEvent.event_date == day, AttendanceEvent.direction.in_(
-            ["Time In", "Time Out"]),
-    )
-    reset = latest_day_reset(db, day)
-    if reset:
-        query = query.where(AttendanceEvent.created_at > reset.created_at)
-    events = db.scalars(query.order_by(
-        AttendanceEvent.created_at.desc()).limit(30)).all()
-    return [{"id": item.id, "name": item.person.full_name, "role": item.person.role,
-             "direction": item.direction, "status": item.status, "time": item.event_time} for item in events]
+    query = recent_attendance_query(day).where(AttendanceEvent.direction.in_(["Time In", "Time Out"]))
+    events = db.execute(query.limit(30)).all()
+    keys = [f"attendance:{item.id}:{kind}" for item in events for kind in ("time_in", "time_out", "tardiness")]
+    notices = {}
+    if keys:
+        messages = db.execute(select(SmsOutbox.idempotency_key, SmsOutbox.id, SmsOutbox.status)
+                              .where(SmsOutbox.idempotency_key.in_(keys)))
+        notices = {record.idempotency_key.split(":")[1]: record for record in messages}
+    sync_states = dict(db.execute(select(StationSyncOperation.id, StationSyncOperation.status).where(
+        StationSyncOperation.id.in_([item.id for item in events]))).all()) if station_sync.enabled and events else {}
+    return [{"id": item.id, "name": item.name, "role": item.role,
+             "direction": item.direction, "status": item.status, "time": item.event_time,
+             "sms_status": notice.status if (notice := notices.get(item.id)) else "not-applicable",
+             "sms_id": notice.id if notice else None, "sync_status": sync_states.get(item.id)} for item in events]
 
 
 @app.post("/api/attendance/close")
@@ -2893,31 +3346,32 @@ def system_audit(entity_type: str | None = None, action: str | None = None,
                  limit: int = Query(default=500, ge=1, le=2000), db: Session = Depends(get_db),
                  user: User = Depends(require_roles("admin", "records_officer", "privacy_officer"))) -> list[dict]:
     query = select(SystemAuditEvent)
+    if user.role != "admin":
+        query = query.where(SystemAuditEvent.entity_type != "Authentication")
     if entity_type:
         query = query.where(SystemAuditEvent.entity_type == entity_type)
     if action:
         query = query.where(SystemAuditEvent.action == action)
     items = db.scalars(query.order_by(
-        SystemAuditEvent.created_at.desc()).limit(limit)).all()
+        SystemAuditEvent.created_at.desc(), SystemAuditEvent.id.desc()).limit(limit)).all()
     result = []
     for item in items:
-        before, after = json.loads(item.before_json), json.loads(item.after_json)
-        if user.role != "admin":
-            for snapshot in (before, after):
-                if isinstance(snapshot, dict):
-                    snapshot.pop("date_of_birth", None)
         result.append({"id": item.id, "action": item.action, "entity_type": item.entity_type,
                        "entity_id": item.entity_id, "summary": item.summary,
-                       "before": before, "after": after,
+                       "before": _audit_snapshot(item.before_json, user), "after": _audit_snapshot(item.after_json, user),
                        "actor_name": item.actor_name, "actor_role": item.actor_role,
                        "created_at": item.created_at})
     return result
 
 
 @app.get("/api/sms/outbox")
-def outbox(db: Session = Depends(get_db), _: User = Depends(require_roles("admin", "records_officer"))) -> list[dict]:
-    items = db.scalars(select(SmsOutbox).order_by(
-        SmsOutbox.created_at.desc()).limit(500)).all()
+def outbox(message_id: Annotated[str | None, Query(max_length=36)] = None,
+           db: Session = Depends(get_db), _: User = Depends(require_roles("admin", "records_officer"))) -> list[dict]:
+    query = select(SmsOutbox)
+    if message_id:
+        query = query.where(SmsOutbox.id == message_id)
+    items = db.scalars(query.order_by(
+        SmsOutbox.created_at.desc(), SmsOutbox.id.desc()).limit(500)).all()
     return [{"id": item.id, "event_type": item.event_type, "recipient": mask_phone(item.recipient),
              "message": item.message, "status": item.status, "attempts": item.attempts,
              "last_error": item.last_error, "next_attempt_at": item.next_attempt_at,
@@ -2989,18 +3443,24 @@ def cancel_sms(record_id: str, db: Session = Depends(get_db),
 @app.get("/api/sms/outbox.pdf")
 @rate_limit("report")
 def export_sms_outbox(db: Session = Depends(get_db),
-                      _: User = Depends(require_roles("admin", "records_officer"))) -> Response:
+                      user: User = Depends(require_roles("admin", "records_officer"))) -> FileResponse:
     items = db.scalars(select(SmsOutbox).order_by(
-        SmsOutbox.created_at.desc())).all()
+        SmsOutbox.created_at.desc(), SmsOutbox.id.desc())).all()
     columns = {"Created": 23, "Event": 19, "Recipient": 18, "Status": 12, "Attempts": 8, "Gateway ID": 15,
                "Accepted/Sent": 23, "Delivered": 23, "Cancelled": 23, "Last error": 24, "Message": 45}
     rows = ([item.created_at, item.event_type, item.recipient, item.status, item.attempts,
              item.gateway_message_id, item.sent_at, item.delivered_at, item.cancelled_at,
              item.last_error, item.message] for item in items)
     filename = f"EduScan-SMS-delivery-log-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pdf"
-    return Response(table_report_pdf("EduScan SMS Delivery Log", columns, rows), media_type="application/pdf",
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"',
-                             "Cache-Control": "private, no-store"})
+    path = new_report_path(EXPORT_DIR, filename)
+    try:
+        path.write_bytes(table_report_pdf("EduScan SMS Delivery Log", columns, rows))
+        entry = register_report(db, path, SMS_LOG_REPORT, {}, user)
+        return FileResponse(entry.file_path, filename=entry.filename, media_type="application/pdf",
+                            headers={"Cache-Control": "private, no-store"})
+    finally:
+        path.unlink(missing_ok=True)
+        path.parent.rmdir()
 
 
 @app.post("/api/sms/test")
@@ -3077,12 +3537,8 @@ def sf2_export(year: int, month: int, grade: str, section: str, school_id: str =
     if year_record.starts_on > last_day or year_record.ends_on < first_day:
         raise HTTPException(status_code=422, detail="The reporting month is outside the selected school year")
     ensure_adviser_access(db, user, grade, section, year_record.id)
-    people = sf2_students(db, year, month, grade, section)
-    pending = sf2_pending_attendance(db, people, year, month)
-    if pending['unresolved_count']:
-        raise HTTPException(status_code=409, detail={"message": "Review or close the unresolved daily attendance before generating official SF2. No attendance was changed.", **pending})
     path = generate_sf2(db, year, month, grade, section,
-                        school_id, school_year, school_name)
+                        school_id, school_year, school_name, require_resolved=True)
     report = register_workbook_report(db, path, "Official SF2", {"year": year, "month": month, "grade": grade,
                                                         "section": section, "school_id": school_id,
                                                         "school_year": school_year}, user, file_format=file_format)
@@ -3107,7 +3563,7 @@ def preview_generated_report(report_id: str, db: Session = Depends(get_db),
                          "Only administrator-generated official SF2s for your classes are available") if user.role == "teacher" else db.scalar(query)
     if not item:
         raise HTTPException(status_code=404, detail="Report was not found")
-    path = Path(item.file_path)
+    path = registered_report_path(item)
     if item.report_type != "Official SF2" or not path.is_file():
         raise HTTPException(status_code=404, detail="Official SF2 file was not found")
     if hashlib.sha256(path.read_bytes()).hexdigest() != item.file_sha256:
@@ -3119,46 +3575,97 @@ def preview_generated_report(report_id: str, db: Session = Depends(get_db),
 
 
 @app.get("/api/reports/history")
-def report_history(db: Session = Depends(get_db),
+def report_history(report_id: Annotated[str | None, Query(max_length=36)] = None, db: Session = Depends(get_db),
                    user: User = Depends(require_roles("admin", "teacher", "records_officer", "privacy_officer", "school_head"))) -> list[dict]:
-    query = select(GeneratedReport)
-    if user.role != "admin":
-        query = query.where(GeneratedReport.report_type != DTR_REPORT_TYPE)
+    query = _report_history_scope(select(GeneratedReport), user)
+    if report_id:
+        query = query.where(GeneratedReport.id == report_id)
     if user.role == "teacher":
         query = query.where(teacher_sf2_scope(db, user)).add_columns(teacher_sf2_scope(db, user, download=True))
         return [{**report_json(item), "can_download": bool(can_download)} for item, can_download in db.execute(
-            query.order_by(GeneratedReport.created_at.desc()).limit(1000)
+            query.order_by(GeneratedReport.created_at.desc(), GeneratedReport.id.desc()).limit(1000)
         )]
-    items = db.scalars(query.order_by(GeneratedReport.created_at.desc()).limit(1000)).all()
+    items = db.scalars(query.order_by(GeneratedReport.created_at.desc(), GeneratedReport.id.desc()).limit(1000)).all()
     return [report_json(item) for item in items]
+
+
+def _report_history_scope(query, user):
+    if user.role != "admin":
+        query = query.where(GeneratedReport.report_type.not_in((DTR_REPORT_TYPE, AUTH_LOG_REPORT, RESTRICTED_ACTIVITY_REPORT)))
+    if user.role not in {"admin", "records_officer"}:
+        query = query.where(GeneratedReport.report_type != SMS_LOG_REPORT)
+    if user.role not in ACTIVITY_ROLES:
+        query = query.where(GeneratedReport.report_type != ACTIVITY_REPORT)
+    return query
+
+
+@app.get("/api/admin/activity/reports")
+def activity_report_history(db: Session = Depends(get_db), user: User = Depends(require_roles(*ACTIVITY_ROLES))) -> list[dict]:
+    query = _report_history_scope(select(GeneratedReport).where(
+        GeneratedReport.report_type.in_((ACTIVITY_REPORT, RESTRICTED_ACTIVITY_REPORT, AUTH_LOG_REPORT)),
+    ), user)
+    return [report_json(item) for item in db.scalars(query.order_by(GeneratedReport.created_at.desc(), GeneratedReport.id.desc()).limit(1000))]
+
+
+def _downloadable_report(db: Session, report_id: str, user: User, *, include_annex_g: bool = False) -> GeneratedReport:
+    query = _report_history_scope(select(GeneratedReport).where(GeneratedReport.id == report_id), user)
+    if user.role == "privacy_officer":
+        query = query.where(GeneratedReport.report_type == ACTIVITY_REPORT)
+    if user.role == "teacher":
+        scope = teacher_sf2_scope(db, user, download=True)
+        if include_annex_g:
+            scope = or_(scope, teacher_annex_g_release_scope(db, user))
+        item = scoped_record(db, query, scope, GeneratedReport.id,
+                             "These official files are restricted to the assigned adviser")
+        if item and item.report_type == "Annex G":
+            _annex_g_enrollment(db, int(json.loads(item.parameters_json)["enrollment_id"]), user)
+    else:
+        item = db.scalar(query)
+    if not item:
+        raise HTTPException(
+            status_code=404, detail="Generated report file was not found")
+    return item
+
+
+@app.post("/api/reports/history/{report_id}/verify")
+@rate_limit("report")
+async def verify_generated_report(report_id: str, file: UploadFile = File(...), db: Session = Depends(get_db),
+                                  user: User = Depends(require_roles("admin", "teacher", "records_officer", "privacy_officer", "school_head"))) -> dict:
+    item = _downloadable_report(db, report_id, user, include_annex_g=True)
+    if not item.filename.lower().endswith(".pdf") or not re.fullmatch(r"[0-9a-f]{64}", item.file_sha256 or ""):
+        return {"status": "unavailable"}
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := await file.read(65536):
+        if size == 0 and not chunk.startswith(b"%PDF-"):
+            raise HTTPException(422, "Choose a PDF file to verify.")
+        size += len(chunk)
+        if size > MAX_REPORT_VERIFICATION_BYTES:
+            raise HTTPException(413, "PDF exceeds the 50 MB verification limit.")
+        digest.update(chunk)
+    if not size:
+        raise HTTPException(422, "Choose a PDF file to verify.")
+    submitted = digest.hexdigest()
+    return {"status": "match" if hmac.compare_digest(submitted, item.file_sha256) else "differs",
+            "original_sha256": item.file_sha256, "submitted_sha256": submitted}
 
 
 @app.get("/api/reports/history/{report_id}/download")
 def download_generated_report(report_id: str, db: Session = Depends(get_db),
-                              user: User = Depends(require_roles("admin", "teacher", "records_officer", "school_head"))) -> FileResponse:
-    query = select(GeneratedReport).where(GeneratedReport.id == report_id)
-    if user.role != "admin":
-        query = query.where(GeneratedReport.report_type != DTR_REPORT_TYPE)
-    item = scoped_record(db, query, teacher_sf2_scope(db, user, download=True), GeneratedReport.id,
-                         "You can only download official SF2 reports for your advisory class") if user.role == "teacher" else db.scalar(query)
-    if not item:
-        raise HTTPException(
-            status_code=404, detail="Generated report file was not found")
-    path = Path(item.file_path)
+                              user: User = Depends(require_roles("admin", "teacher", "records_officer", "privacy_officer", "school_head"))) -> FileResponse:
+    item = _downloadable_report(db, report_id, user)
+    path = registered_report_path(item)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Generated report file was not found")
     if hashlib.sha256(path.read_bytes()).hexdigest() != item.file_sha256:
         raise HTTPException(status_code=409, detail="Report integrity check failed")
-    return FileResponse(item.file_path, filename=item.filename, headers={"Cache-Control": "private, no-store"})
+    return FileResponse(path, filename=item.filename, headers={"Cache-Control": "private, no-store"})
 
 
 @app.post("/api/reports/history/{report_id}/review")
 def review_generated_report(report_id: str, payload: ReportReviewPayload, db: Session = Depends(get_db),
                             user: User = Depends(require_roles("admin", "records_officer"))) -> dict:
-    item = db.get(GeneratedReport, report_id)
-    if not item or (item.report_type == DTR_REPORT_TYPE and user.role != "admin"):
-        raise HTTPException(
-            status_code=404, detail="Generated report was not found")
+    item = _downloadable_report(db, report_id, user)
     before = model_snapshot(item)
     item.status = payload.status
     item.reviewed_by = user.id
@@ -4069,16 +4576,13 @@ def gradebook_report_print_new(
 def dashboard(day: date = Query(default_factory=date.today), db: Session = Depends(get_db),
               _: User = Depends(require_roles("admin"))) -> dict:
     rows = list_rows(db, day)
-    query = attendance_event_query().options(joinedload(AttendanceEvent.person)).where(AttendanceEvent.event_date == day)
-    reset = latest_day_reset(db, day)
-    if reset:
-        query = query.where(AttendanceEvent.created_at > reset.created_at)
-    events = db.scalars(query.order_by(AttendanceEvent.created_at.desc()).limit(20)).all()
+    events = db.execute(recent_attendance_query(day).limit(20)).all()
+    sms_counts = dict(db.execute(select(SmsOutbox.status, func.count(SmsOutbox.id)).group_by(SmsOutbox.status)).all())
     return {
         "rows": rows,
-        "events": [{"id": item.id, "person": item.person.full_name, "role": item.person.role, "time": item.event_time,
+        "events": [{"id": item.id, "person": item.name, "role": item.role, "time": item.event_time,
                     "direction": item.direction, "status": item.status} for item in events],
-        "sms": {status: db.scalar(select(func.count(SmsOutbox.id)).where(SmsOutbox.status == status)) or 0
+        "sms": {status: sms_counts.get(status, 0)
                 for status in ("queued", "accepted", "processed", "sent", "delivered", "failed", "exhausted", "cancelled")},
     }
 
@@ -4089,33 +4593,47 @@ def interventions(days: int = 90, threshold: int = 5, db: Session = Depends(get_
     if not 1 <= days <= 366 or not 1 <= threshold <= 100:
         raise HTTPException(
             status_code=422, detail="Intervention range is invalid")
-    query = select(Person).where(Person.active.is_(True), Person.role == "Student")
-    if user.role == "teacher":
-        query = query.where(advised_people(user.id, school_year_for_date(date.today())))
-    students = db.scalars(query.order_by(Person.full_name)).all()
     end = date.today()
     start = end - timedelta(days=days - 1)
-    absence_dates: dict[int, list[date]] = {
-        person.id: [] for person in students}
-    cursor = start
-    while cursor <= end:
-        if cursor.weekday() < 5:
-            scope = advised_people(user.id, school_year_for_date(cursor)) if user.role == "teacher" else None
-            for row in list_rows(db, cursor, person_scope=scope):
-                if row["person_id"] in absence_dates and row["status"] == "Absent":
-                    absence_dates[row["person_id"]].append(cursor)
-        cursor += timedelta(days=1)
-    result = []
-    for person in students:
-        absent_dates = absence_dates.get(person.id, [])
-        if len(absent_dates) < threshold:
-            continue
-        logs = db.scalars(select(Intervention).where(
-            Intervention.person_id == person.id).order_by(Intervention.created_at.desc())).all()
-        result.append({"person": person_json(person, db), "absence_count": len(absent_dates),
-                       "last_absence": max(absent_dates), "logs": [{"id": item.id, "intervention_type": item.intervention_type,
-                                                                    "note": item.note, "actor_name": item.actor_name, "created_at": item.created_at} for item in logs]})
-    return result
+    query = select(Person, person_sample_count).where(Person.active.is_(True), Person.role == "Student")
+    if user.role == "teacher":
+        query = query.where(advised_people(user.id, school_year_for_date(end)))
+    students = db.execute(query.order_by(Person.full_name, Person.id)).all()
+    if not students:
+        return []
+    weekdays = [start + timedelta(days=offset) for offset in range(days)]
+    weekdays = [day for day in weekdays if day.weekday() < 5]
+    days_by_year = {None: weekdays}
+    if user.role == "teacher":
+        years = db.execute(select(SchoolYear.id, SchoolYear.starts_on, SchoolYear.ends_on).where(
+            SchoolYear.deleted_at.is_(None), SchoolYear.active.is_(True),
+            SchoolYear.starts_on <= end, SchoolYear.ends_on >= start,
+        )).all()
+        days_by_year = defaultdict(list)
+        for day in weekdays:
+            matches = [year.id for year in years if year.starts_on <= day <= year.ends_on]
+            if len(matches) == 1:
+                days_by_year[matches[0]].append(day)
+    absence_dates = {person.id: [] for person, _ in students}
+    for year_id, period in days_by_year.items():
+        scope = advised_people(user.id, year_id) if year_id is not None else None
+        roster = [person for person in active_people(db, students_only=True, include_departed=True, person_scope=scope)
+                  if person.id in absence_dates]
+        for day, rows in rows_for_people_on_days(db, roster, period).items():
+            for row in rows:
+                if row["status"] == "Absent":
+                    absence_dates[row["person_id"]].append(day)
+    flagged = {person_id for person_id, absent in absence_dates.items() if len(absent) >= threshold}
+    if not flagged:
+        return []
+    logs_by_person = defaultdict(list)
+    for item in db.scalars(select(Intervention).where(Intervention.person_id.in_(flagged))
+                           .order_by(Intervention.created_at.desc(), Intervention.id.desc())):
+        logs_by_person[item.person_id].append({"id": item.id, "intervention_type": item.intervention_type,
+            "note": item.note, "actor_name": item.actor_name, "created_at": item.created_at})
+    return [{"person": person_json(person, db, sample_count=count), "absence_count": len(absence_dates[person.id]),
+             "last_absence": max(absence_dates[person.id]), "logs": logs_by_person[person.id]}
+            for person, count in students if person.id in flagged]
 
 
 @app.post("/api/interventions")

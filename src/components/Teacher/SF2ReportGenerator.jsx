@@ -1,4 +1,5 @@
 import PaginatedBody from '../Common/PaginatedBody';
+import ActionMenu from '../Common/ActionMenu';
 import { useCallback, useEffect, useState } from 'react';
 import { api, auth, displayTime, localDate } from '../../api/client';
 import { useToast } from '../../contexts/useToast';
@@ -100,8 +101,10 @@ function AdminSF2ReportGenerator() {
               <button disabled={loading || !previewDate} onClick={() => downloadTemporaryLog('xlsx')}>Download section log Excel (.xlsx)</button>
             </div>
           </details>
-          <button className="btn-primary" disabled={exportDisabled} onClick={() => exportFile('pdf')}>Download SF2 PDF</button>
-          <button className="btn-secondary" disabled={exportDisabled} onClick={() => exportFile('xlsx')}>Download SF2 Excel (.xlsx)</button>
+          <ActionMenu label="Export SF2" disabled={exportDisabled}>
+            <button type="button" onClick={() => exportFile('pdf')}>Download PDF</button>
+            <button type="button" onClick={() => exportFile('xlsx')}>Download Excel (.xlsx)</button>
+          </ActionMenu>
         </div>
       </div>
       {!loading && unresolved > 0 && <div className="notice notice-warning" role="status">{unresolved} learner-day(s) still have No scan on past school days. Review or close those days in Attendance before generating official SF2. This screen does not create absences.</div>}

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'vite';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { StaticRouter } from 'react-router-dom';
 
 test('Reports initially mounts daily data and defers offscreen workspaces, with working deep links', async () => {
   const previousWindow = globalThis.window;
@@ -23,10 +24,12 @@ test('Reports initially mounts daily data and defers offscreen workspaces, with 
       createElement(PaginatedBody, { pageSize: 5, columnCount: 4 }, rows)));
     assert.match(paginated, /<td colSpan="4"><nav class="record-pagination"/i);
     assert.doesNotMatch(paginated, /colSpan="100"/i);
-    const render = () => renderToStaticMarkup(createElement(ToastProvider, null, createElement(Reports)));
+    const render = () => renderToStaticMarkup(createElement(StaticRouter,
+      { location: '/dashboard/reports' + window.location.hash },
+      createElement(ToastProvider, null, createElement(Reports))));
     const initial = render();
     assert.match(initial, /Daily attendance report preview/);
-    assert.match(initial, /href="#monthly-dtr"/);
+    assert.match(initial, /href="\/dashboard\/reports#monthly-dtr"/);
     assert.doesNotMatch(initial, /Find employee/);
     assert.doesNotMatch(initial, /Selected-month roster preview/);
     assert.doesNotMatch(initial, /class="card-static annex-g-workspace"/);
@@ -39,7 +42,7 @@ test('Reports initially mounts daily data and defers offscreen workspaces, with 
     assert.match(render(), /Name or Employee ID/);
     role = 'records_officer';
     await auth.restore();
-    assert.doesNotMatch(render(), /href="#monthly-dtr"/);
+    assert.doesNotMatch(render(), /#monthly-dtr/);
   } finally {
     await server.close();
     if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow;

@@ -1211,10 +1211,16 @@ class ClassRecordRegressionTest(unittest.TestCase):
         finally:
             workbook.close()
         data = openpyxl.load_workbook(self.export_path, data_only=True)
-        self.assertEqual(data['TERM 1']['AB18'].value, 80)
-        self.assertEqual(data['TERM 1']['AC18'].value, 83)
-        self.assertEqual(data['TERM 1']['AC69'].value, 100)
-        data.close()
+        try:
+            calculated = {
+                'K15': 20, 'K18': 16, 'L18': 80, 'M18': 16,
+                'Q18': 40, 'R18': 80, 'S18': 40,
+                'W18': 24, 'X18': 24, 'Y18': 32, 'Z18': 80, 'AA18': 24,
+                'AB18': 80, 'AC18': 83, 'AD18': 'Benchmarking', 'AC69': 100,
+            }
+            self.assertEqual({cell: data['TERM 1'][cell].value for cell in calculated}, calculated)
+        finally:
+            data.close()
         self.assertEqual(before, [(score.id, score.score, score.status) for score in self.db.scalars(select(StudentScore)).all()])
 
     def test_export_rejects_policy_and_exam_mismatches_without_changing_scores(self):

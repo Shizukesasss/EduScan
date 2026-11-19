@@ -1,0 +1,8 @@
+backend/
+scripts/
+logs/
+work/
+tmp/
+output/
+**/.env
+**/.env.*

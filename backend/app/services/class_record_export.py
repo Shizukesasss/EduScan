@@ -6,6 +6,7 @@ from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
 from fastapi import HTTPException
+from openpyxl import load_workbook
 from sqlalchemy import select
 
 from ..models_grading import Gradebook
@@ -113,6 +114,8 @@ def fill_saved_core(full, sheet_name, changes, cached, males, females, formulas)
         items_by_group[key] = items
         sheet[f'{_column_name(first)}12'] = component['name']
         sheet[f'{ws}15'] = component['weight'] / 100
+        if total:
+            cache[f'{total}15'] = sum(item['max_score'] for item in items)
         for index in range(capacity):
             col = _column_name(first + index)
             sheet[f'{col}14'] = (index + 1 if key in {'ww', 'pt'} else items[index]['label']) if index < len(items) else None
@@ -176,9 +179,16 @@ def fill_saved_core(full, sheet_name, changes, cached, males, females, formulas)
             cache[f'AB{row}'], cache[f'AC{row}'] = student['initial_grade'], student['reported_grade']
 
 
-def fill_term(full, kind, sheet_name, changes, cached, males, females, table, formulas=None):
+def fill_term(full, kind, sheet_name, changes, cached, males, females, table, formulas=None, *, descriptors=None):
     if kind in {'core', 'mapeh', 'tle'} and not any(c.get('component_type') == 'Term Examinations' for c in full['components']):
-        return fill_saved_core(full, sheet_name, changes, cached, males, females, formulas)
+        fill_saved_core(full, sheet_name, changes, cached, males, females, formulas if formulas is not None else {})
+        if descriptors:
+            cache = cached[sheet_name]
+            for start, roster in ((18, males), (69, females)):
+                for row in range(start, start + len(roster)):
+                    if (descriptor := descriptors.get(cache.get(f'AC{row}'))) is not None:
+                        cache[f'AD{row}'] = descriptor
+        return
     groups = assessment_groups(full, kind)
     if full['policy']['rounding_method'] != 'half_up' or full['policy']['rounding_decimal_places'] != 2:
         raise HTTPException(409, 'The fixed workbook cannot represent this saved rounding policy.')
@@ -207,7 +217,9 @@ def fill_term(full, kind, sheet_name, changes, cached, males, females, table, fo
     formula_overrides = (formulas if formulas is not None else {}).setdefault(sheet_name, {})
     if kind == 'tle':
         sheet.update({'M15': 0.2, 'S15': 0.6, 'AA15': 0.2})
-    hps, male_start, female_start, initial_col, grade_col = (16, 19, 70, 'AV', 'AW') if kind == 'gmrc' else (15, 18, 69, 'AB', 'AC')
+    hps, male_start, female_start, initial_col, grade_col, descriptor_col = (
+        (16, 19, 70, 'AV', 'AW', 'AX') if kind == 'gmrc' else (15, 18, 69, 'AB', 'AC', 'AD')
+    )
     from .reports import _column_name
     items_by_group = {}
     for key, component in groups.items():
@@ -230,27 +242,41 @@ def fill_term(full, kind, sheet_name, changes, cached, males, females, table, fo
         items_by_group[key] = items
         for index, item in enumerate(items):
             sheet[f'{_column_name(first + index)}{hps}'] = item['max_score']
+        if key != 'exam':
+            cache[f'{_column_name(first + capacity)}{hps}'] = sum(item['max_score'] for item in items)
     student_map = {student['person_id']: student for student in full['students']}
     for roster, start in ((males, male_start), (females, female_start)):
         for index, person in enumerate(roster):
             student = student_map.get(person['person_id'])
             if student is None:
                 continue
+            row = start + index
             initial = Decimal('0')
             for key, items in items_by_group.items():
-                first, _, weight = layout[key]
+                first, capacity, weight = layout[key]
                 scores = [student['scores'].get(str(item['id'])) for item in items]
                 if any(score is None for score in scores):
                     raise HTTPException(409, 'A required exported assessment score is missing.')
                 for offset, score in enumerate(scores):
-                    sheet[f'{_column_name(first + offset)}{start + index}'] = score
+                    sheet[f'{_column_name(first + offset)}{row}'] = score
+                maximums = [Decimal(str(item['max_score'])) for item in items]
+                earned = [Decimal(str(score)) for score in scores]
+                calculated = first + capacity
                 if key == 'exam':
-                    percentage = sum((Decimal(str(score)) / Decimal(str(item['max_score'])) * Decimal(str(portion))
-                                      for score, item, portion in zip(scores, items, (30, 30, 40))), Decimal('0'))
+                    portions = [score / maximum * part for score, maximum, part in zip(earned, maximums, (30, 30, 40))]
+                    for offset, portion in enumerate(portions):
+                        cache[f'{_column_name(calculated + offset)}{row}'] = portion
+                    percentage = sum(portions)
+                    percentage_col = calculated + len(portions)
                 else:
-                    percentage = (sum((Decimal(str(score)) for score in scores), Decimal('0'))
-                                  / sum((Decimal(str(item['max_score'])) for item in items), Decimal('0')) * 100)
-                initial += percentage * Decimal(str(weight)) / 100
+                    total = sum(earned)
+                    cache[f'{_column_name(calculated)}{row}'] = total
+                    percentage = total / sum(maximums) * 100
+                    percentage_col = calculated + 1
+                weighted_score = percentage * Decimal(str(weight)) / 100
+                cache[f'{_column_name(percentage_col)}{row}'] = percentage
+                cache[f'{_column_name(percentage_col + 1)}{row}'] = weighted_score
+                initial += weighted_score
             if reporting_method == 'direct':
                 converted = round_value(initial, full['policy']['rounding_final_decimal_places'], full['policy']['rounding_method'])
             else:
@@ -258,11 +284,16 @@ def fill_term(full, kind, sheet_name, changes, cached, males, females, table, fo
                                   if initial >= Decimal(str(row['min']))), None)
             if converted is None or student['reported_grade'] != converted or round_value(initial, 2) != student['initial_grade']:
                 raise HTTPException(409, f"The workbook calculation differs from the saved grade for {student['full_name']}. Check the examination weighting and rounding policy. No grades were changed.")
-            cache[f'{initial_col}{start + index}'] = student['initial_grade']
-            cache[f'{grade_col}{start + index}'] = student['reported_grade']
-            formula_overrides[f'{grade_col}{start + index}'] = (
-                _direct_template_grade_formula(initial_col, start + index, full['policy']['rounding_final_decimal_places'])
-                if reporting_method == 'direct' else _rounded_template_grade_formula(initial_col, start + index)
+            cache[f'{initial_col}{row}'] = student['initial_grade']
+            cache[f'{grade_col}{row}'] = student['reported_grade']
+            if descriptors:
+                # SPA and SPS use MATCH with a descending table. Other templates use an exact lookup.
+                descriptor_grade = math.ceil(converted) if kind in {'spa', 'sps'} else converted
+                if (descriptor := descriptors.get(descriptor_grade)) is not None:
+                    cache[f'{descriptor_col}{row}'] = descriptor
+            formula_overrides[f'{grade_col}{row}'] = (
+                _direct_template_grade_formula(initial_col, row, full['policy']['rounding_final_decimal_places'])
+                if reporting_method == 'direct' else _rounded_template_grade_formula(initial_col, row)
             )
 
 
@@ -443,6 +474,13 @@ def export_jhs(db, book, full, kind, template, region, division, school_id, allo
         query = query.where(Gradebook.teacher_user_id == book.teacher_user_id)
     cached, formulas = {}, {}
     table = template_table(template)
+    descriptor_workbook = load_workbook(template, read_only=True, data_only=True)
+    try:
+        descriptors = dict(descriptor_workbook['HELPER'].iter_rows(
+            min_row=8, max_row=48, min_col=6, max_col=7, values_only=True,
+        ))
+    finally:
+        descriptor_workbook.close()
     written_sheets, exported_terms = set(), {}
     for sibling in db.scalars(query).all():
         try:
@@ -458,7 +496,7 @@ def export_jhs(db, book, full, kind, template, region, division, school_id, allo
         sheet_name = f'TERM {sibling.term_order}{suffix}'
         if sheet_name in written_sheets:
             raise HTTPException(409, 'Multiple finalized records match the same learning area and term. Resolve the subject assignment before exporting.')
-        fill_term(term, kind, sheet_name, changes, cached, males, females, table, formulas)
+        fill_term(term, kind, sheet_name, changes, cached, males, females, table, formulas, descriptors=descriptors)
         written_sheets.add(sheet_name)
         exported_terms[(sibling.term_order, sibling.learning_area)] = term
         if term['gradebook']['teacher_name'] != gb['teacher_name']:

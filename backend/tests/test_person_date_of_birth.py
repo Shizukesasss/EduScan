@@ -41,6 +41,7 @@ class PersonDateOfBirthTests(unittest.TestCase):
     def payload(self, **changes):
         return PersonCreate(**{
             "external_id": "DOB-STUDENT",
+            "lrn": "012345678901",
             "first_name": "Test",
             "surname": "Learner",
             "sex": "Female",

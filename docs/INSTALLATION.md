@@ -7,7 +7,7 @@ This guide is for a Windows laptop used as an EduScan server or gate station. De
 - Git for Windows
 - Python 3.12 (the `py -3.12` command is recommended)
 - Node.js 22.12+ (or 20.19+) with npm
-- Microsoft Excel with PDF export on the Windows host is optional. Hosted Linux deployments render workbook PDFs directly.
+- Microsoft Excel is optional. On Windows, EduScan uses Excel's print layout when Excel automation is available. The built-in renderer provides workbook PDFs on other hosts and when Excel export fails.
 - A webcam
 - Optional: MySQL Community Server 8.x and its command-line client tools
 - Optional: an Android phone with a SIM and SMS Gateway for Android in Local Server mode
@@ -133,6 +133,38 @@ The update command permits only a fast-forward pull and reruns the idempotent de
 8. Disconnect internet and verify `http://127.0.0.1:5175`, scanner camera permission, report generation, and local phone reachability. A hosted PostgreSQL database still requires its network connection.
 
 Internet is still needed for Git pulls, npm/pip installation, and any non-local documentation links. The Android phone needs cellular signal/credit for SMS, but the laptop-to-phone API connection uses only the local network.
+
+## Vercel frontend and persistent API
+
+Use the repository root for the Vercel project. Set `VITE_API_URL` to the always-on API's HTTPS URL, including the `/api` suffix (for example, `https://api.example.edu/api`). The Vercel build requires that setting. Uploads go from the browser directly to the API host, where EduScan's own upload limits apply. Only the Vite app is deployed to Vercel.
+
+On the persistent API host, create an ignored `backend/.env.production` from `backend/.env.example`. Set the restricted PostgreSQL `DATABASE_URL` and the deployment's stable `EDUSCAN_SECRET_KEY` and `EDUSCAN_ENCRYPTION_KEY`. For an existing installation, use the keys that belong to its data. Copy the verified file archive to the persistent data volume before starting the API. Keep the `biometrics`, `models`, `templates`, `exports/registered`, and `backups` subdirectories in their original layout. Report history can locate a relocated export by its original ID-based filename and validates the bytes against the stored hash.
+
+For a Docker host, `docker compose -f compose.production.yaml up -d --build` runs one API worker with the attendance, SMS, and backup scheduler enabled. The named data volume mounts at `/var/lib/eduscan` and must be writable by UID 10001. The API binds to loopback on the host. Terminate HTTPS at the host's reverse proxy and set `FORWARDED_ALLOW_IPS` to the actual trusted proxy address as seen by the API. Keep the API host connected to the school's configured SMS gateway and any backup destination it uses. For PostgreSQL backups, the image includes PostgreSQL 17 client tools.
+
+Run the PostgreSQL maintenance migration before starting the updated production API. Keep the owner URL in the maintenance process only. Run the access audit using the restricted runtime URL afterward.
+
+## Managed offline station
+
+Select **Offline (local SQLite)** in the Windows launcher when a station must keep working through an internet outage. Keep this profile running during normal operation so an outage requires no server switch. The standalone offline profile remains available for demonstrations.
+
+For school sync, apply migration 0038 to the school database using the maintenance procedure in [PostgreSQL setup](POSTGRESQL_SETUP.md). Set `EDUSCAN_SYNC_DATABASE_URL` in the station's ignored `backend/.env` to the restricted runtime login. Use `sslmode=verify-full` and the CA certificate supplied by the database provider. Keep the database URL on the trusted station, outside browser settings.
+
+On a station whose existing `DATABASE_URL` selects the school database, run `backend/.venv/Scripts/python.exe backend/tools/configure_station_sync.py --ca <provider-ca.pem>` from the repository root. The tool checks the remote schema and access grants over verified TLS before writing the offline sync setting. Add `--check` to verify prerequisites without writing. Restart using **Offline (local SQLite)** after configuring the station.
+
+Before enabling sync, provision the local station with the school's academic structure, authorized operators with the same usernames as their school accounts, and the roster and encrypted face samples it needs. Use school-controlled passwords for local accounts. Keep the local SQLite database, encryption key, and biometric files together in the offline data directory.
+
+The station retries pending student records and gate punches automatically. Check **System Setup → Gate network** for pending, synced, and conflict counts. Conflicts are kept for staff review. Face sample files and recognizer models remain on the station where they were enrolled. A separate station needs its own authorized capture or an approved biometric restore.
+
+The station needs one successful policy check before its first gate capture with sync enabled. A cached unrestricted policy supports offline gate captures. A restricted policy pauses this loopback station, and the school database places incoming events in conflict if it requires a network check. Deploy restricted gate stations where the API can verify the request's approved network address. Configure only explicitly trusted reverse proxies to supply a client address.
+
+Migration 0038 adds station receipts and lookup indexes. To roll back application behavior, stop the sync station and run the previous application version with sync disabled. Preserve the SQLite station database and the school receipt table for any later retry.
+
+### Reporting query and schema review
+
+Roster and biometric-enrollment lists fetch sample counts or summaries with the people they display. Gate history reads a bounded set of punches and their SMS records. The dashboard aggregates SMS status counts in one query. Attendance ranges, SF2, and Annex G group related attendance data by date and learner. Verify performance on the school's data before changing indexes beyond migration 0038.
+
+The schema has foreign keys for scores, attendance, academic assignments, and verified school-year learner placements. It also retains denormalized fields. Gradebooks keep display labels beside academic IDs, and legacy person rows keep current grade and section beside the verified placement history. Report and audit rows keep snapshots of names and event details. Any normalization migration must preserve historical exports and the placement fallback for earlier records. Migration 0038 does not drop or backfill those fields.
 
 ## Common startup issues
 

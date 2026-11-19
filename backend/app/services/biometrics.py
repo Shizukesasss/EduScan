@@ -44,6 +44,7 @@ MIN_GATE_SIMILARITY = MIN_SIMILARITY + 0.05
 MIN_IDENTITY_MARGIN = 0.05
 HUMAN_FACE_MODEL = Path(__file__).resolve().parents[2] / "resources" / "face_detection_yunet_2023mar.onnx"
 HUMAN_FACE_MODEL_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+SAMPLE_REFERENCE_COLUMNS = (BiometricSample.id, BiometricSample.person_id, BiometricSample.encrypted_path, BiometricSample.sha256)
 
 
 @dataclass
@@ -246,11 +247,15 @@ class BiometricService:
         return faces[0]
 
     def enrollment_snapshot(self, db: Session, person: Person) -> dict:
-        samples = db.scalars(
-            select(BiometricSample)
+        samples = db.execute(
+            select(BiometricSample.quality_score, BiometricSample.created_at)
             .where(BiometricSample.person_id == person.id)
             .order_by(BiometricSample.created_at, BiometricSample.id)
         ).all()
+        return self.summarize_enrollment(samples)
+
+    @staticmethod
+    def summarize_enrollment(samples) -> dict:
         qualities = [sample.quality_score for sample in samples]
         return {
             "sample_count": len(samples),
@@ -321,19 +326,40 @@ class BiometricService:
 
     def _identity_gallery(self, db, include_inactive=False, exclude_person_id=None,
                           missing_person_ids: set[int] | None = None):
-        query = select(BiometricSample).join(Person).where(Person.biometric_consent.is_(True))
+        query = select(*SAMPLE_REFERENCE_COLUMNS).join(Person).where(Person.biometric_consent.is_(True))
         if not include_inactive:
             query = query.where(Person.active.is_(True))
         if exclude_person_id is not None:
             query = query.where(Person.id != exclude_person_id)
-        samples = db.scalars(query.order_by(BiometricSample.person_id, BiometricSample.id)).all()
+        samples = db.execute(query.order_by(BiometricSample.person_id, BiometricSample.id)).all()
         gallery, refreshed = [], {}
+        # Refresh once per gallery so cached embeddings cannot hide a deleted
+        # sample. A directory listing avoids a separate stat for each local file.
+        files_by_directory: dict[Path, set[str] | None] = {}
+
+        def is_sample_file(path: Path) -> bool:
+            if path.parent not in files_by_directory:
+                try:
+                    with os.scandir(path.parent) as entries:
+                        files_by_directory[path.parent] = {
+                            entry.name for entry in entries if entry.is_file(follow_symlinks=False)
+                        }
+                except (FileNotFoundError, NotADirectoryError):
+                    files_by_directory[path.parent] = None
+                except OSError:
+                    # A known file may be readable even when listing is denied.
+                    files_by_directory[path.parent] = set()
+            names = files_by_directory[path.parent]
+            return names is not None and (path.name in names or path.is_file())
+
         with self._identity_lock:
             for sample in samples:
                 key = (sample.id, sample.person_id, sample.sha256)
                 try:
-                    if missing_person_ids is not None and not self._sample_path(sample).is_file():
-                        raise FileNotFoundError('Enrollment sample is missing')
+                    if missing_person_ids is not None:
+                        primary, local = self._sample_paths(sample)
+                        if not is_sample_file(primary) and (local == primary or not is_sample_file(local)):
+                            raise FileNotFoundError('Enrollment sample is missing')
                     feature = self._identity_cache.get(key)
                     if feature is None:
                         feature = self._load_sample_identity_feature(sample)
@@ -380,12 +406,13 @@ class BiometricService:
         references_by_person = {}
         for person_id, feature in gallery:
             references_by_person.setdefault(person_id, []).append(feature)
-        if any(np.any(np.stack(features) @ np.stack(features).T < MIN_ENROLLMENT_SIMILARITY)
-               for features in references_by_person.values()):
-            raise HTTPException(503, detail={
-                'code': 'identity_verifier_unavailable',
-                'message': 'An existing face enrollment contains inconsistent identity references. Ask an administrator to re-enroll that person before recognition.',
-            })
+        for features in references_by_person.values():
+            references = np.stack(features)
+            if np.any(references @ references.T < MIN_ENROLLMENT_SIMILARITY):
+                raise HTTPException(503, detail={
+                    'code': 'identity_verifier_unavailable',
+                    'message': 'An existing face enrollment contains inconsistent identity references. Ask an administrator to re-enroll that person before recognition.',
+                })
         return samples, gallery
 
     def _recognition_gallery(self, db: Session) -> tuple[list, set[int]]:
@@ -644,11 +671,14 @@ class BiometricService:
             pass
 
     @staticmethod
-    def _sample_path(sample: BiometricSample) -> Path:
+    def _sample_paths(sample):
         path = Path(sample.encrypted_path)
-        if not path.is_file():
-            path = BIOMETRIC_DIR / f"person_{sample.person_id}" / PureWindowsPath(sample.encrypted_path).name
-        return path
+        return path, BIOMETRIC_DIR / f"person_{sample.person_id}" / PureWindowsPath(sample.encrypted_path).name
+
+    @classmethod
+    def _sample_path(cls, sample) -> Path:
+        primary, local = cls._sample_paths(sample)
+        return primary if primary.is_file() else local
 
     def _load_sample_data(self, sample: BiometricSample) -> bytes:
         path = self._sample_path(sample)
@@ -686,8 +716,8 @@ class BiometricService:
         return self._identity_feature(image) if legacy_embedding is None else legacy_embedding(image, self)
 
     def train(self, db: Session, commit: bool = True, missing_person_ids: set[int] | None = None) -> dict:
-        samples = db.scalars(
-            select(BiometricSample)
+        samples = db.execute(
+            select(*SAMPLE_REFERENCE_COLUMNS)
             .join(Person)
             .where(Person.active.is_(True), Person.biometric_consent.is_(True))
             .order_by(BiometricSample.person_id, BiometricSample.created_at)
@@ -745,10 +775,13 @@ class BiometricService:
             self._unlink_files(obsolete_model_paths)
         return {"version": version, "sha256": digest, "person_count": person_count, "sample_count": len(samples), "threshold": settings.lbph_threshold}
 
-    def _active_recognizer(self, db: Session):
-        active = db.scalar(select(BiometricModel).where(BiometricModel.active.is_(True)).order_by(BiometricModel.id.desc()))
+    def _active_recognizer(self, db: Session, active_model=None):
+        active = active_model if active_model is not None else db.execute(
+            select(BiometricModel.version, BiometricModel.file_path, BiometricModel.sha256)
+            .where(BiometricModel.active.is_(True)).order_by(BiometricModel.id.desc()).limit(1)
+        ).first()
         if not active:
-            raise HTTPException(status_code=409, detail={"code": "model_not_trained", "message": "No trained face model is available. Enroll an authorized person and train the model first."})
+            raise HTTPException(status_code=409, detail={"code": "model_not_trained", "message": "Enroll an authorized person to start recognition. EduScan trains a local model when enrollment is saved."})
         model_path = Path(active.file_path)
         if not model_path.is_file():
             model_path = MODEL_DIR / PureWindowsPath(active.file_path).name
@@ -774,13 +807,35 @@ class BiometricService:
                 self._model_path = str(model_path)
             return self._recognizer, active
 
-    def model_readiness(self, db: Session) -> dict:
+    def _recognition_inputs(self, db: Session, active_model=None):
+        missing_model = None
         try:
-            self._active_recognizer(db)
-            _gallery, missing_person_ids = self._recognition_gallery(db)
+            recognizer, _ = self._active_recognizer(db, active_model)
+        except HTTPException as error:
+            if not isinstance(error.detail, dict) or error.detail.get('code') not in {'model_not_trained', 'model_file_missing'}:
+                raise
+            missing_model = error
+            recognizer = None
+
+        # A missing LBPH artifact removes the audit distance. The SFace gallery
+        # still enforces complete, verified references and consent for each face.
+        try:
+            gallery, missing_person_ids = self._recognition_gallery(db)
+        except HTTPException as error:
+            if missing_model and isinstance(error.detail, dict) and error.detail.get('code') == 'no_local_identity_references':
+                raise missing_model from error
+            raise
+        return recognizer, gallery, missing_person_ids
+
+    def model_readiness(self, db: Session, active_model=None) -> dict:
+        try:
+            recognizer, _gallery, missing_person_ids = self._recognition_inputs(db, active_model)
             if missing_person_ids:
                 return {'available': True, 'code': 'ready_with_missing_enrollments',
                         'message': f'Recognition is ready for complete local enrollments. {len(missing_person_ids)} older enrollment(s) have missing files and cannot be matched. Use assisted attendance for those people until their samples are restored.'}
+            if recognizer is None:
+                return {'available': True, 'code': 'ready_without_lbph_model',
+                        'message': 'SFace recognition is ready using verified local enrollments.'}
             return {"available": True, "code": "ready", "message": "Trained face model is ready on this computer."}
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, dict) else {"code": "model_unavailable", "message": str(exc.detail)}
@@ -840,7 +895,7 @@ class BiometricService:
 
     @staticmethod
     def record_review(db: Session, processed: ProcessedFace, review_type: str, reason: str,
-                      person: Person | None, distance: float) -> RecognitionReview:
+                      person: Person | None, distance: float | None) -> RecognitionReview:
         now = datetime.utcnow()
         signature = hashlib.sha256(f"person:{person.id}".encode()).hexdigest() if person else processed.face_signature
         item = db.scalar(select(RecognitionReview).where(
@@ -874,6 +929,11 @@ class BiometricService:
     def recognize_many(self, db: Session, frame: bytes) -> list[dict]:
         return self.recognize_frames(db, [frame])
 
+    def clear_station_liveness(self, station_id: str) -> None:
+        with self._lock:
+            for key in [key for key in self._liveness if key[0] == station_id]:
+                self._liveness.pop(key, None)
+
     def recognize_frames(self, db: Session, frames: list[bytes], verified_present: set[int] | None = None,
                          require_single: bool = False, station_id: str = 'default', diagnostics: dict | None = None) -> list[dict]:
         """Check a short camera burst with one model/configuration/identity lookup."""
@@ -891,6 +951,7 @@ class BiometricService:
         unknown = []
         last_error = None
         empty_frames = 0
+        last_frame_people = set()
         test_state = {} if diagnostics is not None else None
         verified_present = (verified_present or set()) if diagnostics is None else set()
         if diagnostics is not None:
@@ -902,6 +963,7 @@ class BiometricService:
                 if error.status_code != 422:
                     raise
                 last_error = error
+                last_frame_people = set()
                 if error.detail == 'No frontal human face was detected':
                     empty_frames += 1
                 unknown = []
@@ -914,10 +976,9 @@ class BiometricService:
                 diagnostics['identity_comparisons'] = []
             if len(processed_faces) > 5:
                 raise HTTPException(status_code=422, detail='Too many faces are visible; process at most 5 people in one frame')
-            if recognizer is None:
-                recognizer, _model = self._active_recognizer(db)
+            if gallery is None:
+                recognizer, gallery, missing_person_ids = self._recognition_inputs(db)
                 config = self.runtime_config(db)
-                gallery, missing_person_ids = self._recognition_gallery(db)
                 if diagnostics is not None:
                     diagnostics['unavailable_person_ids'] = sorted(missing_person_ids)
             current_matches = {}
@@ -934,13 +995,15 @@ class BiometricService:
                 qualified = [key for key, score in ranked if score >= MIN_GATE_SIMILARITY]
                 near_tie = len(ranked) > 1 and ranked[0][1] - ranked[1][1] < MIN_IDENTITY_MARGIN
                 label = qualified[0] if len(qualified) == 1 and not near_tie else -1
-                collector = cv2.face.StandardCollector_create(float('inf'))
-                with self._lock:
-                    recognizer.predict_collect(processed.image, collector)
-                # Retain the existing LBPH audit distance, but never use it to choose the identity.
-                distances = [(int(key), float(value)) for key, value in collector.getResults() if math.isfinite(value)]
-                selected = [value for key, value in distances if label == -1 or key == label]
-                distance = min(selected) if selected else 1e9
+                distance = None
+                if recognizer is not None:
+                    collector = cv2.face.StandardCollector_create(float('inf'))
+                    with self._lock:
+                        recognizer.predict_collect(processed.image, collector)
+                    # Keep the existing LBPH audit distance when the artifact is available.
+                    selected = [float(value) for key, value in collector.getResults()
+                                if math.isfinite(value) and (label == -1 or int(key) == label)]
+                    distance = min(selected) if selected else 1e9
                 predictions.append((label, distance, ranked, len(qualified) > 1 or near_tie, feature))
             valid_labels = [label for label, _, _, _, _ in predictions if label != -1]
             collided_labels.update(label for label in valid_labels if valid_labels.count(label) > 1)
@@ -988,7 +1051,7 @@ class BiometricService:
                             live, message = self.verify_liveness(db, person, processed, config=config, station_id=station_id, test_state=test_state)
                 if person and live:
                     completed_blinks.add(person.id)
-                match = {'identity_similarity': ranked[0][1] if ranked else None, 'person': person, 'distance': float(distance), 'quality': processed.quality,
+                match = {'identity_similarity': ranked[0][1] if ranked else None, 'person': person, 'distance': distance, 'quality': processed.quality,
                          'box': processed.box, 'face_signature': processed.face_signature,
                          'eye_count': processed.eye_count, 'liveness_verified': live,
                          'presentation_verified': None, 'presentation_score': None,
@@ -999,6 +1062,7 @@ class BiometricService:
                     unknown.append(match)
             # Keep each distinct person seen in this burst, even if the final frame misses them.
             matches.update(current_matches)
+            last_frame_people = set(current_matches)
         results = list(matches.values()) + unknown
         if not results:
             if empty_frames == len(frames):
@@ -1008,6 +1072,7 @@ class BiometricService:
         # Audit only the final outcome, rather than writing on every blink frame.
         for match in results:
             processed = match.pop('_processed')
+            match['seen_in_latest_frame'] = match['person'] is None or match['person'].id in last_frame_people
             if diagnostics is None and (not match['person'] or not match['liveness_verified']):
                 review = self.record_review(db, processed, 'Liveness' if match['person'] else 'Unknown Face',
                                             match['message'], match['person'], match['distance'])

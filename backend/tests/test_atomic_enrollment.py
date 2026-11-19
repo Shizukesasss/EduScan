@@ -51,7 +51,7 @@ class AtomicEnrollmentTest(unittest.TestCase):
 
     def test_staff_requires_employee_id_and_preserves_phone(self):
         for role in ('Faculty', 'Non-teaching Personnel'):
-            payload = {**self.payload, 'role': role, 'external_id': f'EMP-{role}', 'guardian_phone': '+639123456789'}
+            payload = {**self.payload, 'role': role, 'lrn': None, 'external_id': f'EMP-{role}', 'guardian_phone': '+639123456789'}
             response = self.client.post('/api/persons', json=payload)
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()['guardian_phone'], payload['guardian_phone'])
@@ -113,7 +113,7 @@ class AtomicEnrollmentTest(unittest.TestCase):
         self.db.add_all([section, self.school_year])
         self.db.commit()
         self.section = section
-        self.payload = {'external_id': 'NEW-STUDENT', 'surname': 'Example', 'first_name': 'New',
+        self.payload = {'external_id': 'NEW-STUDENT', 'lrn': '012345678901', 'surname': 'Example', 'first_name': 'New',
                         'sex': 'Male', 'date_of_birth': '2012-01-01', 'role': 'Student', 'grade': '7', 'section': 'Jose', 'biometric_consent': True,
                         'school_year_id': self.school_year.id, 'enrollment_start_date': '2026-06-01'}
         self.overrides = dict(main.app.dependency_overrides)

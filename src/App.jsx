@@ -1,5 +1,5 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { useSyncExternalStore } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { lazy, Suspense, useSyncExternalStore } from 'react';
 import { ToastProvider } from './contexts/ToastContext';
 
 // Layouts
@@ -8,30 +8,43 @@ import AdminLayout from './layouts/AdminLayout';
 import TeacherLayout from './layouts/TeacherLayout';
 
 // Pages
-import Scanner from './pages/Scanner/Scanner';
 import Login from './pages/Login/Login';
-import Dashboard from './pages/Dashboard/Dashboard';
-import Attendance from './pages/Attendance/Attendance';
-import Grading from './pages/Grading/Grading';
-import Reports from './pages/Reports/Reports';
-import TruancyInterventions from './pages/Teacher/TruancyInterventions';
-import MyAdvisory from './pages/Teacher/MyAdvisory';
-import MySchedules from './pages/Teacher/MySchedules';
-import SystemSetup from './pages/Setup/SystemSetup';
-import Administration from './pages/Administration/Administration';
-import AccountSecurity from './pages/Account/AccountSecurity';
-import OperationalControls from './pages/Operations/OperationalControls';
 import { auth } from './api/client';
+import { workspaceFor } from './services/googleIdentity';
+
+const Scanner = lazy(() => import('./pages/Scanner/Scanner'));
+const Dashboard = lazy(() => import('./pages/Dashboard/Dashboard'));
+const Attendance = lazy(() => import('./pages/Attendance/Attendance'));
+const Grading = lazy(() => import('./pages/Grading/Grading'));
+const Reports = lazy(() => import('./pages/Reports/Reports'));
+const TruancyInterventions = lazy(() => import('./pages/Teacher/TruancyInterventions'));
+const MyAdvisory = lazy(() => import('./pages/Teacher/MyAdvisory'));
+const MySchedules = lazy(() => import('./pages/Teacher/MySchedules'));
+const SystemSetup = lazy(() => import('./pages/Setup/SystemSetup'));
+const Administration = lazy(() => import('./pages/Administration/Administration'));
+const AccountSecurity = lazy(() => import('./pages/Account/AccountSecurity'));
+const Profile = lazy(() => import('./pages/Account/Profile'));
+const OperationalControls = lazy(() => import('./pages/Operations/OperationalControls'));
 
 function RoleGuard({ roles, children, allowPasswordChange = false }) {
+  const { pathname, search, hash } = useLocation();
   const session = useSyncExternalStore(auth.subscribe, auth.snapshot, auth.snapshot);
   if (session.status === 'loading') return <div className="request-feedback" role="status">Checking your session…</div>;
   if (session.status === 'error') return <div className="request-feedback" role="alert">{session.message}{' '}
     <button type="button" className="btn-secondary" onClick={() => void auth.restore()}>Retry</button>
   </div>;
-  if (!roles.includes(session.user?.role)) return <Navigate to="/login" replace />;
-  if (session.user.must_change_password && !allowPasswordChange) return <Navigate to="/account/security" replace />;
+  const requested = { pathname, search, hash };
+  if (!session.user) return <Navigate to="/login" replace state={{ requested }} />;
+  if (!roles.includes(session.user.role)) return <Navigate to={workspaceFor(session.user.role)} replace />;
+  if (session.user.must_change_password && !allowPasswordChange) {
+    return <Navigate to="/account/security" replace state={{ requested }} />;
+  }
   return children;
+}
+
+function ScannerPreview() {
+  const { state } = useLocation();
+  return <Navigate to="/scanner?preview=1" replace state={state} />;
 }
 
 function WorkspaceHome() {
@@ -51,14 +64,16 @@ function App() {
   return (
     <ToastProvider>
       <BrowserRouter>
+        <Suspense fallback={<div className="request-feedback" role="status">Loading EduScan…</div>}>
         <Routes>
           {/* Public Routes (No authentication required) */}
           <Route element={<PublicLayout />}>
             <Route path="/" element={<Navigate to="/login" replace />} />
             <Route path="/login" element={<Login />} />
             <Route path="/account/security" element={<RoleGuard roles={['admin', 'teacher', 'scanner', 'records_officer', 'privacy_officer', 'ict', 'school_head']} allowPasswordChange><AccountSecurity /></RoleGuard>} />
+            <Route path="/account/profile" element={<RoleGuard roles={['admin', 'teacher', 'scanner', 'records_officer', 'privacy_officer', 'ict', 'school_head']}><Profile /></RoleGuard>} />
             <Route path="/scanner" element={<RoleGuard roles={['admin', 'scanner']}><Scanner /></RoleGuard>} />
-            <Route path="/scanner/test" element={<RoleGuard roles={['admin']}><Navigate to="/scanner?preview=1" replace /></RoleGuard>} />
+            <Route path="/scanner/test" element={<RoleGuard roles={['admin']}><ScannerPreview /></RoleGuard>} />
           </Route>
 
           {/* Protected Routes (Authentication required in a real app) */}
@@ -85,6 +100,7 @@ function App() {
           {/* Fallback route */}
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
+        </Suspense>
       </BrowserRouter>
     </ToastProvider>
   );

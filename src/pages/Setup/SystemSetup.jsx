@@ -1,7 +1,10 @@
 import RequestFeedback from '../../components/Common/RequestFeedback';
+import GateNetworkSettings from '../../components/Setup/GateNetworkSettings';
 import PageHeading from '../../components/Common/PageHeading';
 import PaginatedBody from '../../components/Common/PaginatedBody';
 import { useCallback, useEffect, useState } from 'react';
+import { useLocation, useSearchParams } from 'react-router-dom';
+import { BackButton, ReturnLink } from '../../components/Common/ReturnNavigation';
 import { api, auth } from '../../api/client';
 import OperationalControls from '../Operations/OperationalControls';
 import BiometricEnrollmentManager from '../../components/Setup/BiometricEnrollmentManager';
@@ -9,7 +12,7 @@ import PersonnelScheduleManager from '../../components/Setup/PersonnelScheduleMa
 import ClassScheduleManager from '../../components/Setup/ClassScheduleManager';
 import { useToast } from '../../contexts/useToast';
 
-const tabs = [['operations', 'Attendance rules'], ['personnel', 'Personnel schedules'], ['biometrics', 'Face enrollments'], ['sms', 'Android SMS']];
+const tabs = [['operations', 'Attendance rules'], ['personnel', 'Personnel schedules'], ['biometrics', 'Face enrollments'], ['sms', 'SMS delivery'], ['gate-network', 'Gate network']];
 const defaultSms = {
   enabled: false, gateway_url: 'http://192.168.1.100:8080', username: '', password: '', school_contact: 'the school office', max_messages_per_30_minutes: 50,
   enrollment_notifications: true,
@@ -22,14 +25,24 @@ const defaultSms = {
   },
 };
 
+function SmsDelivery() {
+  const { state } = useLocation();
+  const [params, setParams] = useSearchParams();
+  return <OperationalControls view="sms" smsParams={params} setSmsParams={next => setParams(next, { state })} />;
+}
+
 export default function SystemSetup() {
   return auth.role() === 'records_officer'
-    ? <OperationalControls view="sms" />
+    ? <SmsDelivery />
     : <AdminSystemSetup />;
 }
 
 function AdminSystemSetup() {
-  const [active, setActive] = useState(() => window.location.hash === '#sms-delivery' ? 'sms' : 'operations');
+  const { pathname, hash, state } = useLocation();
+  const [params, setParams] = useSearchParams();
+  const requested = params.get('tab');
+  const active = requested === 'sms-settings' || tabs.some(([id]) => id === requested) ? requested
+    : ({ '#sms-delivery': 'sms', '#face-enrollments': 'biometrics' }[hash] || 'operations');
   const [settings, setSettings] = useState({ attendance: { absence_cutoff: '09:00', duplicate_cooldown_seconds: 5, auto_close_enabled: true }, sms: defaultSms });
   const [biometric, setBiometric] = useState(null);
   const { showSuccess, showError } = useToast();
@@ -45,9 +58,9 @@ function AdminSystemSetup() {
   const load = useCallback(() => {
     setRequest({ loading: true, error: '' });
     const paths = active === 'operations' ? ['/settings', '/calendar/exceptions', '/attendance/excused', '/persons']
-      : active === 'sms' ? ['/settings'] : active === 'biometrics' ? ['/biometrics/status'] : [];
+      : active === 'sms-settings' ? ['/settings'] : active === 'biometrics' ? ['/biometrics/status'] : [];
     return Promise.all(paths.map((path) => api.get(path))).then((rows) => {
-      if (active === 'operations' || active === 'sms') {
+      if (active === 'operations' || active === 'sms-settings') {
         const config = rows[0];
         setSettings({ ...config, sms: { ...defaultSms, ...config.sms, templates: { ...defaultSms.templates, ...(config.sms?.templates || {}) } } });
         if (active === 'operations') { setCalendarRows(rows[1]); setExcusedRows(rows[2]); setPeople(rows[3]); }
@@ -70,10 +83,19 @@ function AdminSystemSetup() {
 
   return <div className="page-stack">
     <PageHeading title="System setup" description="Manage attendance rules, schedules, facial enrollment, and SMS delivery." />
-    <nav className="setup-tabs" aria-label="Workspace sections">{tabs.map(([id, label]) => <button key={id} aria-pressed={active === id} className={active === id ? 'active' : ''} onClick={() => setActive(id)}>{label}</button>)}</nav>
+    <nav className="setup-tabs" aria-label="Workspace sections">{tabs.map(([id, label]) => <button key={id} aria-pressed={active === id || (id === 'sms' && active === 'sms-settings')} className={active === id || (id === 'sms' && active === 'sms-settings') ? 'active' : ''} onClick={() => {
+      if (id !== active) {
+        const source = state?.returnTo;
+        setParams({ tab: id }, { state: active === 'sms-settings' && source?.location?.pathname === pathname
+          ? source.state : state });
+      }
+    }}>{label}</button>)}</nav>
+    {active === 'sms-settings' && <div className="action-row">
+      <BackButton fallback="?tab=sms#sms-delivery" withinPage>Back to SMS delivery</BackButton>
+    </div>}
     <RequestFeedback {...request} label="system settings" onRetry={load} />
     {!request.loading && !request.error && <>
-    {active === 'biometrics' && biometric && <div className="notice notice-blue"><div><strong>LBPH runtime: {biometric.enabled ? 'enabled' : 'server-disabled'}.</strong> {biometric.model ? `Active model ${biometric.model.version}: ${biometric.model.person_count} enrolled person(s), ${biometric.model.sample_count} samples.` : 'No trained model yet. Enroll an authorized person from the gate station.'} {biometric.model_readiness?.available === false && <span> {biometric.model_readiness.message} </span>}</div></div>}
+    {active === 'biometrics' && biometric && <div className="notice notice-blue"><div><strong>Face recognition {biometric.enabled ? 'enabled' : 'disabled by server'}.</strong> {biometric.model_readiness?.message} {biometric.model && <span> Registered LBPH model {biometric.model.version}: {biometric.model.person_count} enrolled person(s), {biometric.model.sample_count} samples.</span>}</div></div>}
 
     {active === 'operations' && <div className="page-stack setup-operations">
       <section className="card-static setup-card">
@@ -190,10 +212,16 @@ function AdminSystemSetup() {
     </div>}
 
     {active === 'personnel' && <PersonnelScheduleManager />}
+    {active === 'gate-network' && <GateNetworkSettings />}
 
     {active === 'biometrics' && <><BiometricEnrollmentManager onModelChanged={load} /><OperationalControls view="biometrics" /></>}
 
     {active === 'sms' && <div className="page-stack">
+      <div className="action-row"><ReturnLink className="btn-secondary" to="?tab=sms-settings">Gateway settings</ReturnLink></div>
+      <SmsDelivery />
+    </div>}
+
+    {active === 'sms-settings' && <div className="page-stack">
       <section className="card-static">
         <h2>Enrollment SMS</h2>
         <p className="section-copy">A successful student face enrollment or re-enrollment queues a confirmation to the saved parent/guardian mobile number. Rejected face captures do not create a notice. Enabling the gateway holds older pending notices for review below.</p>
@@ -204,7 +232,6 @@ function AdminSystemSetup() {
       <section className="card-static"><div className="section-heading"><div><p className="eyebrow">Real local relay</p><h2>Android SMS Gateway</h2></div></div><ol className="numbered-list"><li>Install SMS Gateway for Android on a dedicated phone with a school-controlled SIM.</li><li>Place the phone and EduScan server on the same secured Wi-Fi; reserve the phone’s IP address.</li><li>In the app, enable Local Server mode and create a strong username/password.</li><li>Enter the local URL and credentials below. The backend posts to /message with HTTP Basic authentication.</li><li>Keep the phone charged, exempt the app from battery optimization, restrict the endpoint to the school LAN, and monitor failed messages.</li></ol><div className="form-grid two-columns"><label className="checkbox-field"><input type="checkbox" checked={settings.sms.enabled} onChange={(e) => patchArea('sms', 'enabled', e.target.checked)} /><span>Enable real Android gateway dispatch</span></label><label><span className="field-label">Gateway URL</span><input placeholder="e.g. http://192.168.1.100:8080" className="input-field" value={settings.sms.gateway_url} onChange={(e) => patchArea('sms', 'gateway_url', e.target.value)} /></label><label><span className="field-label">API username</span><input placeholder="Enter your username" className="input-field" value={settings.sms.username} onChange={(e) => patchArea('sms', 'username', e.target.value)} /></label><label><span className="field-label">API password {settings.sms.password_configured && '(leave blank to keep current)'}</span><input placeholder="Enter your password" className="input-field" type="password" value={settings.sms.password} onChange={(e) => patchArea('sms', 'password', e.target.value)} /></label><label><span className="field-label">School contact shown in SMS</span><input placeholder="e.g. school office contact number" className="input-field" value={settings.sms.school_contact} onChange={(e) => patchArea('sms', 'school_contact', e.target.value)} /></label><label><span className="field-label">Local rate limit (messages per 30 minutes)</span><input placeholder="Enter local rate limit (messages per 30 minutes)" className="input-field" type="number" min="1" max="500" value={settings.sms.max_messages_per_30_minutes} onChange={(e) => patchArea('sms', 'max_messages_per_30_minutes', Number(e.target.value))} /></label></div></section>
       <section className="card-static"><h2>Approved message templates</h2><div className="template-grid">{Object.entries(settings.sms.templates).map(([key, value]) => <label key={key}><span className="field-label">{key.replace('_', ' ')}</span><textarea placeholder={`Enter the ${key.replaceAll("_", " ")} message; use the tokens shown below`} className="text-area" value={value} onChange={(e) => setSettings((current) => ({ ...current, sms: { ...current.sms, templates: { ...current.sms.templates, [key]: e.target.value } } }))} /><span className="token-help">Use: {key === 'enrollment' ? '{name} {time} {date} {enrollment_action} {school_contact}' : '{name} {time} {date} {class_name} {class_start} {absence_cutoff} {school_contact}'}</span></label>)}</div><div className="modal-actions"><button className="btn-primary" onClick={saveSms}> Save gateway & templates</button></div></section>
       <section className="card-static"><h2>Connection test</h2><p className="section-copy">First check local reachability without sending. Then send one real SMS to verify the saved credentials, SIM, signal, and Android permissions. Attendance notices use a unique event key, so retrying a failed delivery does not create a second outbox message.</p><div className="action-row"><button className="btn-secondary" onClick={checkGateway}> Check local connection</button><input className="input-field" placeholder="+639XXXXXXXXX" value={testPhone} onChange={(e) => setTestPhone(e.target.value)} /><button className="btn-secondary" onClick={sendTest}> Send real test SMS</button></div>{gatewayCheck && <div className={`notice ${gatewayCheck.reachable ? 'notice-success' : 'notice-danger'}`}><div><strong>{gatewayCheck.reachable ? 'Phone reachable' : 'Phone unreachable'}.</strong> {gatewayCheck.message} Credentials configured: {gatewayCheck.username_configured && gatewayCheck.password_configured ? 'yes' : 'no'}.</div></div>}</section>
-      <OperationalControls view="sms" />
     </div>}
 
   </>}</div>;

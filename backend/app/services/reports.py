@@ -11,7 +11,7 @@ import uuid
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 from os import name as os_name
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from zipfile import ZIP_DEFLATED, ZipFile
 from xml.etree import ElementTree as ET
 
@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from ..config import EXPORT_DIR, settings
 from ..models import GeneratedReport, Person, User
 from ..storage_quota import REPORT_WORK_DIR, atomic_write_path, require_capacity, storage_lock
-from .attendance import active_people, rows_for_people
+from .attendance import active_people, rows_for_people_on_days
 from .grading import gradebook_summary
 from .academic_context import is_junior_high, is_senior_high
 from .grading_engine import round_value
@@ -37,6 +37,17 @@ from .settings_store import get_json
 REPORT_DIR = EXPORT_DIR / "registered"
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
+
+
+def registered_report_path(report: GeneratedReport) -> Path:
+    original = Path(report.file_path)
+    if original.is_file():
+        return original
+    # Registered exports keep their ID-based name when moved to a new data volume.
+    filename = PureWindowsPath(report.file_path).name
+    if Path(filename).stem == report.id:
+        return REPORT_DIR / filename
+    return original
 
 
 def _uses_custom_jhs_layout(full: dict, fixed_issues: list[dict]) -> bool:
@@ -62,9 +73,11 @@ def register_report(db: Session, source: Path, report_type: str, parameters: dic
         with storage_lock(EXPORT_DIR):
             require_capacity(EXPORT_DIR, "Report", settings.report_storage_mib, source.stat().st_size,
                              extra_roots=(REPORT_DIR,), skip_dirs=(REPORT_WORK_DIR,))
+            target.parent.mkdir(parents=True, exist_ok=True)
             with atomic_write_path(target) as temporary:
                 shutil.copy2(source, temporary)
-        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        with target.open("rb") as saved:
+            digest = hashlib.file_digest(saved, "sha256").hexdigest()
         record = GeneratedReport(
             id=report_id, report_type=report_type, filename=source.name, file_path=str(target), file_sha256=digest,
             parameters_json=json.dumps(parameters, default=str, sort_keys=True), status="Generated",
@@ -696,19 +709,14 @@ def attendance_range_rows(db: Session, starts_on: date, ends_on: date, role: str
                           person_id: int | None = None) -> list[dict]:
     if ends_on < starts_on or (ends_on - starts_on).days > 366:
         raise HTTPException(status_code=422, detail="Attendance report range must be between 1 and 367 days")
-    people = active_people(db, grade, section, students_only=bool(grade or section), include_departed=True)
-    if role:
-        people = [item for item in people if item.role == role]
+    people = active_people(db, grade, section, students_only=bool(grade or section), include_departed=True,
+                           person_scope=Person.role == role if role else None)
     if person_id:
-        people = [item for item in people if item.id == person_id]
-    result = []
-    current = starts_on
-    while current <= ends_on:
-        for row in rows_for_people(db, people, current):
-            row["attendance_date"] = current
-            result.append(row)
-        current += timedelta(days=1)
-    return result
+        # Apply this after identity deduplication so selecting a hidden duplicate does not restore it to the report.
+        people = [person for person in people if person.id == person_id]
+    days = [starts_on + timedelta(days=offset) for offset in range((ends_on - starts_on).days + 1)]
+    return [{**row, "attendance_date": day}
+            for day, rows in rows_for_people_on_days(db, people, days).items() for row in rows]
 
 
 def generate_attendance_range_xlsx(db: Session, starts_on: date, ends_on: date, role: str | None = None,
